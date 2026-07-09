@@ -511,6 +511,7 @@ async function renderDashboard() {
       </div>
     </div>`;
     document.getElementById('dashboardRefreshSelect').value = String(dashboardRefreshMs);
+    onDashboardRefreshIntervalChange(dashboardRefreshMs);
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
@@ -535,7 +536,7 @@ function dashboardActivityHtml(recentActivity) {
   `).join('') || '<div style="color:var(--fg-dim);font-size:13px;padding:12px 0">Chưa có hoạt động</div>';
 }
 
-let dashboardRefreshMs = 0;
+let dashboardRefreshMs = 5000;
 let dashboardRefreshTimer = null;
 
 function onDashboardRefreshIntervalChange(val) {
@@ -548,6 +549,9 @@ async function refreshDashboardData() {
   if (currentPage !== 'dashboard') { clearInterval(dashboardRefreshTimer); dashboardRefreshTimer = null; return; }
   try {
     const [dash, sStats, dStats] = await Promise.all([api('/dashboard'), api('/servers/stats'), api('/devices/stats')]);
+    // Re-check after the await — the user may have navigated away while these calls were
+    // in-flight, in which case the dashboard's DOM elements no longer exist.
+    if (currentPage !== 'dashboard') return;
     const sTotal = sStats.total, sOnline = sStats.online, sOffline = sStats.offline;
     const dTotal = dStats.total, dOffline = dStats.offline;
     document.getElementById('dashStatServers').textContent = sTotal;
@@ -1378,11 +1382,12 @@ async function renderAlerts(search = '') {
       searchTimeout = setTimeout(() => { alertPagination.page = 1; loadAlertList(); }, 300);
     });
     document.getElementById('alertsRefreshSelect').value = String(alertsRefreshMs);
+    onAlertsRefreshIntervalChange(alertsRefreshMs);
     loadAlertList(search);
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
-let alertsRefreshMs = 0;
+let alertsRefreshMs = 5000;
 let alertsRefreshTimer = null;
 
 function onAlertsRefreshIntervalChange(val) {
@@ -1395,12 +1400,14 @@ async function refreshAlertsData() {
   if (currentPage !== 'alerts') { clearInterval(alertsRefreshTimer); alertsRefreshTimer = null; return; }
   try {
     const stats = await api('/alerts/stats');
+    // Re-check after the await — the user may have navigated away while it was in-flight.
+    if (currentPage !== 'alerts') return;
     document.getElementById('alertStatOpen').textContent = stats.open;
     document.getElementById('alertStatAck').textContent = stats.acknowledged;
     document.getElementById('alertStatResolved').textContent = stats.resolved;
     document.getElementById('alertStatTotal').textContent = stats.total;
   } catch { /* transient — next tick retries */ }
-  loadAlertList();
+  if (currentPage === 'alerts') loadAlertList();
   updateAlertBadge();
 }
 
@@ -1428,11 +1435,17 @@ async function loadAlertList(search) {
   const params = new URLSearchParams({ search: s, severity: alertFilter.severity, category: alertFilter.category, status: alertFilter.status });
   try {
     alertRows = await api(`/alerts?${params}`);
+    // Re-check after the await — auto-refresh may fire this while the user has already navigated
+    // away, in which case alertListBody no longer exists.
+    if (!document.getElementById('alertListBody')) return;
     // A filter/search change or periodic auto-refresh can hide previously-selected alerts from
     // view — clearing the selection avoids silently bulk-acting on rows the user can no longer see.
     selectedAlertIds.clear();
     renderAlertRows();
-  } catch (e) { document.getElementById('alertListBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) {
+    const el = document.getElementById('alertListBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
 }
 
 function renderAlertRows() {
@@ -1809,6 +1822,7 @@ async function renderVcenter(search = '') {
     </div>
     <div id="vcenterTabBody"></div>`;
     document.getElementById('vcenterRefreshSelect').value = String(vcenterRefreshMs);
+    onVcenterRefreshIntervalChange(vcenterRefreshMs);
     // Chưa có cụm nào bật -> mở thẳng tab Cụm vCenter thay vì 1 bảng VM trống khó hiểu.
     if (!stats.configured) vcenterTab = 'clusters';
     renderVcenterTabBody(search);
@@ -1826,7 +1840,7 @@ function renderVcenterTabBody(search) {
   else renderVcenterVmsTab(search);
 }
 
-let vcenterRefreshMs = 0;
+let vcenterRefreshMs = 5000;
 let vcenterRefreshTimer = null;
 
 function onVcenterRefreshIntervalChange(val) {
@@ -1842,12 +1856,14 @@ async function refreshVcenterData() {
   try {
     await api('/vcenter/sync', 'POST');
     const stats = await api('/vcenter/stats');
+    // Re-check after the awaits — the user may have navigated away while these calls were in-flight.
+    if (currentPage !== 'vcenter') return;
     document.getElementById('vcStatTotal').textContent = stats.total;
     document.getElementById('vcStatOn').textContent = stats.on;
     document.getElementById('vcStatOff').textContent = stats.off;
     document.getElementById('vcLastSync').textContent = stats.lastSync ? formatTime(stats.lastSync) : 'chưa đồng bộ';
   } catch { /* transient — next tick retries */ }
-  if (vcenterTab === 'vms') loadVcenterTable();
+  if (currentPage === 'vcenter' && vcenterTab === 'vms') loadVcenterTable();
 }
 
 function applyVcenterFilter() {
@@ -1898,6 +1914,9 @@ async function loadVcenterTable(search) {
   const params = new URLSearchParams({ search: s, power_state: vcenterFilter.power_state, cluster_id: vcenterFilter.cluster_id });
   try {
     vcenterRows = await api(`/vcenter/vms?${params}`);
+    // Re-check after the await — auto-refresh may fire this while the user has already navigated
+    // away, in which case vcenterTableBody no longer exists.
+    if (!document.getElementById('vcenterTableBody')) return;
     // Xây danh sách cụm để lọc từ chính dữ liệu VM (không gọi /clusters riêng — tránh nhấp nháy khi
     // đang lọc, và luôn khớp đúng những cụm thực sự có VM).
     const seen = new Map();
@@ -1910,7 +1929,10 @@ async function loadVcenterTable(search) {
       }
     }
     renderVcenterRows();
-  } catch (e) { document.getElementById('vcenterTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) {
+    const el = document.getElementById('vcenterTableBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
 }
 
 function toggleVcenterSort(key) {
@@ -2625,7 +2647,7 @@ async function syncVcenter() {
 let securityTab = 'events';
 const securityFilter = { vmId: '', eventType: '', foreignOnly: false };
 const securityState = { vms: [] };
-let securityRefreshMs = 0;
+let securityRefreshMs = 5000;
 let securityRefreshTimer = null;
 
 async function renderSecurity(search = '') {
@@ -2690,6 +2712,7 @@ async function renderSecurity(search = '') {
     </div>
     <div id="securityTabBody"></div>`;
     document.getElementById('securityRefreshSelect').value = String(securityRefreshMs);
+    onSecurityRefreshIntervalChange(securityRefreshMs);
     renderSecurityTabBody(search);
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
@@ -2707,6 +2730,8 @@ async function refreshSecurityData() {
   if (currentPage !== 'security') { clearInterval(securityRefreshTimer); securityRefreshTimer = null; return; }
   try {
     const [stats, outboundStats] = await Promise.all([api('/security/stats'), api('/security/outbound/stats')]);
+    // Re-check after the await — the user may have navigated away while these calls were in-flight.
+    if (currentPage !== 'security') return;
     document.getElementById('secStatTotal').textContent = stats.total;
     document.getElementById('secStatAccepted').textContent = stats.accepted;
     document.getElementById('secStatFailed').textContent = stats.failed;
@@ -2714,6 +2739,7 @@ async function refreshSecurityData() {
     document.getElementById('secStatMonitored').textContent = stats.monitored;
     document.getElementById('secStatOutbound').innerHTML = `${outboundStats.foreignActive}<span style="font-size:13px;color:var(--fg-dim);font-weight:500"> / ${outboundStats.foreign} lịch sử</span>`;
   } catch { /* transient — next tick retries */ }
+  if (currentPage !== 'security') return;
   if (securityTab === 'events') loadSecurityEvents();
   else if (securityTab === 'outbound') loadOutboundConnections();
 }
@@ -2784,8 +2810,14 @@ async function loadSecurityEvents(search) {
   });
   try {
     securityEventRows = await api(`/security/events?${params}`);
+    // Re-check after the await — auto-refresh may fire this while the user has already navigated
+    // away, in which case securityEventsBody no longer exists.
+    if (!document.getElementById('securityEventsBody')) return;
     renderSecurityEventRows();
-  } catch (e) { document.getElementById('securityEventsBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) {
+    const el = document.getElementById('securityEventsBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
 }
 
 function toggleSecurityEventSort(key) {
@@ -2869,8 +2901,14 @@ async function loadOutboundConnections(search) {
   const params = new URLSearchParams({ search: s, vmId: outboundFilter.vmId, foreignOnly: outboundFilter.foreignOnly ? 'true' : '' });
   try {
     outboundRows = await api(`/security/outbound?${params}`);
+    // Re-check after the await — auto-refresh may fire this while the user has already navigated
+    // away, in which case outboundBody no longer exists.
+    if (!document.getElementById('outboundBody')) return;
     renderOutboundRows();
-  } catch (e) { document.getElementById('outboundBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) {
+    const el = document.getElementById('outboundBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
 }
 
 function toggleOutboundSort(key) {
@@ -3573,6 +3611,7 @@ async function renderPfsense() {
     </div>
     <div id="pfsenseTabBody"></div>`;
     document.getElementById('pfsenseRefreshSelect').value = String(pfsenseRefreshMs);
+    onPfsenseRefreshIntervalChange(pfsenseRefreshMs);
     applyPermissionVisibility();
     renderPfsenseTabBody();
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
@@ -3589,7 +3628,7 @@ function setPfsenseTab(tab) {
   renderPfsenseTabBody();
 }
 
-let pfsenseRefreshMs = 0;
+let pfsenseRefreshMs = 5000;
 let pfsenseRefreshTimer = null;
 
 function onPfsenseRefreshIntervalChange(val) {
@@ -3675,6 +3714,9 @@ async function loadPfsenseStatusData() {
   if (!document.getElementById('pfsenseInterfacesTableBody')) return;
   try {
     const { system, interfaces } = await api(`/pfsense/firewalls/${pfsenseFirewallId}/status`);
+    // Re-check after the await — the user may have navigated/switched tabs away while it was
+    // in-flight, in which case these elements no longer exist.
+    if (!document.getElementById('pfsenseInterfacesTableBody')) return;
     pfsenseInterfacesCache = interfaces;
     document.getElementById('pfStatCpu').textContent = `${system.cpu_usage ?? '—'}%`;
     document.getElementById('pfStatRam').textContent = `${system.mem_usage ?? '—'}%`;
@@ -3693,7 +3735,8 @@ async function loadPfsenseStatusData() {
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(i.in_bytes)} / ↑${fmtBytes(i.out_bytes)}</td>
           </tr>`).join('');
   } catch (e) {
-    document.getElementById('pfsenseInterfacesTableBody').innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div></td></tr>`;
+    const el = document.getElementById('pfsenseInterfacesTableBody');
+    if (el) el.innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div></td></tr>`;
   }
 }
 
@@ -3917,6 +3960,8 @@ async function loadPfsenseVpnData() {
       api(`/pfsense/firewalls/${pfsenseFirewallId}/vpn`),
       api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/servers`).catch(() => [])
     ]);
+    // Re-check after the awaits — the user may have navigated/switched tabs away while in-flight.
+    if (!document.getElementById('pfsenseVpnConnsTableBody')) return;
     const sortedConns = [...conns].sort((a, b) => ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0)));
     document.getElementById('pfVpnConnsTitle').textContent = `Kết nối VPN đang hoạt động (${conns.length}) — sắp xếp theo tổng băng thông đã dùng`;
     document.getElementById('pfsenseVpnConnsTableBody').innerHTML = sortedConns.length ? sortedConns.map(c => `
@@ -3942,7 +3987,8 @@ async function loadPfsenseVpnData() {
           </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có OpenVPN server nào</td></tr>`;
     applyPermissionVisibility();
   } catch (e) {
-    document.getElementById('pfsenseVpnConnsTableBody').innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
+    const el = document.getElementById('pfsenseVpnConnsTableBody');
+    if (el) el.innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
   }
 }
 
