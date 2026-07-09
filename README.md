@@ -7,15 +7,16 @@ Nền tảng giám sát & quản trị hạ tầng CNTT tập trung: máy chủ 
 - **Máy chủ & thiết bị mạng** — theo dõi CPU/RAM/Disk, trạng thái online/offline, ping thủ công, phân trang & tìm kiếm.
 - **Sức khỏe phần cứng qua IPMI** — trạng thái từng linh kiện (DIMM/CPU/ổ đĩa/quạt/nguồn) và SEL log lỗi qua `ipmitool`.
 - **Giám sát SNMP** — CPU, RAM, uptime, lưu lượng interface cho máy chủ và thiết bị mạng.
-- **vCenter / VM** — đồng bộ inventory, tạo/clone VM, bật/tắt/khởi động lại, console WebMKS, xóa.
+- **vCenter / VM đa cụm** — kết nối nhiều hệ thống vCenter cùng lúc (trang **Cụm vCenter**), đồng bộ inventory theo từng cụm, tạo/clone VM, bật/tắt/khởi động lại, console WebMKS, xóa.
 - **Giám sát Uptime** — kiểm tra định kỳ website/API theo khoảng thời gian tùy chọn, biểu đồ thời gian phản hồi, cảnh báo hết hạn SSL.
 - **Cảnh báo (Alerts)** — ngưỡng cấu hình theo CPU/RAM/Disk, xử lý đơn lẻ hoặc hàng loạt (ghi nhận/xử lý xong theo checkbox).
 - **Bảo mật** — nhật ký đăng nhập SSH thật, phát hiện đăng nhập từ nước ngoài, kết nối outbound đáng ngờ, quản lý fail2ban (kiểm tra/bật/tắt) trên từng VM.
+- **Tài khoản kết nối SSH** — quản lý tập trung nhiều tài khoản (private key hoặc mật khẩu), gán riêng cho từng máy chủ/VM thay vì 1 key dùng chung toàn hệ thống.
 - **Nhật ký hoạt động** — ai làm gì, trên đối tượng nào, lúc nào — có bộ lọc, tìm kiếm, phân trang.
 - **RBAC chi tiết** — 3 vai trò hệ thống (Admin/Operator/Viewer) + vai trò tùy biến, phân quyền theo từng hành động cụ thể.
-- **Đăng nhập** — tài khoản cục bộ, SSO qua SAML, bind-auth qua LDAP/Active Directory.
-- **Import Excel bằng AI** — nhận diện cấu trúc file và tự ánh xạ cột vào schema máy chủ/thiết bị (dùng Claude, có fallback heuristic).
+- **Đăng nhập** — tài khoản cục bộ, SSO qua SAML, bind-auth qua LDAP/Active Directory (cấu hình trong trang **Cài đặt**).
 - **Trợ lý AI (Chatbot)** — hỏi trạng thái máy chủ/VM/cảnh báo/uptime bằng ngôn ngữ tự nhiên, hoặc yêu cầu hành động (vd: "bật fail2ban trên VM web-01"); mọi hành động thay đổi hạ tầng đều có bước xác nhận trước khi thực thi.
+- **Cài đặt hệ thống** — Anthropic API Key (chatbot) và cấu hình SSO (SAML/LDAP) quản lý ngay trong ứng dụng, lưu ở MySQL, có hiệu lực ngay không cần khởi động lại server.
 - Toàn bộ mốc thời gian hiển thị theo **GMT+7 (Asia/Ho_Chi_Minh)**.
 
 ## Kiến trúc & công nghệ
@@ -26,7 +27,7 @@ Nền tảng giám sát & quản trị hạ tầng CNTT tập trung: máy chủ 
 | Cơ sở dữ liệu | MySQL (qua `mysql2/promise`) |
 | Frontend | HTML/CSS/JS thuần (không framework, không build step) — SPA điều hướng qua `navigate()` |
 | Xác thực | Session cookie (MySQL session store) + bcrypt, SAML, LDAP |
-| AI | Anthropic Claude (`@anthropic-ai/sdk`) — phân tích Excel & chatbot tool-calling |
+| AI | Anthropic Claude (`@anthropic-ai/sdk`) — chatbot tool-calling |
 | Thu thập dữ liệu nền | Các collector chạy định kỳ độc lập (xem bên dưới) |
 
 Ứng dụng không có bước build — sửa file trong `public/` là thấy ngay khi tải lại trang; chỉ các thay đổi ở backend (`server.js`, `routes/*.js`, các collector) mới cần khởi động lại tiến trình Node.
@@ -62,15 +63,12 @@ npm install
 cp .env.example .env
 ```
 
-Điền các giá trị thật vào `.env` (xem giải thích từng biến ngay trong file, các mục để trống nếu không dùng):
+`.env` giờ chỉ cần thông tin để Node chạy và kết nối MySQL — mọi cấu hình khác (vCenter, tài khoản kết nối SSH, Anthropic API Key, SAML/LDAP) quản lý trong ứng dụng sau khi đăng nhập, không cần đặt trước:
 
+- `PORT` — cổng chạy server, mặc định 3000.
 - `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` — bắt buộc.
 - `SESSION_SECRET` — bắt buộc, tạo chuỗi ngẫu nhiên (vd `openssl rand -hex 32`).
-- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — tài khoản admin đầu tiên, chỉ dùng 1 lần lúc bảng `users` còn rỗng.
-- `ANTHROPIC_API_KEY` — tùy chọn, cần cho phân tích Excel bằng AI và chatbot; không có key thì phân tích Excel dùng heuristic, chatbot trả lỗi rõ ràng khi gọi.
-- `SSH_PRIVATE_KEY_PATH` / `SSH_PASSPHRASE` — tùy chọn, cần nếu muốn thu thập số liệu thật qua SSH và dùng tính năng fail2ban/bảo mật SSH.
-- `VCENTER_HOST` / `VCENTER_USER` / `VCENTER_PASSWORD` — tùy chọn, cần nếu dùng tính năng vCenter/VM.
-- `SAML_*` / `LDAP_*` — tùy chọn, cấu hình SSO nếu cần.
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — tài khoản admin đầu tiên, chỉ dùng 1 lần lúc bảng `users` còn rỗng; đổi mật khẩu ngay sau khi đăng nhập lần đầu.
 
 Khởi động:
 
@@ -79,21 +77,24 @@ npm start        # production
 npm run dev       # tự khởi động lại khi sửa code (nodemon)
 ```
 
-Ứng dụng chạy tại `http://localhost:3000` (đổi qua biến `PORT`). Lần khởi động đầu tiên, schema MySQL và tài khoản admin sẽ tự động được tạo.
+Ứng dụng chạy tại `http://localhost:3000` (đổi qua biến `PORT`). Lần khởi động đầu tiên, schema MySQL, tài khoản admin, và các bảng cấu hình mặc định sẽ tự động được tạo (có thể tạo schema thủ công trước bằng `schema.sql` ở gốc repo nếu muốn, không bắt buộc). Sau khi đăng nhập, vào các trang **Cụm vCenter**, **Tài khoản kết nối**, **Cài đặt** để cấu hình vCenter/SSH/AI key/SSO.
 
 ## Cấu trúc thư mục
 
 ```
 netadmin-pro/
-├── server.js                 # Điểm khởi động, mount route, khởi động các collector
+├── server.js                  # Điểm khởi động, mount route, khởi động các collector
 ├── database.js                # Kết nối MySQL, schema, migration, seed dữ liệu mặc định
+├── schema.sql                 # Dump cấu trúc DB (không dữ liệu) — tham khảo/khởi tạo thủ công, tùy chọn
 ├── auth.js                    # Đăng nhập, session, requirePermission, logActivity
+├── settings.js                # Đọc/cache cài đặt hệ thống (AI key, SAML/LDAP) từ bảng app_settings
 ├── permissions-catalog.js     # Danh mục quyền dùng chung cho RBAC
 ├── chatbot-tools.js           # Danh mục tool cho chatbot AI
 ├── chatbot-engine.js          # Vòng lặp tool-calling của chatbot (có thể test độc lập)
 ├── *-collector.js             # Các tiến trình thu thập dữ liệu nền
 ├── fail2ban-manager.js        # Nghiệp vụ kiểm tra/bật/tắt fail2ban qua SSH
-├── vcenter-client.js / vcenter-actions.js   # Tích hợp vCenter (SDK + hành động VM)
+├── ssh-credentials.js         # Giải quyết tài khoản kết nối SSH (private key/mật khẩu) cho collector
+├── vcenter-client.js / vcenter-registry.js / vcenter-actions.js   # Tích hợp vCenter đa cụm
 ├── routes/                    # REST API, mỗi file 1 nhóm tài nguyên
 └── public/                    # Frontend tĩnh (không build step)
     ├── index.html
@@ -107,8 +108,8 @@ Quyền được định nghĩa tập trung tại `permissions-catalog.js`, nhó
 
 ## Lưu ý bảo mật
 
-- `.env` không được commit — xem `.env.example` để biết đầy đủ biến cần cấu hình.
-- Mọi mật khẩu/khóa kết nối hạ tầng thật (MySQL, SSH, vCenter, LDAP) chỉ nằm trong `.env` trên môi trường chạy thực tế, không hardcode trong mã nguồn.
+- `.env` không được commit — xem `.env.example` để biết đầy đủ biến cần cấu hình. `.env` chỉ còn `MYSQL_*`/`PORT`/`SESSION_SECRET`/`ADMIN_EMAIL`/`ADMIN_PASSWORD`.
+- Mật khẩu/khóa kết nối hạ tầng thật (vCenter, SSH, AI key, LDAP) quản lý trong ứng dụng, lưu trong MySQL (bảng `vcenter_clusters`, `ssh_credentials`, `app_settings`) — không hardcode trong mã nguồn, không nằm trong `.env`/git. `schema.sql` chỉ chứa cấu trúc bảng (`mysqldump --no-data`), không có dữ liệu thật.
 - Session ký bằng `SESSION_SECRET` — đổi giá trị này sẽ đăng xuất toàn bộ người dùng đang đăng nhập.
 - Chatbot AI chỉ thực thi hành động thay đổi hạ tầng (fail2ban, cảnh báo...) sau bước xác nhận rõ ràng trên giao diện, và luôn kiểm tra quyền của người dùng đang chat trước khi chạy.
 

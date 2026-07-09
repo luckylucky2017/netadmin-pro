@@ -437,7 +437,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -3458,6 +3458,68 @@ async function deleteCredentialEntry(id, name, usageCount) {
     toast('Đã xóa tài khoản', 'success');
     renderCredentials();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── SETTINGS (Cài đặt hệ thống — AI key, SSO, cần quyền settings.manage) ──────
+async function renderSettings() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    const s = await api('/settings');
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Cài đặt</div><div class="page-subtitle">Cấu hình AI key và đăng nhập SSO — lưu trong cơ sở dữ liệu, có hiệu lực ngay không cần khởi động lại server</div></div>
+    </div>
+    <form id="settingsForm" onsubmit="saveSettings(event)" style="max-width:700px">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Trợ lý AI (Chatbot)</div>
+        <div class="form-grid">
+          <div class="form-group full"><label>Anthropic API Key ${s.has_anthropic_api_key ? '(để trống nếu giữ nguyên)' : ''}</label>
+            <input type="password" name="anthropic_api_key" placeholder="${s.has_anthropic_api_key ? '••••••••' : 'sk-ant-...'}" autocomplete="new-password"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">SAML SSO</div>
+        <div class="form-grid">
+          <div class="form-group full"><label>IdP Entry Point (URL)</label><input type="text" name="saml_idp_entry_point" value="${s.saml_idp_entry_point || ''}" placeholder="https://idp.example.com/sso"></div>
+          <div class="form-group full"><label>IdP Certificate ${s.has_saml_cert ? '(để trống nếu giữ nguyên)' : ''}</label>
+            <textarea name="saml_idp_cert" rows="5" style="font-family:'Fira Code',monospace;font-size:12px" placeholder="${s.has_saml_cert ? '(đã có chứng chỉ — để trống để giữ nguyên)' : '-----BEGIN CERTIFICATE-----...'}"></textarea></div>
+          <div class="form-group"><label>SP Entity ID</label><input type="text" name="saml_sp_entity_id" value="${s.saml_sp_entity_id || 'netadmin-pro'}"></div>
+          <div class="form-group"><label>SP Callback URL</label><input type="text" name="saml_sp_callback_url" value="${s.saml_sp_callback_url || ''}" placeholder="https://your-domain/api/auth/saml/callback"></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">LDAP / Active Directory</div>
+        <div class="form-grid">
+          <div class="form-group full"><label>LDAP URL</label><input type="text" name="ldap_url" value="${s.ldap_url || ''}" placeholder="ldap://dc.example.local"></div>
+          <div class="form-group"><label>Bind DN (tài khoản dịch vụ)</label><input type="text" name="ldap_bind_dn" value="${s.ldap_bind_dn || ''}" placeholder="cn=svc,dc=example,dc=local"></div>
+          <div class="form-group"><label>Bind Password ${s.has_ldap_bind_password ? '(để trống nếu giữ nguyên)' : ''}</label>
+            <input type="password" name="ldap_bind_password" placeholder="${s.has_ldap_bind_password ? '••••••••' : ''}" autocomplete="new-password"></div>
+          <div class="form-group full"><label>Base DN</label><input type="text" name="ldap_base_dn" value="${s.ldap_base_dn || ''}" placeholder="dc=example,dc=local"></div>
+          <div class="form-group full"><label>User Filter</label><input type="text" name="ldap_user_filter" value="${s.ldap_user_filter || '(sAMAccountName={{username}})'}"></div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Lưu cài đặt</button>
+      </div>
+    </form>`;
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  const fd = new FormData(e.target);
+  const payload = Object.fromEntries(fd);
+  try {
+    await api('/settings', 'PUT', payload);
+    toast('Đã lưu cài đặt', 'success');
+    renderSettings();
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
 }
 
 // ─── UPTIME MONITORS (Giám sát Uptime) ─────────────────────────────────────────

@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const ldap = require('ldapjs');
 const { SAML } = require('@node-saml/node-saml');
 const db = require('./database');
+const { getSettings } = require('./settings');
 const { PERMISSION_KEYS } = require('./permissions-catalog');
 
 function hashPassword(plain) {
@@ -108,17 +109,18 @@ async function wouldOrphanPermission(permission, { excludeUserId, excludeRoleId 
 // Two-bind pattern: first bind with a service account to search the directory for the user's DN,
 // then bind AGAIN using that DN + the password the user actually typed — that second bind is the
 // real authentication check (a directory search alone proves nothing about the password).
-function ldapAuthenticate(username, password) {
+async function ldapAuthenticate(username, password) {
+  const settings = await getSettings();
   return new Promise((resolve, reject) => {
-    if (!process.env.LDAP_URL) return reject(new Error('LDAP chưa được cấu hình'));
-    const client = ldap.createClient({ url: process.env.LDAP_URL, timeout: 8000, connectTimeout: 8000 });
+    if (!settings.ldap_url) return reject(new Error('LDAP chưa được cấu hình'));
+    const client = ldap.createClient({ url: settings.ldap_url, timeout: 8000, connectTimeout: 8000 });
     client.on('error', (err) => reject(new Error(`Không kết nối được LDAP: ${err.message}`)));
 
-    client.bind(process.env.LDAP_BIND_DN, process.env.LDAP_BIND_PASSWORD, (bindErr) => {
+    client.bind(settings.ldap_bind_dn, settings.ldap_bind_password, (bindErr) => {
       if (bindErr) { client.unbind(); return reject(new Error(`LDAP service account bind thất bại: ${bindErr.message}`)); }
 
-      const filter = (process.env.LDAP_USER_FILTER || '(sAMAccountName={{username}})').replace('{{username}}', ldap.filters.escape(username));
-      client.search(process.env.LDAP_BASE_DN, { filter, scope: 'sub', attributes: ['dn', 'mail', 'cn', 'displayName'] }, (searchErr, res) => {
+      const filter = (settings.ldap_user_filter || '(sAMAccountName={{username}})').replace('{{username}}', ldap.filters.escape(username));
+      client.search(settings.ldap_base_dn, { filter, scope: 'sub', attributes: ['dn', 'mail', 'cn', 'displayName'] }, (searchErr, res) => {
         if (searchErr) { client.unbind(); return reject(new Error(`LDAP search thất bại: ${searchErr.message}`)); }
         let entry = null;
         res.on('searchEntry', (e) => { entry = e.pojo || e; });
@@ -128,7 +130,7 @@ function ldapAuthenticate(username, password) {
           const dn = entry.objectName || entry.dn;
           const attrs = Object.fromEntries((entry.attributes || []).map(a => [a.type, a.values?.[0]]));
 
-          const userClient = ldap.createClient({ url: process.env.LDAP_URL, timeout: 8000, connectTimeout: 8000 });
+          const userClient = ldap.createClient({ url: settings.ldap_url, timeout: 8000, connectTimeout: 8000 });
           userClient.on('error', (err) => { client.unbind(); reject(new Error(`Không kết nối được LDAP: ${err.message}`)); });
           userClient.bind(dn, password, (authErr) => {
             client.unbind();
@@ -146,20 +148,19 @@ function ldapAuthenticate(username, password) {
   });
 }
 
-// Lazily constructed — SAML config is optional, and the SAML() constructor validates its args
-// eagerly, so building it at require-time would crash the whole app on an install with no SSO set up.
-let samlClient = null;
-function getSamlClient() {
-  if (samlClient) return samlClient;
-  if (!process.env.SAML_IDP_ENTRY_POINT || !process.env.SAML_IDP_CERT) return null;
-  samlClient = new SAML({
-    entryPoint: process.env.SAML_IDP_ENTRY_POINT,
-    issuer: process.env.SAML_SP_ENTITY_ID || 'netadmin-pro',
-    callbackUrl: process.env.SAML_SP_CALLBACK_URL,
-    idpCert: process.env.SAML_IDP_CERT,
+// Built fresh from app_settings on every call (cheap — no network call, just object construction)
+// rather than cached like before, so an admin editing SAML settings in the UI takes effect on the
+// very next login attempt instead of needing a server restart.
+async function getSamlClient() {
+  const settings = await getSettings();
+  if (!settings.saml_idp_entry_point || !settings.saml_idp_cert) return null;
+  return new SAML({
+    entryPoint: settings.saml_idp_entry_point,
+    issuer: settings.saml_sp_entity_id || 'netadmin-pro',
+    callbackUrl: settings.saml_sp_callback_url,
+    idpCert: settings.saml_idp_cert,
     wantAssertionsSigned: true,
   });
-  return samlClient;
 }
 
 // Finds an existing SSO-linked user or auto-provisions one — first-time SSO logins land as

@@ -27,8 +27,8 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ user: sanitizeUser(req.user) });
 });
 
-router.get('/saml/login', (req, res) => {
-  const saml = getSamlClient();
+router.get('/saml/login', async (req, res) => {
+  const saml = await getSamlClient();
   if (!saml) return res.status(503).json({ error: 'SAML chưa được cấu hình trên server này' });
   saml.getAuthorizeUrlAsync('', req.headers.host, {})
     .then(url => res.redirect(url))
@@ -36,7 +36,7 @@ router.get('/saml/login', (req, res) => {
 });
 
 router.post('/saml/callback', express.urlencoded({ extended: false }), async (req, res) => {
-  const saml = getSamlClient();
+  const saml = await getSamlClient();
   if (!saml) return res.status(503).send('SAML chưa được cấu hình trên server này');
   try {
     const { profile } = await saml.validatePostResponseAsync(req.body);

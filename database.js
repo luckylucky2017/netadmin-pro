@@ -224,6 +224,30 @@ const SCHEMA_SQL = `
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Singleton row (id always 1) holding app-level settings that used to live only in .env —
+  -- Anthropic API key + SAML/LDAP SSO config. Plain columns rather than a generic key-value table
+  -- since the settings list is small and fixed, same reasoning as vcenter_clusters/ssh_credentials
+  -- using dedicated columns instead of a JSON blob. Secrets stored plaintext, same treatment as
+  -- ssh_credentials.password — never returned to the client (see routes/settings.js).
+  -- No column-level DEFAULT on the TEXT fields — MySQL doesn't allow literal defaults on
+  -- BLOB/TEXT/GEOMETRY/JSON columns. Not a problem: the one-time seed below always inserts every
+  -- column explicitly (falling back to 'netadmin-pro'/the default LDAP filter in JS), and
+  -- routes/settings.js's PUT always writes explicit values too.
+  CREATE TABLE IF NOT EXISTS app_settings (
+    id INT PRIMARY KEY DEFAULT 1,
+    anthropic_api_key TEXT,
+    saml_idp_entry_point TEXT,
+    saml_idp_cert TEXT,
+    saml_sp_entity_id TEXT,
+    saml_sp_callback_url TEXT,
+    ldap_url TEXT,
+    ldap_bind_dn TEXT,
+    ldap_bind_password TEXT,
+    ldap_base_dn TEXT,
+    ldap_user_filter TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   -- One row per VM/server being SSH-monitored: remembers how many lines of the guest's auth log
   -- have already been parsed, so each collection cycle only reads new lines (never the full log).
   CREATE TABLE IF NOT EXISTS ssh_log_cursor (
@@ -562,6 +586,25 @@ async function seedIfEmpty() {
     await prepare("UPDATE servers SET ssh_credential_id = ? WHERE ssh_user = 'dev' AND ssh_credential_id IS NULL").run(result.lastInsertRowid);
     await prepare("UPDATE vcenter_vms SET ssh_credential_id = ? WHERE ssh_user = 'dev' AND ssh_credential_id IS NULL").run(result.lastInsertRowid);
     console.log(`[ssh] Đã tạo tài khoản kết nối "dev" (id=${result.lastInsertRowid})${keyContent ? '' : ' — KHÔNG đọc được private key tại ' + keyPath + ', cần dán lại nội dung key trong trang Tài khoản kết nối'} và gán lại các server/VM đã cấu hình ssh_user=dev trước đó.`);
+  }
+
+  // Same one-time idea again for the last of .env's runtime settings: AI key + SAML/LDAP SSO used
+  // to live only in .env, read fresh on every call. Now they live in app_settings (editable from
+  // the UI without a restart) — seed the singleton row from whatever .env still has set, so an
+  // in-progress SSO setup isn't silently dropped by this migration.
+  const settingsCount = await prepare('SELECT COUNT(*) as cnt FROM app_settings').get();
+  if (settingsCount.cnt === 0) {
+    await prepare(`
+      INSERT INTO app_settings (id, anthropic_api_key, saml_idp_entry_point, saml_idp_cert, saml_sp_entity_id, saml_sp_callback_url, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_base_dn, ldap_user_filter)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      process.env.ANTHROPIC_API_KEY || null,
+      process.env.SAML_IDP_ENTRY_POINT || null, process.env.SAML_IDP_CERT || null,
+      process.env.SAML_SP_ENTITY_ID || 'netadmin-pro', process.env.SAML_SP_CALLBACK_URL || null,
+      process.env.LDAP_URL || null, process.env.LDAP_BIND_DN || null, process.env.LDAP_BIND_PASSWORD || null,
+      process.env.LDAP_BASE_DN || null, process.env.LDAP_USER_FILTER || '(sAMAccountName={{username}})'
+    );
+    console.log('[settings] Đã tạo cài đặt hệ thống (AI key/SAML/LDAP) từ .env hiện có — sửa tiếp trong trang Cài đặt, không cần .env nữa.');
   }
 
   // Seed the 3 immutable system roles (Admin/Operator/Viewer) + their permission sets — must run

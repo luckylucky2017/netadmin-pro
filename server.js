@@ -22,6 +22,7 @@ const path = require('path');
 const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
 const db = require('./database');
+const { getSettings } = require('./settings');
 const { requireAuth, requirePermission } = require('./auth');
 
 const app = express();
@@ -68,6 +69,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/monitors', requireAuth, require('./routes/monitors'));
   app.use('/api/chat', requireAuth, require('./routes/chat'));
   app.use('/api/ssh-credentials', requireAuth, require('./routes/ssh-credentials'));
+  app.use('/api/settings', requireAuth, require('./routes/settings'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([
@@ -108,9 +110,10 @@ if (!process.env.SESSION_SECRET) {
 
   app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
+  const settings = await getSettings();
   app.listen(PORT, () => {
     console.log(`NetAdmin Pro running at http://localhost:${PORT}`);
-    console.log(`Phân tích Excel: ${process.env.ANTHROPIC_API_KEY ? 'Claude AI (đã có API key)' : 'Heuristic (chưa cấu hình ANTHROPIC_API_KEY)'}`);
+    console.log(`Chatbot AI: ${settings.anthropic_api_key ? 'đã cấu hình Anthropic API Key' : 'chưa cấu hình — vào trang Cài đặt để bật'}`);
     console.log('Metrics: SSH collector (server có ssh_user) + simulator (server chưa cấu hình SSH) + alert rule engine đang chạy');
   });
 
