@@ -67,6 +67,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/roles', requireAuth, require('./routes/roles'));
   app.use('/api/monitors', requireAuth, require('./routes/monitors'));
   app.use('/api/chat', requireAuth, require('./routes/chat'));
+  app.use('/api/ssh-credentials', requireAuth, require('./routes/ssh-credentials'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([

@@ -11,6 +11,7 @@ const PERMISSIONS = [
   { key: 'devices.delete', label: 'Xóa thiết bị mạng', group: 'Thiết bị mạng' },
   { key: 'devices.snmp_config', label: 'Cấu hình SNMP v3 cho thiết bị mạng', group: 'Thiết bị mạng' },
   { key: 'vcenter.sync', label: 'Đồng bộ vCenter', group: 'vCenter / VM' },
+  { key: 'vcenter.cluster.manage', label: 'Quản lý kết nối cụm vCenter (thêm/sửa/xóa)', group: 'vCenter / VM' },
   { key: 'vcenter.vm.create', label: 'Tạo VM (rỗng hoặc clone)', group: 'vCenter / VM' },
   { key: 'vcenter.vm.console', label: 'Mở console VM', group: 'vCenter / VM' },
   { key: 'vcenter.vm.power', label: 'Bật/tắt/khởi động lại VM', group: 'vCenter / VM' },
@@ -28,6 +29,7 @@ const PERMISSIONS = [
   { key: 'roles.manage', label: 'Quản lý vai trò', group: 'Quản trị' },
   { key: 'monitors.write', label: 'Tạo/sửa/kiểm tra ngay monitor uptime', group: 'Giám sát Uptime' },
   { key: 'monitors.delete', label: 'Xóa monitor uptime', group: 'Giám sát Uptime' },
+  { key: 'ssh_credentials.manage', label: 'Quản lý tài khoản kết nối SSH (private key/mật khẩu)', group: 'Quản trị' },
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
@@ -39,6 +41,7 @@ const OPERATOR_EXCLUDED = new Set([
   'servers.delete', 'devices.delete', 'vcenter.vm.delete', 'rules.delete', 'alerts.delete',
   'security.ssh_config', 'security.fail2ban.manage', 'users.manage', 'roles.manage',
   'servers.ipmi_config', 'monitors.delete', 'servers.snmp_config', 'devices.snmp_config',
+  'vcenter.cluster.manage', 'ssh_credentials.manage',
 ]);
 
 module.exports = { PERMISSIONS, PERMISSION_KEYS, OPERATOR_EXCLUDED };

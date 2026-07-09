@@ -2,14 +2,10 @@
 // button in "Quản lý VM giám sát" — separate from fail2ban-collector.js, which only ever reads
 // ban state for VMs that already have it installed. This module answers "is it even here?" and,
 // if not, installs it.
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const { logActivity } = require('./auth');
-
-const KEY_PATH = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
+const sshCredentials = require('./ssh-credentials');
 
 const CHECK_SCRIPT = `
 if ! command -v fail2ban-client >/dev/null 2>&1 \\
@@ -63,16 +59,12 @@ echo "STOP_STATUS:$ACTIVE"
 // itself (see ssh-security-collector.js) to allow the package-manager + systemctl commands above.
 const SUDOERS_HINT = '<ssh_user> ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client';
 
-function connect(vm) {
+async function connect(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) throw new Error('Chưa gán tài khoản kết nối SSH cho VM này');
   const ssh = new NodeSSH();
-  return ssh.connect({
-    host: vm.ip_address,
-    port: vm.ssh_port || 22,
-    username: vm.ssh_user,
-    privateKeyPath: KEY_PATH,
-    passphrase: process.env.SSH_PASSPHRASE || undefined,
-    readyTimeout: 8000
-  }).then(() => ssh);
+  await ssh.connect(opts);
+  return ssh;
 }
 
 const setStatus = db.prepare(`
@@ -80,10 +72,6 @@ const setStatus = db.prepare(`
 `);
 
 async function checkStatus(vm) {
-  if (!fs.existsSync(KEY_PATH)) {
-    await setStatus.run('error', 'Chưa cấu hình SSH private key trên server (SSH_PRIVATE_KEY_PATH)', vm.id);
-    return { status: 'error', error: 'Chưa cấu hình SSH private key trên server' };
-  }
   let ssh;
   try {
     ssh = await connect(vm);
@@ -102,11 +90,6 @@ async function checkStatus(vm) {
 }
 
 async function installFail2ban(vm, user = null) {
-  if (!fs.existsSync(KEY_PATH)) {
-    const error = 'Chưa cấu hình SSH private key trên server (SSH_PRIVATE_KEY_PATH)';
-    await setStatus.run('error', error, vm.id);
-    return { status: 'error', error };
-  }
   await setStatus.run('installing', null, vm.id);
   let ssh;
   try {
@@ -134,11 +117,6 @@ async function installFail2ban(vm, user = null) {
 }
 
 async function stopFail2ban(vm, user = null) {
-  if (!fs.existsSync(KEY_PATH)) {
-    const error = 'Chưa cấu hình SSH private key trên server (SSH_PRIVATE_KEY_PATH)';
-    await setStatus.run('error', error, vm.id);
-    return { status: 'error', error };
-  }
   let ssh;
   try {
     ssh = await connect(vm);

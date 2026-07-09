@@ -15,6 +15,18 @@ function sanitizeServer(s) {
   return rest;
 }
 
+// ssh_user is now a denormalized display cache derived from the chosen credential — the client
+// sends credentialId (from the "Tài khoản kết nối" vault), not a free-text username. Resolving it
+// here (rather than trusting a client-supplied ssh_user) keeps the cache always in sync with the
+// credential's real username, and existing read sites (routes/security.js checks, chatbot-tools.js,
+// table displays) keep working unchanged since ssh_user still holds the right string.
+async function resolveSshCredential(credentialId) {
+  if (!credentialId) return { ssh_credential_id: null, ssh_user: null };
+  const cred = await db.prepare('SELECT id, username FROM ssh_credentials WHERE id = ?').get(credentialId);
+  if (!cred) throw new Error('Không tìm thấy tài khoản kết nối SSH');
+  return { ssh_credential_id: cred.id, ssh_user: cred.username };
+}
+
 router.get('/', async (req, res) => {
   const { search, status, type, tag } = req.query;
   let query = 'SELECT * FROM servers WHERE 1=1';
@@ -54,9 +66,11 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', requirePermission('servers.write'), async (req, res) => {
-  const { name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, tags, notes } = req.body;
+  const { name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, credentialId, tags, notes } = req.body;
   if (!name || !ip_address) return res.status(400).json({ error: 'Name and IP address are required' });
   const tagsJson = JSON.stringify(Array.isArray(tags) ? tags : (tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : []));
+  let sshCred;
+  try { sshCred = await resolveSshCredential(credentialId); } catch (e) { return res.status(400).json({ error: e.message }); }
   // IPMI credentials are gated by a separate permission from general servers.write — a request
   // without servers.ipmi_config just silently gets no IPMI fields set, rather than a 403 that would
   // block the rest of a normal server-create action.
@@ -71,16 +85,18 @@ router.post('/', requirePermission('servers.write'), async (req, res) => {
   const snmp_port = canConfigSnmp ? (req.body.snmp_port || 161) : 161;
   const snmp_community = canConfigSnmp ? (req.body.snmp_community || 'public') : 'public';
   const result = await db.prepare(`
-    INSERT INTO servers (name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, tags, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, hostname, ip_address, type || 'server', os, cpu, ram, storage, location, rack, ssh_port || 22, ssh_user, tagsJson, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community);
+    INSERT INTO servers (name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, ssh_credential_id, tags, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, hostname, ip_address, type || 'server', os, cpu, ram, storage, location, rack, ssh_port || 22, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community);
   await logActivity(req.user, 'CREATE', 'server', result.lastInsertRowid, name);
   res.status(201).json({ id: result.lastInsertRowid, message: 'Server created' });
 });
 
 router.put('/:id', requirePermission('servers.write'), async (req, res) => {
-  const { name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, tags, notes } = req.body;
+  const { name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, credentialId, tags, notes } = req.body;
   const tagsJson = JSON.stringify(Array.isArray(tags) ? tags : (tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : []));
+  let sshCred;
+  try { sshCred = await resolveSshCredential(credentialId); } catch (e) { return res.status(400).json({ error: e.message }); }
 
   const canConfigIpmi = req.user.permissions.includes('servers.ipmi_config');
   let ipmiSet = '';
@@ -101,8 +117,8 @@ router.put('/:id', requirePermission('servers.write'), async (req, res) => {
   }
 
   await db.prepare(`
-    UPDATE servers SET name=?, hostname=?, ip_address=?, type=?, os=?, cpu=?, ram=?, storage=?, location=?, rack=?, ssh_port=?, ssh_user=?, tags=?, notes=?, updated_at=CURRENT_TIMESTAMP${ipmiSet}${snmpSet} WHERE id=?
-  `).run(name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, tagsJson, notes, ...ipmiParams, ...snmpParams, req.params.id);
+    UPDATE servers SET name=?, hostname=?, ip_address=?, type=?, os=?, cpu=?, ram=?, storage=?, location=?, rack=?, ssh_port=?, ssh_user=?, ssh_credential_id=?, tags=?, notes=?, updated_at=CURRENT_TIMESTAMP${ipmiSet}${snmpSet} WHERE id=?
+  `).run(name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ...ipmiParams, ...snmpParams, req.params.id);
   await logActivity(req.user, 'UPDATE', 'server', req.params.id, name);
   res.json({ message: 'Updated' });
 });

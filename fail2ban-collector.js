@@ -9,14 +9,9 @@
 // high-volume attack, and log rotation/restarts add more edge cases. Asking fail2ban directly avoids
 // all of that, at the cost of the alert's created_at being "first time we polled and saw it banned"
 // rather than the exact ban instant — acceptable given the ~45s poll interval.
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
-
-const KEY_PATH = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
-const KEY_AVAILABLE = fs.existsSync(KEY_PATH);
+const sshCredentials = require('./ssh-credentials');
 
 const STATUS_SCRIPT = `
 which fail2ban-client >/dev/null 2>&1 || { echo "FAIL2BAN:none"; exit 0; }
@@ -73,16 +68,11 @@ async function resolveStaleUnbans(vm, stillBannedIps) {
 }
 
 async function collectVm(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) return;
   const ssh = new NodeSSH();
   try {
-    await ssh.connect({
-      host: vm.ip_address,
-      port: vm.ssh_port || 22,
-      username: vm.ssh_user,
-      privateKeyPath: KEY_PATH,
-      passphrase: process.env.SSH_PASSPHRASE || undefined,
-      readyTimeout: 8000
-    });
+    await ssh.connect(opts);
 
     const result = await ssh.execCommand(STATUS_SCRIPT);
     const banned = parseStatus(result.stdout);
@@ -104,10 +94,9 @@ async function collectVm(vm) {
 }
 
 async function collectAll() {
-  if (!KEY_AVAILABLE) return;
   const vms = await db.prepare(`
-    SELECT id, name, ip_address, ssh_user, ssh_port FROM vcenter_vms
-    WHERE power_state = 'POWERED_ON' AND ssh_user IS NOT NULL AND ssh_user != ''
+    SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id FROM vcenter_vms
+    WHERE power_state = 'POWERED_ON' AND ssh_credential_id IS NOT NULL
       AND ip_address IS NOT NULL AND ip_address != ''
       AND (guest_family IS NULL OR guest_family = 'LINUX')
   `).all();

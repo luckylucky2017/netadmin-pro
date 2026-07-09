@@ -1,33 +1,56 @@
 // Shared vCenter client: REST (vSphere Automation API) session + SOAP (VIM API) session.
 // Used by vcenter-collector.js (read-only sync) and vcenter-actions.js (create/edit/delete/power).
+//
+// Multi-vCenter support: this used to hold ONE connection's state in module-level variables
+// (VCENTER_HOST/restToken/soapCookie read once from .env at startup). Now each vCenter cluster
+// needs its own independent session, so connection state lives in a per-cluster context object
+// threaded through AsyncLocalStorage instead — same pattern database.js already uses for
+// db.transaction()'s per-call connection. vcenter-registry.js owns creating/caching these context
+// objects (one per cluster, reused across calls so sessions still don't re-login every request) and
+// calls run(ctx, fn) to make it the "current" client for the duration of fn. vcenter-actions.js and
+// vcenter-collector.js are UNCHANGED — they still just call rest()/soap() with no cluster awareness,
+// as long as they're invoked from inside a run() call.
 const https = require('https');
+const { AsyncLocalStorage } = require('async_hooks');
 
-const VCENTER_HOST = process.env.VCENTER_HOST;
-const VCENTER_USER = process.env.VCENTER_USER;
-const VCENTER_PASSWORD = process.env.VCENTER_PASSWORD;
-const VCENTER_INSECURE = process.env.VCENTER_INSECURE !== 'false'; // vCenter's cert is self-signed by default
+const clientContext = new AsyncLocalStorage();
+
+function ctx() {
+  const c = clientContext.getStore();
+  if (!c) throw new Error('vCenter client chưa được thiết lập ngữ cảnh — phải gọi qua vcenter-registry.withClient()');
+  return c;
+}
+
+// Runs fn with `context` (shape: { host, username, password, insecure, restToken, soapCookie })
+// as the active client for the duration of fn (and anything it awaits/calls). `context` is mutated
+// in place as sessions are established, so passing the SAME object back in on a later call picks up
+// the cached restToken/soapCookie rather than logging in again.
+function run(context, fn) {
+  return clientContext.run(context, fn);
+}
 
 function configured() {
-  return !!(VCENTER_HOST && VCENTER_USER && VCENTER_PASSWORD);
+  const c = clientContext.getStore();
+  return !!(c && c.host && c.username && c.password);
 }
 
 // ── REST (vSphere Automation API) ──
-let restToken = null;
 
 function restRequest(method, urlPath, { body } = {}) {
+  const c = ctx();
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const req = https.request({
-      host: VCENTER_HOST, port: 443, path: urlPath, method,
-      rejectUnauthorized: !VCENTER_INSECURE,
+      host: c.host, port: 443, path: urlPath, method,
+      rejectUnauthorized: !c.insecure,
       headers: {
         'Content-Type': 'application/json',
         ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
-        ...(restToken ? { 'vmware-api-session-id': restToken } : {})
+        ...(c.restToken ? { 'vmware-api-session-id': c.restToken } : {})
       }
     }, res => {
       let chunks = '';
-      res.on('data', c => { chunks += c; });
+      res.on('data', d => { chunks += d; });
       res.on('end', () => {
         let parsed;
         try { parsed = chunks ? JSON.parse(chunks) : null; } catch { parsed = chunks; }
@@ -42,48 +65,51 @@ function restRequest(method, urlPath, { body } = {}) {
 }
 
 async function restLogin() {
-  const basic = Buffer.from(`${VCENTER_USER}:${VCENTER_PASSWORD}`).toString('base64');
-  restToken = await new Promise((resolve, reject) => {
+  const c = ctx();
+  const basic = Buffer.from(`${c.username}:${c.password}`).toString('base64');
+  c.restToken = await new Promise((resolve, reject) => {
     const req = https.request({
-      host: VCENTER_HOST, port: 443, path: '/api/session', method: 'POST',
-      rejectUnauthorized: !VCENTER_INSECURE,
+      host: c.host, port: 443, path: '/api/session', method: 'POST',
+      rejectUnauthorized: !c.insecure,
       headers: { Authorization: `Basic ${basic}` }
     }, res => {
       let chunks = '';
-      res.on('data', c => { chunks += c; });
+      res.on('data', d => { chunks += d; });
       res.on('end', () => {
-        try { resolve(JSON.parse(chunks)); } catch (e) { reject(e); }
+        if (res.statusCode >= 200 && res.statusCode < 300) { try { resolve(JSON.parse(chunks)); } catch (e) { reject(e); } }
+        else reject(Object.assign(new Error(`vCenter đăng nhập thất bại (${res.statusCode}): ${chunks}`), { statusCode: res.statusCode }));
       });
     });
     req.on('error', reject);
     req.end();
   });
-  return restToken;
+  return c.restToken;
 }
 
 async function rest(method, urlPath, opts = {}, allowRetry = true) {
-  if (!restToken) await restLogin();
+  const c = ctx();
+  if (!c.restToken) await restLogin();
   try {
     return await restRequest(method, urlPath, opts);
   } catch (e) {
-    if (e.statusCode === 401 && allowRetry) { restToken = null; return rest(method, urlPath, opts, false); }
+    if (e.statusCode === 401 && allowRetry) { c.restToken = null; return rest(method, urlPath, opts, false); }
     throw e;
   }
 }
 
 // ── SOAP (VIM API) ──
-let soapCookie = null;
 
 function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 }
 
 function soapCall(bodyXml) {
+  const c = ctx();
   return new Promise((resolve, reject) => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:vim25="urn:vim25" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><soapenv:Body>${bodyXml}</soapenv:Body></soapenv:Envelope>`;
     const req = https.request({
-      host: VCENTER_HOST, port: 443, path: '/sdk', method: 'POST',
-      rejectUnauthorized: !VCENTER_INSECURE,
+      host: c.host, port: 443, path: '/sdk', method: 'POST',
+      rejectUnauthorized: !c.insecure,
       headers: {
         'Content-Type': 'text/xml; charset=utf-8',
         'Content-Length': Buffer.byteLength(xml),
@@ -91,14 +117,14 @@ function soapCall(bodyXml) {
         // RetrievePropertiesEx/QueryPerf/CloneVM_Task. vim25/6.7 is old enough to be broadly
         // compatible but modern enough to support everything this module calls.
         SOAPAction: 'urn:vim25/6.7',
-        ...(soapCookie ? { Cookie: soapCookie } : {})
+        ...(c.soapCookie ? { Cookie: c.soapCookie } : {})
       }
     }, res => {
       let chunks = '';
-      res.on('data', c => { chunks += c; });
+      res.on('data', d => { chunks += d; });
       res.on('end', () => {
         const setCookie = res.headers['set-cookie'];
-        if (setCookie && setCookie.length) soapCookie = setCookie[0].split(';')[0];
+        if (setCookie && setCookie.length) c.soapCookie = setCookie[0].split(';')[0];
         if (chunks.includes('<soapenv:Fault>')) {
           const msg = /<faultstring>(.*?)<\/faultstring>/s.exec(chunks);
           reject(new Error(`vCenter SOAP fault: ${msg ? msg[1].trim() : 'unknown'}`));
@@ -112,20 +138,22 @@ function soapCall(bodyXml) {
 }
 
 async function soapLogin() {
-  soapCookie = null;
+  const c = ctx();
+  c.soapCookie = null;
   await soapCall(`<vim25:Login>
     <vim25:_this type="SessionManager">SessionManager</vim25:_this>
-    <vim25:userName>${escapeXml(VCENTER_USER)}</vim25:userName>
-    <vim25:password>${escapeXml(VCENTER_PASSWORD)}</vim25:password>
+    <vim25:userName>${escapeXml(c.username)}</vim25:userName>
+    <vim25:password>${escapeXml(c.password)}</vim25:password>
   </vim25:Login>`);
 }
 
 async function soap(bodyXml, allowRetry = true) {
-  if (!soapCookie) await soapLogin();
+  const c = ctx();
+  if (!c.soapCookie) await soapLogin();
   try {
     return await soapCall(bodyXml);
   } catch (e) {
-    if (allowRetry && /NotAuthenticated/i.test(e.message)) { soapCookie = null; return soap(bodyXml, false); }
+    if (allowRetry && /NotAuthenticated/i.test(e.message)) { c.soapCookie = null; return soap(bodyXml, false); }
     throw e;
   }
 }
@@ -155,4 +183,4 @@ async function waitForTask(taskMor, { timeoutMs = 180000, pollMs = 2000 } = {}) 
   throw new Error('Task timed out');
 }
 
-module.exports = { configured, rest, soap, escapeXml, waitForTask };
+module.exports = { run, configured, rest, soap, escapeXml, waitForTask };

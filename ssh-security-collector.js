@@ -1,16 +1,11 @@
-// Monitors SSH login activity on Linux VMs the user has opted into (vcenter_vms.ssh_user set),
-// flags logins from outside Vietnam via an offline GeoIP lookup, and raises 'security' alerts for
-// foreign successful logins or brute-force bursts of failed attempts. Only ever reads log files —
-// never touches guest state. Reuses the same shared SSH key as ssh-collector.js.
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
+// Monitors SSH login activity on Linux VMs the user has opted into (vcenter_vms.ssh_credential_id
+// set), flags logins from outside Vietnam via an offline GeoIP lookup, and raises 'security' alerts
+// for foreign successful logins or brute-force bursts of failed attempts. Only ever reads log
+// files — never touches guest state.
 const { NodeSSH } = require('node-ssh');
 const geoip = require('geoip-lite');
 const db = require('./database');
-
-const KEY_PATH = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
-const KEY_AVAILABLE = fs.existsSync(KEY_PATH);
+const sshCredentials = require('./ssh-credentials');
 
 // Ubuntu/Debian log to auth.log, RHEL/CentOS to secure — try both, first one that exists wins.
 // Both are root-only (0600), so every read goes through `sudo -n` — the target VM needs a scoped
@@ -168,16 +163,11 @@ async function checkBruteForce(vm, ssh) {
 }
 
 async function collectVm(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) return;
   const ssh = new NodeSSH();
   try {
-    await ssh.connect({
-      host: vm.ip_address,
-      port: vm.ssh_port || 22,
-      username: vm.ssh_user,
-      privateKeyPath: KEY_PATH,
-      passphrase: process.env.SSH_PASSPHRASE || undefined,
-      readyTimeout: 8000
-    });
+    await ssh.connect(opts);
 
     const detect = await ssh.execCommand(DETECT_SCRIPT);
     const logfile = /^LOGFILE:(\S+)/m.exec(detect.stdout)?.[1];
@@ -225,10 +215,9 @@ async function collectVm(vm) {
 }
 
 async function collectAll() {
-  if (!KEY_AVAILABLE) return;
   const vms = await db.prepare(`
-    SELECT id, name, ip_address, ssh_user, ssh_port FROM vcenter_vms
-    WHERE power_state = 'POWERED_ON' AND ssh_user IS NOT NULL AND ssh_user != ''
+    SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id FROM vcenter_vms
+    WHERE power_state = 'POWERED_ON' AND ssh_credential_id IS NOT NULL
       AND ip_address IS NOT NULL AND ip_address != ''
       AND (guest_family IS NULL OR guest_family = 'LINUX')
   `).all();

@@ -40,7 +40,7 @@ router.get('/stats', async (req, res) => {
 // VMware Tools) and which are currently opted in (ssh_user set).
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
-    SELECT id, moref, name, power_state, ip_address, guest_family, ssh_user, ssh_port,
+    SELECT id, moref, name, power_state, ip_address, guest_family, ssh_user, ssh_port, ssh_credential_id,
            fail2ban_status, fail2ban_checked_at, fail2ban_error
     FROM vcenter_vms ORDER BY name ASC
   `).all();
@@ -69,19 +69,33 @@ router.get('/outbound/stats', async (req, res) => {
   res.json({ total, foreign, foreignActive, foreignVms });
 });
 
+// credentialId (not a free-text username) selects which saved account — from "Tài khoản kết nối" —
+// to connect with; ssh_user is kept as a denormalized display cache of the credential's username
+// (see routes/servers.js's resolveSshCredential for the same pattern).
 router.patch('/vms/:id/ssh-user', requirePermission('security.ssh_config'), async (req, res) => {
   const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(req.params.id);
   if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
-  const sshUser = (req.body?.sshUser || '').trim() || null;
+  const credentialId = req.body?.credentialId || null;
+  let sshUser = null;
+  if (credentialId) {
+    const cred = await db.prepare('SELECT username FROM ssh_credentials WHERE id = ?').get(credentialId);
+    if (!cred) return res.status(400).json({ error: 'Không tìm thấy tài khoản kết nối SSH' });
+    sshUser = cred.username;
+  }
   const sshPortRaw = Number(req.body?.sshPort);
   const sshPort = sshPortRaw >= 1 && sshPortRaw <= 65535 ? sshPortRaw : null;
-  await db.prepare('UPDATE vcenter_vms SET ssh_user = ?, ssh_port = ? WHERE id = ?').run(sshUser, sshPort, vm.id);
+  await db.prepare('UPDATE vcenter_vms SET ssh_user = ?, ssh_credential_id = ?, ssh_port = ? WHERE id = ?').run(sshUser, credentialId, sshPort, vm.id);
   await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, sshUser ? `Bật giám sát SSH (user: ${sshUser}, port: ${sshPort || 22})` : 'Tắt giám sát SSH');
   res.json({ message: 'OK' });
 });
 
 async function getMonitoredVm(req, res) {
-  const vm = await db.prepare('SELECT id, name, ip_address, ssh_user, ssh_port FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  // ssh_credential_id must be selected here — fail2banManager.checkStatus/installFail2ban/
+  // stopFail2ban all resolve their SSH connection from vm.ssh_credential_id via
+  // sshCredentials.buildConnectOptions(vm). Omitting it silently makes every VM look
+  // credential-less (buildConnectOptions returns null on a missing field) even when a real
+  // credential is assigned, regardless of what the DB row actually holds.
+  const vm = await db.prepare('SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id FROM vcenter_vms WHERE id = ?').get(req.params.id);
   if (!vm) { res.status(404).json({ error: 'Không tìm thấy VM' }); return null; }
   if (!vm.ssh_user || !vm.ip_address) { res.status(400).json({ error: 'VM này chưa bật giám sát SSH (cần cấu hình SSH User trước)' }); return null; }
   return vm;

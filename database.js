@@ -5,6 +5,9 @@
 // native, in-process, blocking binding; MySQL is a network service, so every call here is async.
 const mysql = require('mysql2/promise');
 const { AsyncLocalStorage } = require('async_hooks');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { PERMISSIONS, OPERATOR_EXCLUDED } = require('./permissions-catalog');
 
 let pool;
@@ -182,6 +185,43 @@ const SCHEMA_SQL = `
     fail2ban_status VARCHAR(30) DEFAULT 'unknown',
     fail2ban_checked_at DATETIME,
     fail2ban_error TEXT
+  );
+
+  -- Kết nối tới 1 hệ thống vCenter (đa cụm) — mật khẩu lưu plaintext, cùng cách xử lý như
+  -- servers.ipmi_password/snmp_auth_password đã làm, không bao giờ trả về client (xem sanitizeCluster
+  -- trong routes/vcenter.js). vcenter_vms.vcenter_cluster_id (thêm ở migration bên dưới) tham chiếu id này.
+  CREATE TABLE IF NOT EXISTS vcenter_clusters (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    insecure INT NOT NULL DEFAULT 1,
+    enabled INT NOT NULL DEFAULT 1,
+    status VARCHAR(20) DEFAULT 'unknown',
+    last_synced_at DATETIME,
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- Reusable SSH connection accounts (private key OR password auth) — replaces the old single
+  -- global SSH_PRIVATE_KEY_PATH/.env model. Secrets stored plaintext, same treatment as
+  -- vcenter_clusters.password/servers.ipmi_password, never returned to the client (see
+  -- sanitizeCredential in routes/ssh-credentials.js). servers.ssh_credential_id and
+  -- vcenter_vms.ssh_credential_id (added via migration below) reference this table's id.
+  CREATE TABLE IF NOT EXISTS ssh_credentials (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name TEXT NOT NULL,
+    auth_type VARCHAR(20) NOT NULL DEFAULT 'private_key',
+    username TEXT NOT NULL,
+    private_key TEXT,
+    passphrase TEXT,
+    password TEXT,
+    is_default INT NOT NULL DEFAULT 0,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
   -- One row per VM/server being SSH-monitored: remembers how many lines of the guest's auth log
@@ -418,6 +458,23 @@ async function ensureSchemaAndMigrations() {
   for (const m of ipmiDetailMigrations) {
     try { await pool.query(m); } catch (e) { if (e.errno !== 1060) throw e; }
   }
+
+  // Multi-vCenter support: a VM's moref ("vm-123") is only unique WITHIN the vCenter that issued
+  // it — two different vCenter installs can easily reuse the same moref — so the old single-column
+  // UNIQUE(moref) has to go, replaced with UNIQUE(vcenter_cluster_id, moref). Order matters: add the
+  // column first (existing rows get NULL), THEN drop the old index, THEN add the composite one —
+  // NULL cluster_id values don't collide with each other under a composite UNIQUE, so this is safe
+  // to run before the one-time backfill in seedIfEmpty() assigns real cluster ids.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vcenter_cluster_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms DROP INDEX moref"); } catch (e) { if (e.errno !== 1091) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD UNIQUE KEY uq_vcenter_vm (vcenter_cluster_id, moref)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
+  // ssh_user/ssh_port stay as-is (denormalized display cache, kept in sync whenever
+  // ssh_credential_id changes — see routes/servers.js and routes/security.js) so every existing
+  // read site (RBAC checks, table displays, chatbot-tools.js) keeps working unchanged; only the
+  // actual SSH connect() call sites (ssh-credentials.js) resolve key/password from the credential.
+  try { await pool.query("ALTER TABLE servers ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
@@ -470,6 +527,41 @@ async function seedIfEmpty() {
     await insertRule.run('CPU VM quá cao', 'all_vms', 'cpu', '>', 90, 60, 'critical');
     await insertRule.run('RAM VM quá cao', 'all_vms', 'ram', '>', 85, 60, 'medium');
     await insertRule.run('Ổ đĩa VM sắp đầy', 'all_vms', 'disk', '>', 90, 30, 'high');
+  }
+
+  // One-time migration: vCenter connection info used to live only in .env (single cluster, read at
+  // process start). Now it's managed from the UI and stored in vcenter_clusters instead — so on the
+  // first boot after this change, if no cluster row exists yet but .env still has VCENTER_* set,
+  // create one from it and reattach every pre-existing vcenter_vms row (the real 106 VMs already
+  // being tracked) to it. .env's VCENTER_* is never read again after this runs once.
+  const clusterCount = await prepare('SELECT COUNT(*) as cnt FROM vcenter_clusters').get();
+  if (clusterCount.cnt === 0 && process.env.VCENTER_HOST && process.env.VCENTER_USER && process.env.VCENTER_PASSWORD) {
+    const result = await prepare(`
+      INSERT INTO vcenter_clusters (name, host, username, password, insecure, enabled)
+      VALUES ('Mặc định (từ .env)', ?, ?, ?, ?, 1)
+    `).run(process.env.VCENTER_HOST, process.env.VCENTER_USER, process.env.VCENTER_PASSWORD, process.env.VCENTER_INSECURE !== 'false' ? 1 : 0);
+    await prepare('UPDATE vcenter_vms SET vcenter_cluster_id = ? WHERE vcenter_cluster_id IS NULL').run(result.lastInsertRowid);
+    console.log(`[vcenter] Đã tạo cụm "Mặc định (từ .env)" (id=${result.lastInsertRowid}) và gán lại các VM đã đồng bộ trước đó.`);
+  }
+
+  // Same one-time migration idea as vCenter above, for SSH: everything used to share 1 private key
+  // from SSH_PRIVATE_KEY_PATH/.env + a per-row ssh_user string. Now credentials are managed from the
+  // UI (ssh_credentials table) — on first boot after this change, read that same key file (if it
+  // exists) into a "dev" credential (matching the real data: every currently-monitored server/VM
+  // uses ssh_user='dev') and reattach every row that has ssh_user='dev' to it, preserving exactly
+  // the SSH monitoring that's already running today.
+  const credCount = await prepare('SELECT COUNT(*) as cnt FROM ssh_credentials').get();
+  if (credCount.cnt === 0) {
+    const keyPath = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
+    let keyContent = null;
+    try { keyContent = fs.readFileSync(keyPath, 'utf8'); } catch { /* key file not readable — credential created empty, editable later from the UI */ }
+    const result = await prepare(`
+      INSERT INTO ssh_credentials (name, auth_type, username, private_key, passphrase, is_default)
+      VALUES ('dev', 'private_key', 'dev', ?, ?, 1)
+    `).run(keyContent, process.env.SSH_PASSPHRASE || null);
+    await prepare("UPDATE servers SET ssh_credential_id = ? WHERE ssh_user = 'dev' AND ssh_credential_id IS NULL").run(result.lastInsertRowid);
+    await prepare("UPDATE vcenter_vms SET ssh_credential_id = ? WHERE ssh_user = 'dev' AND ssh_credential_id IS NULL").run(result.lastInsertRowid);
+    console.log(`[ssh] Đã tạo tài khoản kết nối "dev" (id=${result.lastInsertRowid})${keyContent ? '' : ' — KHÔNG đọc được private key tại ' + keyPath + ', cần dán lại nội dung key trong trang Tài khoản kết nối'} và gán lại các server/VM đã cấu hình ssh_user=dev trước đó.`);
   }
 
   // Seed the 3 immutable system roles (Admin/Operator/Viewer) + their permission sets — must run

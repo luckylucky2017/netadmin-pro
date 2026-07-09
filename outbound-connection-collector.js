@@ -3,15 +3,10 @@
 // login parsing this needs no sudo: /proc/net/tcp (what `ss` reads) is world-readable, so any user
 // can see every socket's local/remote address — only per-process ownership (`-p`) needs root, which
 // isn't needed here.
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const { classifyIp } = require('./ssh-security-collector');
-
-const KEY_PATH = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
-const KEY_AVAILABLE = fs.existsSync(KEY_PATH);
+const sshCredentials = require('./ssh-credentials');
 
 // Must match MySQL's own CURRENT_TIMESTAMP format AND timezone. This server's MySQL has
 // time_zone=SYSTEM = Asia/Ho_Chi_Minh, so CURRENT_TIMESTAMP/NOW() already return GMT+7 wall-clock
@@ -113,16 +108,11 @@ const findExisting = db.prepare(`
 `);
 
 async function collectVm(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) return;
   const ssh = new NodeSSH();
   try {
-    await ssh.connect({
-      host: vm.ip_address,
-      port: vm.ssh_port || 22,
-      username: vm.ssh_user,
-      privateKeyPath: KEY_PATH,
-      passphrase: process.env.SSH_PASSPHRASE || undefined,
-      readyTimeout: 8000
-    });
+    await ssh.connect(opts);
 
     const scanStartedAt = toSqlDatetime(new Date());
     const result = await ssh.execCommand(SCAN_SCRIPT);
@@ -151,10 +141,9 @@ async function collectVm(vm) {
 }
 
 async function collectAll() {
-  if (!KEY_AVAILABLE) return;
   const vms = await db.prepare(`
-    SELECT id, name, ip_address, ssh_user, ssh_port FROM vcenter_vms
-    WHERE power_state = 'POWERED_ON' AND ssh_user IS NOT NULL AND ssh_user != ''
+    SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id FROM vcenter_vms
+    WHERE power_state = 'POWERED_ON' AND ssh_credential_id IS NOT NULL
       AND ip_address IS NOT NULL AND ip_address != ''
       AND (guest_family IS NULL OR guest_family = 'LINUX')
   `).all();

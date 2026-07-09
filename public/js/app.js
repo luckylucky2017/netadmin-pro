@@ -64,7 +64,7 @@ function loadWmksAssets() {
   return wmksAssetsPromise;
 }
 
-async function openVmConsole(moref, name) {
+async function openVmConsole(id, name) {
   // Guard against opening a new console while a previous one (e.g. minimized) is still connected —
   // same stale-widget issue as closeConsole handles, triggered a different way.
   if (wmksInstance) { try { wmksInstance.disconnect(); } catch {} wmksInstance = null; resetWmksContainer(); }
@@ -76,7 +76,7 @@ async function openVmConsole(moref, name) {
   document.getElementById('consoleMinPill').style.display = 'none';
   document.getElementById('consoleOverlay').classList.add('open');
   try {
-    const [, { ticket }] = await Promise.all([loadWmksAssets(), api(`/vcenter/vms/${moref}/console`, 'POST')]);
+    const [, { ticket }] = await Promise.all([loadWmksAssets(), api(`/vcenter/vms/${id}/console`, 'POST')]);
     document.getElementById('wmksContainer').innerHTML = '';
     wmksInstance = WMKS.createWMKS('wmksContainer', { changeResolution: true, rescale: true })
       .register(WMKS.CONST.Events.ERROR, (e, data) => {
@@ -437,7 +437,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -1004,10 +1004,15 @@ async function openServerDetail(id) {
   `;
 }
 
-function openServerForm(server) {
+async function openServerForm(server) {
   const s = typeof server === 'string' ? JSON.parse(server) : server;
   const isEdit = s && s.id;
-  openModal(isEdit ? 'Cập nhật máy chủ' : 'Thêm máy chủ', `
+  openModal(isEdit ? 'Cập nhật máy chủ' : 'Thêm máy chủ', `<div class="loading"><div class="spinner"></div></div>`);
+  let credentials = [];
+  try { credentials = await api('/ssh-credentials/options'); } catch { /* dropdown just shows "không giám sát" option */ }
+  const credOptions = credentials.map(cr => `<option value="${cr.id}" ${s?.ssh_credential_id === cr.id ? 'selected' : ''}>${cr.name} (${cr.username})${cr.is_default ? ' — mặc định' : ''}</option>`).join('');
+  document.getElementById('modalTitle').textContent = isEdit ? 'Cập nhật máy chủ' : 'Thêm máy chủ';
+  document.getElementById('modalBody').innerHTML = `
     <form id="serverForm" onsubmit="saveServer(event, ${isEdit ? s.id : 'null'})">
       <div class="form-grid">
         <div class="form-group"><label>Tên máy chủ *</label><input type="text" name="name" value="${s?.name||''}" required placeholder="Web Server 01"></div>
@@ -1026,7 +1031,12 @@ function openServerForm(server) {
         <div class="form-group"><label>Vị trí</label><input type="text" name="location" value="${s?.location||''}" placeholder="Datacenter A"></div>
         <div class="form-group"><label>Rack</label><input type="text" name="rack" value="${s?.rack||''}" placeholder="Rack-01"></div>
         <div class="form-group"><label>SSH Port</label><input type="number" name="ssh_port" value="${s?.ssh_port||22}" placeholder="22"></div>
-        <div class="form-group"><label>SSH User</label><input type="text" name="ssh_user" value="${s?.ssh_user||''}" placeholder="admin"></div>
+        <div class="form-group"><label>Tài khoản kết nối SSH</label>
+          <select name="credentialId" class="form-select">
+            <option value="">— Không giám sát SSH —</option>
+            ${credOptions}
+          </select>
+        </div>
         <div class="form-group full"><label>Tags (phân cách bằng dấu phẩy)</label><input type="text" name="tags" value="${Array.isArray(s?.tags) ? s.tags.join(', ') : (s?.tags||'')}" placeholder="web, production, critical"></div>
         <div class="form-group full"><label>Ghi chú</label><textarea name="notes">${s?.notes||''}</textarea></div>
       </div>
@@ -1050,7 +1060,7 @@ function openServerForm(server) {
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
         <button type="submit" class="btn btn-primary">${isEdit ? 'Cập nhật' : 'Thêm mới'}</button>
       </div>
-    </form>`);
+    </form>`;
 }
 
 async function saveServer(e, id) {
@@ -1738,19 +1748,15 @@ async function saveRule(e, id) {
 }
 
 // ─── VCENTER ──────────────────────────────────────────────────────────────────
-let vcenterFilter = { power_state: '' };
+let vcenterTab = 'vms';
+let vcenterFilter = { power_state: '', cluster_id: '' };
+let vcenterClustersCache = [];
 
 async function renderVcenter(search = '') {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
   try {
     const stats = await api('/vcenter/stats');
-    if (!stats.configured) {
-      c.innerHTML = `
-      <div class="page-header"><div><div class="page-title">vCenter</div><div class="page-subtitle">Inventory VM từ VMware vCenter</div></div></div>
-      <div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg><h3>Chưa cấu hình vCenter</h3><p>Đặt VCENTER_HOST, VCENTER_USER, VCENTER_PASSWORD trong file .env rồi khởi động lại server</p></div>`;
-      return;
-    }
     c.innerHTML = `
     <div class="page-header">
       <div><div class="page-title">vCenter</div><div class="page-subtitle">Inventory VM — đồng bộ lần cuối: <span id="vcLastSync">${stats.lastSync ? formatTime(stats.lastSync) : 'chưa đồng bộ'}</span></div></div>
@@ -1788,27 +1794,27 @@ async function renderVcenter(search = '') {
         <div class="stat-value red" id="vcStatOff">${stats.off}</div>
       </div>
     </div>
-    <div class="table-wrap">
-      <div class="table-toolbar">
-        <div class="search-box">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          <input type="text" id="vcenterSearch" placeholder="Tìm tên VM..." value="${search}">
-        </div>
-        <select class="filter-select" id="vcPowerFilter" onchange="applyVcenterFilter()">
-          <option value="">Tất cả trạng thái</option>
-          <option value="POWERED_ON">Powered On</option>
-          <option value="POWERED_OFF">Powered Off</option>
-        </select>
-      </div>
-      <div id="vcenterTableBody"><div class="loading"><div class="spinner"></div></div></div>
-    </div>`;
-    document.getElementById('vcenterSearch').addEventListener('input', () => {
-      clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => { vcenterPagination.page = 1; loadVcenterTable(); }, 300);
-    });
+    <div class="filter-tabs" id="vcenterTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${vcenterTab === 'vms' ? 'active' : ''}" data-tab="vms" onclick="setVcenterTab('vms')">Danh sách VM</div>
+      <div class="filter-tab ${vcenterTab === 'clusters' ? 'active' : ''}" data-tab="clusters" onclick="setVcenterTab('clusters')">Cụm vCenter</div>
+    </div>
+    <div id="vcenterTabBody"></div>`;
     document.getElementById('vcenterRefreshSelect').value = String(vcenterRefreshMs);
-    loadVcenterTable(search);
+    // Chưa có cụm nào bật -> mở thẳng tab Cụm vCenter thay vì 1 bảng VM trống khó hiểu.
+    if (!stats.configured) vcenterTab = 'clusters';
+    renderVcenterTabBody(search);
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function setVcenterTab(tab) {
+  vcenterTab = tab;
+  document.querySelectorAll('#vcenterTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderVcenterTabBody();
+}
+
+function renderVcenterTabBody(search) {
+  if (vcenterTab === 'clusters') renderVcenterClustersTab();
+  else renderVcenterVmsTab(search);
 }
 
 let vcenterRefreshMs = 0;
@@ -1832,11 +1838,12 @@ async function refreshVcenterData() {
     document.getElementById('vcStatOff').textContent = stats.off;
     document.getElementById('vcLastSync').textContent = stats.lastSync ? formatTime(stats.lastSync) : 'chưa đồng bộ';
   } catch { /* transient — next tick retries */ }
-  loadVcenterTable();
+  if (vcenterTab === 'vms') loadVcenterTable();
 }
 
 function applyVcenterFilter() {
   vcenterFilter.power_state = document.getElementById('vcPowerFilter')?.value || '';
+  vcenterFilter.cluster_id = document.getElementById('vcClusterFilter')?.value || '';
   vcenterPagination.page = 1;
   loadVcenterTable();
 }
@@ -1845,14 +1852,54 @@ let vcenterRows = [];
 let vcenterSortState = { key: null, dir: 'asc' };
 let vcenterPagination = newPagination();
 
+// ── Tab: Danh sách VM ──
+function renderVcenterVmsTab(search) {
+  const body = document.getElementById('vcenterTabBody');
+  body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="vcenterSearch" placeholder="Tìm tên VM..." value="${search || ''}">
+        </div>
+        <select class="filter-select" id="vcClusterFilter" onchange="applyVcenterFilter()">
+          <option value="">Tất cả cụm</option>
+          ${vcenterClustersCache.map(cl => `<option value="${cl.id}" ${String(vcenterFilter.cluster_id) === String(cl.id) ? 'selected' : ''}>${cl.name}</option>`).join('')}
+        </select>
+        <select class="filter-select" id="vcPowerFilter" onchange="applyVcenterFilter()">
+          <option value="">Tất cả trạng thái</option>
+          <option value="POWERED_ON" ${vcenterFilter.power_state === 'POWERED_ON' ? 'selected' : ''}>Powered On</option>
+          <option value="POWERED_OFF" ${vcenterFilter.power_state === 'POWERED_OFF' ? 'selected' : ''}>Powered Off</option>
+        </select>
+      </div>
+      <div id="vcenterTableBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  document.getElementById('vcenterSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { vcenterPagination.page = 1; loadVcenterTable(); }, 300);
+  });
+  loadVcenterTable(search);
+}
+
 // Does NOT reset vcenterPagination.page — also called by refreshVcenterData()'s periodic timer
 // (every 5-15s), same reasoning as loadAlertList() above. Only genuine filter/search changes reset
 // to page 1 (search box handler, applyVcenterFilter()).
 async function loadVcenterTable(search) {
   const s = search || document.getElementById('vcenterSearch')?.value || '';
-  const params = new URLSearchParams({ search: s, power_state: vcenterFilter.power_state });
+  const params = new URLSearchParams({ search: s, power_state: vcenterFilter.power_state, cluster_id: vcenterFilter.cluster_id });
   try {
     vcenterRows = await api(`/vcenter/vms?${params}`);
+    // Xây danh sách cụm để lọc từ chính dữ liệu VM (không gọi /clusters riêng — tránh nhấp nháy khi
+    // đang lọc, và luôn khớp đúng những cụm thực sự có VM).
+    const seen = new Map();
+    vcenterRows.forEach(v => { if (v.vcenter_cluster_id && !seen.has(v.vcenter_cluster_id)) seen.set(v.vcenter_cluster_id, v.cluster_name); });
+    if (!vcenterClustersCache.length || vcenterClustersCache.length !== seen.size) {
+      vcenterClustersCache = [...seen].map(([id, name]) => ({ id, name }));
+      const clusterFilterEl = document.getElementById('vcClusterFilter');
+      if (clusterFilterEl) {
+        clusterFilterEl.innerHTML = `<option value="">Tất cả cụm</option>${vcenterClustersCache.map(cl => `<option value="${cl.id}" ${String(vcenterFilter.cluster_id) === String(cl.id) ? 'selected' : ''}>${cl.name}</option>`).join('')}`;
+      }
+    }
     renderVcenterRows();
   } catch (e) { document.getElementById('vcenterTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
 }
@@ -1873,11 +1920,12 @@ function renderVcenterRows() {
   const vms = paginateRows(sortedVms, vcenterPagination);
   const rowOffset = (vcenterPagination.page - 1) * vcenterPagination.pageSize;
   tbody.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM cấp phát', 'memory_mib', vcenterSortState, 'toggleVcenterSort')}${thSort('CPU dùng', 'cpu_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}<th>Cụm</th>${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM cấp phát', 'memory_mib', vcenterSortState, 'toggleVcenterSort')}${thSort('CPU dùng', 'cpu_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
       <tbody>${vms.map((v, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td style="font-weight:600">${v.name}</td>
+          <td><span class="tag">${v.cluster_name || '—'}</span></td>
           <td>${vcPowerBadge(v.power_state)}</td>
           <td><span class="ping-ms" style="font-size:13px">${v.cpu_count ?? '—'}</span></td>
           <td><span class="ping-ms" style="font-size:13px">${v.memory_mib ? (v.memory_mib / 1024).toFixed(0) + ' GB' : '—'}</span></td>
@@ -1887,15 +1935,181 @@ function renderVcenterRows() {
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(v.last_synced_at)}</span></td>
           <td><div class="actions">
             ${v.power_state === 'POWERED_ON'
-              ? `<button class="btn-icon" title="Tắt nguồn" data-permission="vcenter.vm.power" onclick="vmPowerAction('${v.moref}','stop','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></button>
-                 <button class="btn-icon" title="Khởi động lại" data-permission="vcenter.vm.power" onclick="vmPowerAction('${v.moref}','reset','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>`
-              : `<button class="btn-icon ping" title="Bật nguồn" data-permission="vcenter.vm.power" onclick="vmPowerAction('${v.moref}','start','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`}
-            ${v.power_state === 'POWERED_ON' ? `<button class="btn-icon" title="Console" data-permission="vcenter.vm.console" onclick="openVmConsole('${v.moref}','${escAttr(v.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>` : ''}
-            <button class="btn-icon edit" title="Sửa cấu hình" data-permission="vcenter.vm.edit" onclick='openEditVmForm(${JSON.stringify({ moref: v.moref, name: v.name, cpu_count: v.cpu_count, memory_mib: v.memory_mib }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-            <button class="btn-icon delete" title="Xóa" data-permission="vcenter.vm.delete" onclick="openDeleteVmConfirm('${v.moref}','${escAttr(v.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+              ? `<button class="btn-icon" title="Tắt nguồn" data-permission="vcenter.vm.power" onclick="vmPowerAction(${v.id},'stop','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></button>
+                 <button class="btn-icon" title="Khởi động lại" data-permission="vcenter.vm.power" onclick="vmPowerAction(${v.id},'reset','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>`
+              : `<button class="btn-icon ping" title="Bật nguồn" data-permission="vcenter.vm.power" onclick="vmPowerAction(${v.id},'start','${escAttr(v.name)}',this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>`}
+            ${v.power_state === 'POWERED_ON' ? `<button class="btn-icon" title="Console" data-permission="vcenter.vm.console" onclick="openVmConsole(${v.id},'${escAttr(v.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></button>` : ''}
+            <button class="btn-icon edit" title="Sửa cấu hình" data-permission="vcenter.vm.edit" onclick='openEditVmForm(${JSON.stringify({ id: v.id, name: v.name, cpu_count: v.cpu_count, memory_mib: v.memory_mib }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon delete" title="Xóa" data-permission="vcenter.vm.delete" onclick="openDeleteVmConfirm(${v.id},'${escAttr(v.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
           </div></td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(vcenterPagination, sortedVms.length, 'vcenterPagination', 'renderVcenterRows')}`;
+}
+
+// ── Tab: Cụm vCenter (kết nối) ──
+async function renderVcenterClustersTab() {
+  const body = document.getElementById('vcenterTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const clusters = await api('/vcenter/clusters');
+    vcenterClustersCache = clusters;
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div style="font-size:13px;color:var(--fg-muted)">Kết nối tới nhiều hệ thống vCenter khác nhau — VM được đồng bộ và quản lý theo từng cụm</div>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddClusterForm()" data-permission="vcenter.cluster.manage">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm cụm
+        </button>
+      </div>
+      <div id="vcenterClustersBody">${renderClustersTable(clusters)}</div>
+    </div>`;
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function renderClustersTable(clusters) {
+  if (!clusters.length) {
+    return `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg><h3>Chưa có cụm vCenter nào</h3><p>Bấm "Thêm cụm" để kết nối tới 1 hệ thống vCenter</p></div>`;
+  }
+  return `<table>
+    <thead><tr><th>Tên</th><th>Host</th><th>Username</th><th>Trạng thái</th><th>Số VM</th><th>Đồng bộ lần cuối</th><th>Bật</th><th>Hành động</th></tr></thead>
+    <tbody>${clusters.map(cl => `
+      <tr>
+        <td style="font-weight:600">${cl.name}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:13px">${cl.host}</td>
+        <td style="font-size:13px">${cl.username}</td>
+        <td>${clusterStatusBadge(cl.status, cl.last_error)}</td>
+        <td>${cl.vm_count}</td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${cl.last_synced_at ? formatTime(cl.last_synced_at) : 'chưa đồng bộ'}</span></td>
+        <td>${cl.enabled ? '<span class="status online"><span class="dot"></span>Bật</span>' : '<span class="status offline"><span class="dot"></span>Tắt</span>'}</td>
+        <td><div class="actions">
+          <button class="btn-icon" title="Đồng bộ cụm này" data-permission="vcenter.sync" onclick="syncOneClusterUi(${cl.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="btn-icon" title="Kiểm tra kết nối" data-permission="vcenter.cluster.manage" onclick="testSavedCluster(${cl.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>
+          <button class="btn-icon edit" title="Sửa" data-permission="vcenter.cluster.manage" onclick='openEditClusterForm(${JSON.stringify({ id: cl.id, name: cl.name, host: cl.host, username: cl.username, insecure: !!cl.insecure, enabled: !!cl.enabled }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="vcenter.cluster.manage" onclick="openDeleteClusterConfirm(${cl.id},'${escAttr(cl.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function clusterStatusBadge(status, lastError) {
+  if (status === 'ok') return `<span class="status online"><span class="dot"></span>OK</span>`;
+  if (status === 'error') return `<span class="status offline" title="${escAttr(lastError || '')}"><span class="dot"></span>Lỗi</span>`;
+  return `<span class="status unknown"><span class="dot"></span>Chưa rõ</span>`;
+}
+
+function openAddClusterForm() {
+  openModal('Thêm cụm vCenter', clusterFormHtml());
+}
+function openEditClusterForm(cluster) {
+  openModal(`Sửa cụm — ${cluster.name}`, clusterFormHtml(cluster));
+}
+function clusterFormHtml(cluster) {
+  const isEdit = !!cluster;
+  return `
+    <form id="clusterForm" onsubmit="saveCluster(event, ${isEdit ? cluster.id : 'null'})">
+      <div class="form-grid">
+        <div class="form-group full"><label>Tên cụm *</label><input type="text" name="name" value="${cluster?.name || ''}" required placeholder="vd: DC1 - vCenter chính"></div>
+        <div class="form-group full"><label>Host *</label><input type="text" name="host" value="${cluster?.host || ''}" required placeholder="vcenter.example.local"></div>
+        <div class="form-group"><label>Username *</label><input type="text" name="username" value="${cluster?.username || ''}" required placeholder="administrator@vsphere.local"></div>
+        <div class="form-group"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><input type="password" name="password" ${isEdit ? '' : 'required'} autocomplete="new-password"></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="insecure" ${cluster?.insecure !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bỏ qua xác thực chứng chỉ tự ký (self-signed cert)</label>
+        </div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="enabled" ${cluster?.enabled !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bật (tham gia đồng bộ tự động)</label>
+        </div>
+      </div>
+      <div id="clusterTestResult" style="margin-top:8px;font-size:13px"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="testClusterForm(this)">Kiểm tra kết nối</button>
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm cụm'}</button>
+      </div>
+    </form>`;
+}
+
+async function testClusterForm(btn) {
+  const form = document.getElementById('clusterForm');
+  const fd = new FormData(form);
+  const host = fd.get('host'), username = fd.get('username'), password = fd.get('password');
+  const resultEl = document.getElementById('clusterTestResult');
+  if (!host || !username || !password) {
+    resultEl.innerHTML = `<span style="color:var(--yellow)">Nhập đủ Host/Username/Mật khẩu để kiểm tra (mật khẩu để trống chỉ dùng được khi lưu, không test được lúc chưa lưu)</span>`;
+    return;
+  }
+  btn.disabled = true;
+  resultEl.innerHTML = `<span style="color:var(--fg-dim)">Đang kiểm tra...</span>`;
+  try {
+    const result = await api('/vcenter/clusters/test', 'POST', { host, username, password, insecure: fd.get('insecure') === 'on' });
+    resultEl.innerHTML = result.ok
+      ? `<span style="color:var(--accent)">✓ ${result.message}</span>`
+      : `<span style="color:var(--red)">✗ ${result.message}</span>`;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveCluster(e, id) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    name: fd.get('name'), host: fd.get('host'), username: fd.get('username'), password: fd.get('password') || '',
+    insecure: fd.get('insecure') === 'on', enabled: fd.get('enabled') === 'on'
+  };
+  try {
+    if (id) await api(`/vcenter/clusters/${id}`, 'PUT', payload);
+    else await api('/vcenter/clusters', 'POST', payload);
+    toast(id ? 'Đã cập nhật cụm' : 'Đã thêm cụm', 'success');
+    closeModal();
+    renderVcenterClustersTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function testSavedCluster(id, btn) {
+  btn.disabled = true;
+  try {
+    const result = await api(`/vcenter/clusters/${id}/test`, 'POST');
+    toast(result.ok ? `Kết nối thành công: ${result.message}` : `Lỗi kết nối: ${result.message}`, result.ok ? 'success' : 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; renderVcenterClustersTab(); }
+}
+
+async function syncOneClusterUi(id, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/vcenter/clusters/${id}/sync`, 'POST');
+    toast('Đã đồng bộ', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { renderVcenterClustersTab(); }
+}
+
+function openDeleteClusterConfirm(id, name) {
+  openModal('Xóa cụm vCenter', `
+    <form id="clusterDeleteForm" onsubmit="confirmDeleteCluster(event, ${id}, '${escAttr(name)}')">
+      <p style="font-size:14px;margin-bottom:12px">Thao tác này sẽ xóa cụm <strong>${name}</strong> và toàn bộ dữ liệu VM/lịch sử đã đồng bộ thuộc cụm này (không xóa VM thật trong vCenter, chỉ xóa dữ liệu theo dõi). Không thể hoàn tác.</p>
+      <div class="form-group full"><label>Gõ chính xác tên cụm để xác nhận</label><input type="text" name="confirmName" placeholder="${name}" autocomplete="off" required></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteCluster(e, id, name) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const confirmName = fd.get('confirmName');
+  if (confirmName !== name) { toast('Tên không khớp — đã hủy xóa', 'error'); return; }
+  try {
+    await api(`/vcenter/clusters/${id}`, 'DELETE', { confirmName });
+    toast(`Đã xóa cụm "${name}"`, 'success');
+    closeModal();
+    renderVcenterClustersTab();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 function vcPctCell(pct) {
@@ -1915,11 +2129,11 @@ function escAttr(s) { return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot
 
 const POWER_ACTION_LABEL = { start: 'bật nguồn', stop: 'tắt nguồn', reset: 'khởi động lại', suspend: 'tạm dừng' };
 
-async function vmPowerAction(moref, action, name, btn) {
+async function vmPowerAction(id, action, name, btn) {
   if (action !== 'start' && !confirm(`${POWER_ACTION_LABEL[action]} VM "${name}"?`)) return;
   if (btn) btn.disabled = true;
   try {
-    await api(`/vcenter/vms/${moref}/power`, 'POST', { action });
+    await api(`/vcenter/vms/${id}/power`, 'POST', { action });
     toast(`Đã ${POWER_ACTION_LABEL[action]} "${name}"`, 'success');
     loadVcenterTable();
   } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; }
@@ -1928,7 +2142,7 @@ async function vmPowerAction(moref, action, name, btn) {
 // ── Edit hardware/name ──
 function openEditVmForm(vm) {
   openModal(`Sửa cấu hình — ${vm.name}`, `
-    <form id="vmEditForm" onsubmit="saveEditVm(event, '${vm.moref}')">
+    <form id="vmEditForm" onsubmit="saveEditVm(event, ${vm.id})">
       <div class="form-grid">
         <div class="form-group full"><label>Tên VM</label><input type="text" name="name" value="${vm.name}" required></div>
         <div class="form-group"><label>vCPU</label><input type="number" name="cpuCount" value="${vm.cpu_count ?? 1}" min="1" max="128" required></div>
@@ -1942,15 +2156,15 @@ function openEditVmForm(vm) {
     </form>`);
 }
 
-async function saveEditVm(e, moref) {
+async function saveEditVm(e, id) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const name = fd.get('name');
   const cpuCount = Number(fd.get('cpuCount'));
   const memoryMib = Number(fd.get('memoryMib'));
   try {
-    await api(`/vcenter/vms/${moref}/hardware`, 'PATCH', { cpuCount, memoryMib });
-    await api(`/vcenter/vms/${moref}/rename`, 'PATCH', { name });
+    await api(`/vcenter/vms/${id}/hardware`, 'PATCH', { cpuCount, memoryMib });
+    await api(`/vcenter/vms/${id}/rename`, 'PATCH', { name });
     toast('Đã cập nhật VM', 'success');
     closeModal();
     loadVcenterTable();
@@ -1958,9 +2172,9 @@ async function saveEditVm(e, moref) {
 }
 
 // ── Delete (type-to-confirm — this is real production infrastructure) ──
-function openDeleteVmConfirm(moref, name) {
+function openDeleteVmConfirm(id, name) {
   openModal(`Xóa VM — không thể hoàn tác`, `
-    <form id="vmDeleteForm" onsubmit="confirmDeleteVm(event, '${moref}', '${escAttr(name)}')">
+    <form id="vmDeleteForm" onsubmit="confirmDeleteVm(event, ${id}, '${escAttr(name)}')">
       <p style="font-size:14px;margin-bottom:12px">Thao tác này sẽ <strong style="color:var(--red)">xóa vĩnh viễn</strong> VM <strong>${name}</strong> khỏi vCenter (tự động tắt nguồn nếu đang bật). Không thể hoàn tác.</p>
       <div class="form-group full"><label>Gõ chính xác tên VM để xác nhận</label><input type="text" name="confirmName" placeholder="${name}" autocomplete="off" required></div>
       <div class="form-actions">
@@ -1970,13 +2184,13 @@ function openDeleteVmConfirm(moref, name) {
     </form>`);
 }
 
-async function confirmDeleteVm(e, moref, name) {
+async function confirmDeleteVm(e, id, name) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const confirmName = fd.get('confirmName');
   if (confirmName !== name) { toast('Tên không khớp — đã hủy xóa', 'error'); return; }
   try {
-    await api(`/vcenter/vms/${moref}`, 'DELETE', { confirmName });
+    await api(`/vcenter/vms/${id}`, 'DELETE', { confirmName });
     toast(`Đã xóa "${name}"`, 'success');
     closeModal();
     loadVcenterTable();
@@ -1986,11 +2200,54 @@ async function confirmDeleteVm(e, moref, name) {
 // ── Create (empty VM via multi-step wizard, or clone from template) ──
 let createVmState = null;
 
+// host/datastore/network/folder/template chỉ tồn tại trong 1 vCenter cụ thể — phải chọn cụm trước
+// khi tải các danh sách này. Nếu chỉ có đúng 1 cụm khả dụng thì tự chọn luôn, đỡ thêm 1 bước cho
+// trường hợp phổ biến nhất (chỉ dùng 1 vCenter).
+let createVmClusterId = null;
+
 async function openCreateVmForm() {
-  openModal('Tạo VM', `<div class="loading"><div class="spinner"></div> Đang tải danh sách host/datastore...</div>`);
+  openModal('Tạo VM', `<div class="loading"><div class="spinner"></div> Đang tải danh sách cụm vCenter...</div>`);
+  try {
+    const clusters = (await api('/vcenter/clusters')).filter(cl => cl.enabled);
+    if (!clusters.length) {
+      document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Chưa có cụm vCenter khả dụng</h3><p>Vào tab "Cụm vCenter" để thêm và bật 1 kết nối trước khi tạo VM.</p></div>`;
+      return;
+    }
+    if (clusters.length === 1) {
+      createVmClusterId = clusters[0].id;
+      await loadCreateVmPlacementData();
+    } else {
+      renderCreateVmClusterPicker(clusters);
+    }
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+function renderCreateVmClusterPicker(clusters) {
+  document.getElementById('modalTitle').textContent = 'Tạo VM';
+  document.getElementById('modalBody').innerHTML = `
+    <div class="form-group full"><label>Chọn cụm vCenter</label>
+      <select id="createVmClusterSelect" class="form-select">${clusters.map(cl => `<option value="${cl.id}">${cl.name} (${cl.host})</option>`).join('')}</select>
+    </div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+      <button type="button" class="btn btn-primary" onclick="confirmCreateVmCluster()">Tiếp tục</button>
+    </div>`;
+}
+
+async function confirmCreateVmCluster() {
+  createVmClusterId = document.getElementById('createVmClusterSelect').value;
+  document.getElementById('modalBody').innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải danh sách host/datastore...</div>`;
+  await loadCreateVmPlacementData();
+}
+
+async function loadCreateVmPlacementData() {
   try {
     const [placement, templates, guestOsGroups] = await Promise.all([
-      api('/vcenter/placement'), api('/vcenter/templates'), api('/vcenter/guest-os')
+      api(`/vcenter/placement?cluster_id=${createVmClusterId}`),
+      api(`/vcenter/templates?cluster_id=${createVmClusterId}`),
+      api('/vcenter/guest-os')
     ]);
     createVmState = { placement, templates, guestOsGroups };
     renderCreateVmForm('empty');
@@ -2194,7 +2451,7 @@ async function wizardRefreshIsoOptions() {
   };
   if (w.isoCache[w.datastoreId]) { renderIsoOptions(w.isoCache[w.datastoreId]); return; }
   try {
-    const isos = await api(`/vcenter/datastore/${w.datastoreId}/isos`);
+    const isos = await api(`/vcenter/datastore/${w.datastoreId}/isos?cluster_id=${createVmClusterId}`);
     w.isoCache[w.datastoreId] = isos;
     renderIsoOptions(isos);
   } catch (e) {
@@ -2218,7 +2475,8 @@ async function submitEmptyVm(e) {
     cdromIso: w.cdromEnabled ? w.cdromIso : '',
     hostId: w.hostId,
     datastoreId: w.datastoreId,
-    folderId: createVmState.placement.vmFolder
+    folderId: createVmState.placement.vmFolder,
+    clusterId: createVmClusterId
   };
   const btn = document.querySelector('#emptyVmForm .btn-primary');
   btn.disabled = true;
@@ -2241,7 +2499,7 @@ async function onCreateVmTemplateChange(sel) {
   const container = document.getElementById('cloneSpecFields');
   container.innerHTML = `<div class="form-group full"><span style="font-size:12px;color:var(--fg-dim)">Đang tải cấu hình template...</span></div>`;
   try {
-    const spec = await api(`/vcenter/templates/${sel.value}/spec`);
+    const spec = await api(`/vcenter/templates/${sel.value}/spec?cluster_id=${createVmClusterId}`);
     cloneExtraState = { spec, disks: [], nics: [] };
     renderCloneSpecFields();
   } catch (e) {
@@ -2313,6 +2571,7 @@ async function saveCreateVm(e) {
   const fd = new FormData(e.target);
   const data = Object.fromEntries(fd);
   data.folderId = createVmState.placement.vmFolder;
+  data.clusterId = createVmClusterId;
   if (data.cpuCount) data.cpuCount = Number(data.cpuCount);
   if (data.memoryMib) data.memoryMib = Number(data.memoryMib);
   if (data.diskGb) data.diskGb = Number(data.diskGb);
@@ -2689,24 +2948,42 @@ function fail2banToggle(v) {
 }
 
 let managePagination = newPagination();
+let manageSearchFilter = '';
 
 function renderManageRows() {
   const wrap = document.getElementById('securityManageTableWrap');
   if (!wrap) return;
-  const sortedVms = applySort(securityState.vms, manageSortState, (row, key) => row[key]);
+  const q = manageSearchFilter.trim().toLowerCase();
+  const filteredVms = q
+    ? securityState.vms.filter(v => (v.name || '').toLowerCase().includes(q) || (v.ip_address || '').toLowerCase().includes(q))
+    : securityState.vms;
+  if (!filteredVms.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không tìm thấy VM</h3><p>Thử đổi từ khóa tìm kiếm</p></div>`;
+    return;
+  }
+  const sortedVms = applySort(filteredVms, manageSortState, (row, key) => row[key]);
   const vms = paginateRows(sortedVms, managePagination);
   const rowOffset = (managePagination.page - 1) * managePagination.pageSize;
   wrap.innerHTML = `<table>
-        <thead><tr><th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}${thSort('SSH User', 'ssh_user', manageSortState, 'toggleManageSort')}${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}${thSort('Fail2ban', 'fail2ban_status', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
+        <thead><tr><th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}<th>Tài khoản kết nối</th>${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}${thSort('Fail2ban', 'fail2ban_status', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = v.guest_family === 'LINUX' && v.ip_address;
+          // Chưa gán tài khoản nào -> gợi ý sẵn tài khoản mặc định (vd "dev") thay vì để trống, đỡ
+          // 1 bước chọn thủ công cho trường hợp phổ biến nhất (VM Linux mới, chưa từng bật giám
+          // sát); VM đã có ssh_credential_id thì giữ đúng lựa chọn hiện tại, không bị ghi đè.
+          const defaultCredId = securityCredentialOptions.find(cr => cr.is_default)?.id;
+          const preselectedId = v.ssh_credential_id || (eligible ? defaultCredId : null);
+          const credOptions = securityCredentialOptions.map(cr => `<option value="${cr.id}" ${preselectedId === cr.id ? 'selected' : ''}>${cr.name} (${cr.username})</option>`).join('');
           return `<tr>
             <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
             <td style="font-weight:600">${v.name}</td>
             <td>${vcPowerBadge(v.power_state)}</td>
             <td>${v.ip_address || '—'}</td>
             <td>${v.guest_family || '—'}</td>
-            <td><input type="text" class="sec-ssh-user" data-id="${v.id}" value="${v.ssh_user || ''}" placeholder="vd: dev" style="max-width:140px" ${eligible ? '' : 'disabled'}></td>
+            <td><select class="sec-ssh-cred filter-select" data-id="${v.id}" style="max-width:170px" ${eligible ? '' : 'disabled'}>
+              <option value="">— Không giám sát —</option>
+              ${credOptions}
+            </select></td>
             <td><input type="number" class="sec-ssh-port" data-id="${v.id}" value="${v.ssh_port || 22}" min="1" max="65535" style="max-width:90px" ${eligible ? '' : 'disabled'}></td>
             <td>${fail2banToggle(v)}</td>
             <td><button class="btn btn-secondary btn-sm" data-permission="security.ssh_config" ${eligible ? '' : 'disabled'} onclick="saveSecuritySshUser(${v.id}, this)">Lưu</button></td>
@@ -2757,31 +3034,45 @@ async function handleFail2banToggle(e, id) {
   }
 }
 
-function renderSecurityManage() {
+let securityCredentialOptions = [];
+
+async function renderSecurityManage() {
+  document.getElementById('securityTabBody').innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try { securityCredentialOptions = await api('/ssh-credentials/options'); } catch { securityCredentialOptions = []; }
   document.getElementById('securityTabBody').innerHTML = `
     <div class="table-wrap">
       <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
-        <p style="margin-bottom:8px">Chỉ VM Linux đã có IP (do VMware Tools báo cáo) mới bật giám sát được. SSH user dùng chung private key hiện có của hệ thống — để trống ô SSH User rồi bấm Lưu để tắt giám sát.</p>
-        <p style="margin-bottom:6px">auth.log/secure chỉ root đọc được, và tên tiến trình đứng sau mỗi kết nối ra ngoài cũng cần root (<code>ss -p</code>) — trước khi bật giám sát, chạy trên VM đó (thay <code>USER</code> bằng SSH user sẽ dùng):</p>
+        <p style="margin-bottom:8px">Chỉ VM Linux đã có IP (do VMware Tools báo cáo) mới bật giám sát được. Chọn 1 tài khoản kết nối (mục "Tài khoản kết nối" bên sidebar) rồi bấm Lưu — để trống rồi Lưu để tắt giám sát.</p>
+        <p style="margin-bottom:6px">auth.log/secure chỉ root đọc được, và tên tiến trình đứng sau mỗi kết nối ra ngoài cũng cần root (<code>ss -p</code>) — trước khi bật giám sát, chạy trên VM đó (thay <code>USER</code> bằng username của tài khoản kết nối sẽ dùng):</p>
         <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/wc -l /var/log/auth.log, /usr/bin/wc -l /var/log/secure, /usr/bin/tail -n +* /var/log/auth.log, /usr/bin/tail -n +* /var/log/secure, /usr/bin/ss *' | sudo tee /etc/sudoers.d/netadmin-ssh-monitor</pre>
         <p style="margin-bottom:6px;font-size:12px">(Thiếu dòng <code>ss *</code> vẫn giám sát kết nối ra ngoài được, chỉ là không biết tên tiến trình — cột "Process" sẽ hiện "không xác định".)</p>
-        <p style="margin-bottom:6px">Cột <strong>Fail2ban</strong>: bấm nút để kiểm tra VM đã cài fail2ban chưa; nếu chưa, hệ thống sẽ hỏi và tự cài đặt + khởi động qua sudo. Cần thêm quyền sudo cho các lệnh cài đặt (thay <code>USER</code> bằng SSH user):</p>
+        <p style="margin-bottom:6px">Cột <strong>Fail2ban</strong>: bấm nút để kiểm tra VM đã cài fail2ban chưa; nếu chưa, hệ thống sẽ hỏi và tự cài đặt + khởi động qua sudo. Cần thêm quyền sudo cho các lệnh cài đặt (thay <code>USER</code> bằng username của tài khoản kết nối):</p>
         <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client' | sudo tee /etc/sudoers.d/netadmin-fail2ban-install</pre>
+      </div>
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="manageSearch" placeholder="Tìm theo tên VM, IP..." value="${manageSearchFilter}">
+        </div>
       </div>
       <div id="securityManageTableWrap"></div>
     </div>`;
+  document.getElementById('manageSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { manageSearchFilter = e.target.value; managePagination.page = 1; renderManageRows(); }, 300);
+  });
   renderManageRows();
 }
 
 async function saveSecuritySshUser(id, btn) {
-  const userInput = document.querySelector(`.sec-ssh-user[data-id="${id}"]`);
+  const credSelect = document.querySelector(`.sec-ssh-cred[data-id="${id}"]`);
   const portInput = document.querySelector(`.sec-ssh-port[data-id="${id}"]`);
-  const sshUser = userInput.value.trim();
+  const credentialId = credSelect.value || null;
   const sshPort = Number(portInput.value) || 22;
   btn.disabled = true;
   try {
-    await api(`/security/vms/${id}/ssh-user`, 'PATCH', { sshUser, sshPort });
-    toast(sshUser ? 'Đã bật giám sát SSH' : 'Đã tắt giám sát SSH', 'success');
+    await api(`/security/vms/${id}/ssh-user`, 'PATCH', { credentialId, sshPort });
+    toast(credentialId ? 'Đã bật giám sát SSH' : 'Đã tắt giám sát SSH', 'success');
     renderSecurity();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
 }
@@ -3014,6 +3305,158 @@ async function deleteRoleEntry(id, name) {
     await api(`/roles/${id}`, 'DELETE');
     toast('Đã xóa vai trò', 'success');
     loadRoleTable();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── SSH CREDENTIALS (Tài khoản kết nối, cần quyền ssh_credentials.manage) ─────
+let credentialRows = [];
+let credentialPagination = newPagination();
+
+async function renderCredentials() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    credentialRows = await api('/ssh-credentials');
+    credentialPagination.page = 1;
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Tài khoản kết nối</div><div class="page-subtitle">Quản lý tài khoản SSH (private key hoặc mật khẩu) dùng để kết nối vào máy chủ/VM</div></div>
+      <button class="btn btn-primary" onclick="openCredentialForm()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Thêm tài khoản
+      </button>
+    </div>
+    <div class="table-wrap"><div id="credentialTableBody"></div></div>`;
+    renderCredentialRows();
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function credentialAuthBadge(type) {
+  return type === 'password' ? `<span class="tag">Mật khẩu</span>` : `<span class="tag">Private Key</span>`;
+}
+
+function renderCredentialRows() {
+  const tbody = document.getElementById('credentialTableBody');
+  if (!credentialRows.length) {
+    tbody.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg><h3>Chưa có tài khoản kết nối nào</h3><p>Thêm tài khoản SSH (private key hoặc mật khẩu) để dùng cho giám sát máy chủ/VM</p></div>`;
+    return;
+  }
+  const rows = paginateRows(credentialRows, credentialPagination);
+  const rowOffset = (credentialPagination.page - 1) * credentialPagination.pageSize;
+  tbody.innerHTML = `<table>
+      <thead><tr><th>#</th><th>Tên</th><th>Loại</th><th>Username</th><th>Mặc định</th><th>Đang dùng</th><th>Ghi chú</th><th>Hành động</th></tr></thead>
+      <tbody>${rows.map((cr, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td style="font-weight:600">${cr.name}</td>
+          <td>${credentialAuthBadge(cr.auth_type)}</td>
+          <td style="font-family:'Fira Code',monospace;font-size:13px">${cr.username}</td>
+          <td>${cr.is_default ? '<span class="status online"><span class="dot"></span>Mặc định</span>' : ''}</td>
+          <td>${cr.usage_count} máy</td>
+          <td style="font-size:12px;color:var(--fg-muted)">${cr.notes || ''}</td>
+          <td><div class="actions">
+            <button class="btn-icon edit" title="Sửa" onclick='openCredentialForm(${JSON.stringify(cr).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon delete" title="Xóa" onclick="deleteCredentialEntry(${cr.id}, '${escAttr(cr.name)}', ${cr.usage_count})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+          </div></td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(credentialPagination, credentialRows.length, 'credentialPagination', 'renderCredentialRows')}`;
+}
+
+function openCredentialForm(cred) {
+  const cr = typeof cred === 'string' ? JSON.parse(cred) : cred;
+  const isEdit = cr && cr.id;
+  const authType = cr?.auth_type || 'private_key';
+  openModal(isEdit ? `Sửa tài khoản — ${cr.name}` : 'Thêm tài khoản kết nối', `
+    <form id="credentialForm" onsubmit="saveCredential(event, ${isEdit ? cr.id : 'null'})">
+      <div class="form-grid">
+        <div class="form-group full"><label>Tên *</label><input type="text" name="name" value="${cr?.name || ''}" required placeholder="vd: dev, root-key, win-admin"></div>
+        <div class="form-group full"><label>Loại xác thực</label>
+          <select name="auth_type" class="form-select" onchange="onCredentialAuthTypeChange(this.value)">
+            <option value="private_key" ${authType === 'private_key' ? 'selected' : ''}>Private Key (SSH)</option>
+            <option value="password" ${authType === 'password' ? 'selected' : ''}>Mật khẩu</option>
+          </select>
+        </div>
+        <div class="form-group full"><label>Username *</label><input type="text" name="username" value="${cr?.username || ''}" required placeholder="dev"></div>
+      </div>
+      <div id="credAuthFields-private_key" style="display:${authType === 'password' ? 'none' : 'block'};margin-top:10px">
+        <div class="form-group full"><label>Private Key ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><textarea name="private_key" rows="6" style="font-family:'Fira Code',monospace;font-size:12px" placeholder="${isEdit && cr?.has_private_key ? '(đã có key — để trống để giữ nguyên)' : '-----BEGIN OPENSSH PRIVATE KEY-----...'}"></textarea></div>
+        <div class="form-group full"><label>Passphrase (nếu key có mật khẩu, để trống nếu không đổi)</label><input type="password" name="passphrase" autocomplete="new-password"></div>
+      </div>
+      <div id="credAuthFields-password" style="display:${authType === 'password' ? 'block' : 'none'};margin-top:10px">
+        <div class="form-group full"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><input type="password" name="password" placeholder="${isEdit && cr?.has_password ? '••••••••' : ''}" autocomplete="new-password"></div>
+      </div>
+      <div class="form-group full" style="margin-top:10px">
+        <label style="text-transform:none;font-size:14px"><input type="checkbox" name="is_default" ${cr?.is_default ? 'checked' : ''} style="width:auto;margin-right:6px"> Đặt làm mặc định (gợi ý sẵn khi bật giám sát SSH cho VM Linux mới)</label>
+      </div>
+      <div class="form-group full" style="margin-top:10px"><label>Ghi chú</label><textarea name="notes" rows="2">${cr?.notes || ''}</textarea></div>
+      <div style="margin-top:10px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="credTestHost" placeholder="IP/host để kiểm tra" style="max-width:180px">
+          <input type="number" id="credTestPort" placeholder="Port" value="22" style="max-width:80px">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="testCredentialConnection(${isEdit ? cr.id : 'null'})">Kiểm tra kết nối</button>
+        </div>
+        <div id="credTestResult" style="margin-top:6px;font-size:13px"></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm tài khoản'}</button>
+      </div>
+    </form>`);
+}
+
+function onCredentialAuthTypeChange(type) {
+  document.getElementById('credAuthFields-private_key').style.display = type === 'password' ? 'none' : 'block';
+  document.getElementById('credAuthFields-password').style.display = type === 'password' ? 'block' : 'none';
+}
+
+async function testCredentialConnection(id) {
+  const host = document.getElementById('credTestHost').value.trim();
+  const port = Number(document.getElementById('credTestPort').value) || 22;
+  const resultEl = document.getElementById('credTestResult');
+  if (!host) { resultEl.innerHTML = `<span style="color:var(--yellow)">Nhập host để kiểm tra</span>`; return; }
+  if (!id) {
+    resultEl.innerHTML = `<span style="color:var(--yellow)">Lưu tài khoản trước, sau đó bấm "Kiểm tra kết nối" lại ở trang danh sách</span>`;
+    return;
+  }
+  resultEl.innerHTML = `<span style="color:var(--fg-dim)">Đang kiểm tra...</span>`;
+  try {
+    const result = await api('/ssh-credentials/test', 'POST', { credentialId: id, host, port });
+    resultEl.innerHTML = result.ok ? `<span style="color:var(--accent)">✓ ${result.message}</span>` : `<span style="color:var(--red)">✗ ${result.message}</span>`;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`;
+  }
+}
+
+async function saveCredential(e, id) {
+  e.preventDefault();
+  const form = e.target;
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  const fd = new FormData(form);
+  const payload = {
+    name: fd.get('name'), auth_type: fd.get('auth_type'), username: fd.get('username'),
+    private_key: fd.get('private_key') || '', passphrase: fd.get('passphrase') || '',
+    password: fd.get('password') || '', is_default: fd.get('is_default') === 'on', notes: fd.get('notes') || ''
+  };
+  try {
+    if (id) await api(`/ssh-credentials/${id}`, 'PUT', payload);
+    else await api('/ssh-credentials', 'POST', payload);
+    toast(id ? 'Đã cập nhật tài khoản' : 'Đã thêm tài khoản', 'success');
+    closeModal();
+    renderCredentials();
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+async function deleteCredentialEntry(id, name, usageCount) {
+  if (usageCount > 0) { toast(`Đang được dùng bởi ${usageCount} máy chủ/VM — gỡ hết trước khi xóa`, 'error'); return; }
+  if (!confirm(`Xóa tài khoản kết nối "${name}"?`)) return;
+  try {
+    await api(`/ssh-credentials/${id}`, 'DELETE');
+    toast('Đã xóa tài khoản', 'success');
+    renderCredentials();
   } catch (e) { toast(e.message, 'error'); }
 }
 

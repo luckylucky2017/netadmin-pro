@@ -1,14 +1,9 @@
 // Collects real CPU/RAM/Disk usage from Linux servers via SSH and writes to metrics_history —
 // same table/shape as metrics-simulator.js, so the alert engine and UI don't care which one filled it.
-// Only servers with ssh_user configured are collected here; metrics-simulator.js covers the rest.
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
+// Only servers with an SSH credential assigned are collected here; metrics-simulator.js covers the rest.
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
-
-const KEY_PATH = process.env.SSH_PRIVATE_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
-const KEY_AVAILABLE = fs.existsSync(KEY_PATH);
+const sshCredentials = require('./ssh-credentials');
 
 // Two /proc/stat samples 1s apart give an accurate instantaneous CPU% without needing `mpstat`/`bc`.
 const COLLECT_SCRIPT = `
@@ -34,16 +29,11 @@ function parseMetrics(stdout) {
 }
 
 async function collectServer(server) {
+  const opts = await sshCredentials.buildConnectOptions(server);
+  if (!opts) return; // no credential assigned — metrics-simulator.js covers it instead
   const ssh = new NodeSSH();
   try {
-    await ssh.connect({
-      host: server.ip_address,
-      port: server.ssh_port || 22,
-      username: server.ssh_user,
-      privateKeyPath: KEY_PATH,
-      passphrase: process.env.SSH_PASSPHRASE || undefined,
-      readyTimeout: 8000
-    });
+    await ssh.connect(opts);
     const result = await ssh.execCommand(COLLECT_SCRIPT);
     if (result.code !== 0) throw new Error(result.stderr || `Lệnh thoát với code ${result.code}`);
     const v = parseMetrics(result.stdout);
@@ -58,11 +48,7 @@ async function collectServer(server) {
 }
 
 async function collectAll() {
-  if (!KEY_AVAILABLE) {
-    console.warn(`[ssh-collector] Không tìm thấy private key tại ${KEY_PATH} — bỏ qua thu thập SSH (server không có ssh_user vẫn dùng dữ liệu mô phỏng). Đặt SSH_PRIVATE_KEY_PATH trong .env nếu key ở nơi khác.`);
-    return;
-  }
-  const servers = await db.prepare("SELECT * FROM servers WHERE status != 'offline' AND ssh_user IS NOT NULL AND ssh_user != ''").all();
+  const servers = await db.prepare("SELECT * FROM servers WHERE status != 'offline' AND ssh_credential_id IS NOT NULL").all();
   if (!servers.length) return;
   await Promise.allSettled(servers.map(collectServer));
 }
