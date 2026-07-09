@@ -396,6 +396,7 @@ function navigate(page) {
   if (page !== 'security' && securityRefreshTimer) { clearInterval(securityRefreshTimer); securityRefreshTimer = null; }
   if (page !== 'alerts' && alertsRefreshTimer) { clearInterval(alertsRefreshTimer); alertsRefreshTimer = null; }
   if (page !== 'vcenter' && vcenterRefreshTimer) { clearInterval(vcenterRefreshTimer); vcenterRefreshTimer = null; }
+  if (page !== 'pfsense' && pfsenseRefreshTimer) { clearInterval(pfsenseRefreshTimer); pfsenseRefreshTimer = null; }
   if (page !== 'dashboard' && dashboardRefreshTimer) { clearInterval(dashboardRefreshTimer); dashboardRefreshTimer = null; }
   currentPage = page;
   localStorage.setItem(LAST_PAGE_KEY, page);
@@ -3553,6 +3554,12 @@ async function renderPfsense() {
     <div class="page-header">
       <div><div class="page-title">pfSense</div><div class="page-subtitle">Quản lý firewall pfSense qua REST API — trạng thái, rule, VPN</div></div>
       <div style="display:flex;gap:8px;align-items:center">
+        <select class="filter-select" id="pfsenseRefreshSelect" onchange="onPfsenseRefreshIntervalChange(this.value)">
+          <option value="0">Tự động: Tắt</option>
+          <option value="5000">Auto (5s)</option>
+          <option value="10000">10s</option>
+          <option value="15000">15s</option>
+        </select>
         ${pfsenseFirewallsCache.length ? `<select class="filter-select" id="pfsenseFirewallSelect" onchange="onPfsenseFirewallChange(this.value)">
           ${pfsenseFirewallsCache.map(f => `<option value="${f.id}" ${f.id === pfsenseFirewallId ? 'selected' : ''}>${f.name}</option>`).join('')}
         </select>` : ''}
@@ -3565,6 +3572,7 @@ async function renderPfsense() {
       <div class="filter-tab ${pfsenseTab === 'firewalls' ? 'active' : ''}" data-tab="firewalls" onclick="setPfsenseTab('firewalls')" data-permission="pfsense.manage">Kết nối pfSense</div>
     </div>
     <div id="pfsenseTabBody"></div>`;
+    document.getElementById('pfsenseRefreshSelect').value = String(pfsenseRefreshMs);
     applyPermissionVisibility();
     renderPfsenseTabBody();
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
@@ -3581,6 +3589,33 @@ function setPfsenseTab(tab) {
   renderPfsenseTabBody();
 }
 
+let pfsenseRefreshMs = 0;
+let pfsenseRefreshTimer = null;
+
+function onPfsenseRefreshIntervalChange(val) {
+  pfsenseRefreshMs = Number(val) || 0;
+  if (pfsenseRefreshTimer) { clearInterval(pfsenseRefreshTimer); pfsenseRefreshTimer = null; }
+  if (pfsenseRefreshMs > 0) pfsenseRefreshTimer = setInterval(refreshPfsenseData, pfsenseRefreshMs);
+}
+
+// Only refreshes the currently active tab's data in place (see loadPfsenseStatusData()/
+// loadPfsenseVpnData()/renderPfsenseRulesTable() above) — never the connection-management tab,
+// since that one is Admin-only CRUD with forms that a background refresh could disrupt mid-edit.
+// Also skips entirely while a modal is open, for the same reason.
+async function refreshPfsenseData() {
+  if (currentPage !== 'pfsense') { clearInterval(pfsenseRefreshTimer); pfsenseRefreshTimer = null; return; }
+  if (!pfsenseFirewallId) return;
+  if (document.getElementById('modalOverlay')?.classList.contains('open')) return;
+  try {
+    if (pfsenseTab === 'status') await loadPfsenseStatusData();
+    else if (pfsenseTab === 'vpn') await loadPfsenseVpnData();
+    else if (pfsenseTab === 'rules') {
+      pfsenseRulesCache = await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules`);
+      renderPfsenseRulesTable();
+    }
+  } catch { /* transient — next tick retries */ }
+}
+
 function renderPfsenseTabBody() {
   if (pfsenseTab === 'firewalls') return renderPfsenseFirewallsTab();
   if (!pfsenseFirewallId) {
@@ -3593,47 +3628,60 @@ function renderPfsenseTabBody() {
 }
 
 // ── Tab: Trạng thái ──
+// Skeleton is built once (with stable ids) by renderPfsenseStatusTab(); loadPfsenseStatusData()
+// only updates those elements' content in place — reused by the 5s auto-refresh timer so it
+// doesn't flash a loading spinner over the whole tab every tick (same convention as
+// refreshSecurityData()).
 async function renderPfsenseStatusTab() {
   const body = document.getElementById('pfsenseTabBody');
-  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-  try {
-    const { system, interfaces } = await api(`/pfsense/firewalls/${pfsenseFirewallId}/status`);
-    pfsenseInterfacesCache = interfaces;
-    body.innerHTML = `
+  body.innerHTML = `
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg></div>
         <div class="stat-label">CPU</div>
-        <div class="stat-value blue">${system.cpu_usage ?? '—'}%</div>
+        <div class="stat-value blue" id="pfStatCpu">—</div>
       </div>
       <div class="stat-card">
         <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2z"/></svg></div>
         <div class="stat-label">RAM</div>
-        <div class="stat-value green">${system.mem_usage ?? '—'}%</div>
+        <div class="stat-value green" id="pfStatRam">—</div>
       </div>
       <div class="stat-card">
         <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/></svg></div>
         <div class="stat-label">Ổ đĩa</div>
-        <div class="stat-value yellow">${system.disk_usage ?? '—'}%</div>
+        <div class="stat-value yellow" id="pfStatDisk">—</div>
       </div>
       <div class="stat-card">
         <div class="stat-icon purple"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
         <div class="stat-label">Uptime</div>
-        <div class="stat-value purple" style="font-size:16px">${system.uptime ?? '—'}</div>
+        <div class="stat-value purple" style="font-size:16px" id="pfStatUptime">—</div>
       </div>
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-title">Phần cứng</div>
-      <div style="font-size:13px;color:var(--fg-muted);line-height:1.8">
-        CPU: ${system.cpu_model || '—'} (${system.cpu_count ?? '?'} lõi)<br>
-        Nền tảng: ${system.platform || '—'}
-      </div>
+      <div style="font-size:13px;color:var(--fg-muted);line-height:1.8" id="pfHardwareInfo">Đang tải...</div>
     </div>
     <div class="table-wrap" style="margin-top:16px">
-      <div class="table-toolbar"><div style="font-weight:600">Interface — băng thông (tự làm mới mỗi lần đồng bộ)</div></div>
+      <div class="table-toolbar"><div style="font-weight:600">Interface — băng thông</div></div>
       <table>
         <thead><tr><th>Tên</th><th>Mô tả</th><th>Trạng thái</th><th>Địa chỉ IP</th><th>Gateway</th><th>Vào (In)</th><th>Ra (Out)</th><th>Tổng đã truyền</th></tr></thead>
-        <tbody>${interfaces.map(i => `
+        <tbody id="pfsenseInterfacesTableBody"><tr><td colspan="8"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+      </table>
+    </div>`;
+  await loadPfsenseStatusData();
+}
+
+async function loadPfsenseStatusData() {
+  if (!document.getElementById('pfsenseInterfacesTableBody')) return;
+  try {
+    const { system, interfaces } = await api(`/pfsense/firewalls/${pfsenseFirewallId}/status`);
+    pfsenseInterfacesCache = interfaces;
+    document.getElementById('pfStatCpu').textContent = `${system.cpu_usage ?? '—'}%`;
+    document.getElementById('pfStatRam').textContent = `${system.mem_usage ?? '—'}%`;
+    document.getElementById('pfStatDisk').textContent = `${system.disk_usage ?? '—'}%`;
+    document.getElementById('pfStatUptime').textContent = system.uptime ?? '—';
+    document.getElementById('pfHardwareInfo').innerHTML = `CPU: ${system.cpu_model || '—'} (${system.cpu_count ?? '?'} lõi)<br>Nền tảng: ${system.platform || '—'}`;
+    document.getElementById('pfsenseInterfacesTableBody').innerHTML = interfaces.map(i => `
           <tr>
             <td style="font-family:'Fira Code',monospace;font-weight:600">${i.if_name}</td>
             <td>${i.description || '—'}</td>
@@ -3643,11 +3691,10 @@ async function renderPfsenseStatusTab() {
             <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(i.in_bps)}</td>
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(i.out_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(i.in_bytes)} / ↑${fmtBytes(i.out_bytes)}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-    </div>`;
-  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div>`; }
+          </tr>`).join('');
+  } catch (e) {
+    document.getElementById('pfsenseInterfacesTableBody').innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div></td></tr>`;
+  }
 }
 
 // ── Tab: Rule tường lửa ──
@@ -3842,21 +3889,37 @@ async function applyPfsenseChanges(btn) {
 }
 
 // ── Tab: VPN ──
+// Same split-skeleton/in-place-refresh convention as the Trạng thái tab above.
 async function renderPfsenseVpnTab() {
   const body = document.getElementById('pfsenseTabBody');
-  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar"><div style="font-weight:600" id="pfVpnConnsTitle">Kết nối VPN đang hoạt động — sắp xếp theo tổng băng thông đã dùng</div></div>
+      <table>
+        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
+        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="8"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+      </table>
+    </div>
+    <div class="table-wrap" style="margin-top:16px">
+      <div class="table-toolbar"><div style="font-weight:600">Cấu hình OpenVPN Server</div></div>
+      <table>
+        <thead><tr><th>Tên</th><th>Chế độ</th><th>Cổng</th><th>Số client tối đa</th><th></th></tr></thead>
+        <tbody id="pfsenseVpnServersTableBody"><tr><td colspan="5"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+      </table>
+    </div>`;
+  await loadPfsenseVpnData();
+}
+
+async function loadPfsenseVpnData() {
+  if (!document.getElementById('pfsenseVpnConnsTableBody')) return;
   try {
     const [conns, servers] = await Promise.all([
       api(`/pfsense/firewalls/${pfsenseFirewallId}/vpn`),
       api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/servers`).catch(() => [])
     ]);
     const sortedConns = [...conns].sort((a, b) => ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0)));
-    body.innerHTML = `
-    <div class="table-wrap">
-      <div class="table-toolbar"><div style="font-weight:600">Kết nối VPN đang hoạt động (${conns.length}) — sắp xếp theo tổng băng thông đã dùng</div></div>
-      <table>
-        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
-        <tbody>${sortedConns.length ? sortedConns.map(c => `
+    document.getElementById('pfVpnConnsTitle').textContent = `Kết nối VPN đang hoạt động (${conns.length}) — sắp xếp theo tổng băng thông đã dùng`;
+    document.getElementById('pfsenseVpnConnsTableBody').innerHTML = sortedConns.length ? sortedConns.map(c => `
           <tr>
             <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
             <td>${c.tunnel_name}</td>
@@ -3866,15 +3929,8 @@ async function renderPfsenseVpnTab() {
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
-          </tr>`).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`}
-        </tbody>
-      </table>
-    </div>
-    <div class="table-wrap" style="margin-top:16px">
-      <div class="table-toolbar"><div style="font-weight:600">Cấu hình OpenVPN Server</div></div>
-      <table>
-        <thead><tr><th>Tên</th><th>Chế độ</th><th>Cổng</th><th>Số client tối đa</th><th></th></tr></thead>
-        <tbody>${servers.length ? servers.map(s => `
+          </tr>`).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+    document.getElementById('pfsenseVpnServersTableBody').innerHTML = servers.length ? servers.map(s => `
           <tr>
             <td style="font-weight:600">${s.description || s.name}</td>
             <td>${s.mode || '—'}</td>
@@ -3883,12 +3939,11 @@ async function renderPfsenseVpnTab() {
             <td><div class="actions">
               <button class="btn-icon edit" title="Sửa cấu hình" data-permission="pfsense.vpn.manage" onclick='openEditOpenvpnServerForm(${JSON.stringify(s).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
             </div></td>
-          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có OpenVPN server nào</td></tr>`}
-        </tbody>
-      </table>
-    </div>`;
+          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có OpenVPN server nào</td></tr>`;
     applyPermissionVisibility();
-  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div>`; }
+  } catch (e) {
+    document.getElementById('pfsenseVpnConnsTableBody').innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
+  }
 }
 
 function openEditOpenvpnServerForm(server) {
