@@ -8,6 +8,7 @@ Nền tảng giám sát & quản trị hạ tầng CNTT tập trung: máy chủ 
 - **Sức khỏe phần cứng qua IPMI** — trạng thái từng linh kiện (DIMM/CPU/ổ đĩa/quạt/nguồn) và SEL log lỗi qua `ipmitool`.
 - **Giám sát SNMP** — CPU, RAM, uptime, lưu lượng interface cho máy chủ và thiết bị mạng.
 - **vCenter / VM đa cụm** — kết nối nhiều hệ thống vCenter cùng lúc (trang **Cụm vCenter**), đồng bộ inventory theo từng cụm, tạo/clone VM, bật/tắt/khởi động lại, console WebMKS, xóa.
+- **pfSense (tường lửa)** — kết nối firewall pfSense qua REST API (`pfSense-pkg-API`, yêu cầu pfSense ≥ 2.8.0 CE), xem trạng thái hệ thống/interface/gateway, quản lý rule tường lửa (xem/thêm/sửa/bật-tắt/xóa + áp dụng thay đổi), xem kết nối VPN (OpenVPN/IPsec) đang hoạt động và sửa cấu hình OpenVPN server.
 - **Giám sát Uptime** — kiểm tra định kỳ website/API theo khoảng thời gian tùy chọn, biểu đồ thời gian phản hồi, cảnh báo hết hạn SSL.
 - **Cảnh báo (Alerts)** — ngưỡng cấu hình theo CPU/RAM/Disk, xử lý đơn lẻ hoặc hàng loạt (ghi nhận/xử lý xong theo checkbox).
 - **Bảo mật** — nhật ký đăng nhập SSH thật, phát hiện đăng nhập từ nước ngoài, kết nối outbound đáng ngờ, quản lý fail2ban (kiểm tra/bật/tắt) trên từng VM.
@@ -46,6 +47,7 @@ Nền tảng giám sát & quản trị hạ tầng CNTT tập trung: máy chủ 
 | `fail2ban-collector.js` | Đọc trạng thái ban của fail2ban trên các VM đã cài |
 | `uptime-collector.js` | Kiểm tra định kỳ các monitor uptime (website/API) |
 | `alert-engine.js` | Đánh giá ngưỡng cảnh báo đã cấu hình, mở/đóng alert tương ứng |
+| `pfsense-collector.js` | Đồng bộ trạng thái interface/gateway, rule tường lửa, VPN từ các firewall pfSense |
 
 ## Cài đặt
 
@@ -77,7 +79,7 @@ npm start        # production
 npm run dev       # tự khởi động lại khi sửa code (nodemon)
 ```
 
-Ứng dụng chạy tại `http://localhost:3000` (đổi qua biến `PORT`). Lần khởi động đầu tiên, schema MySQL, tài khoản admin, và các bảng cấu hình mặc định sẽ tự động được tạo (có thể tạo schema thủ công trước bằng `schema.sql` ở gốc repo nếu muốn, không bắt buộc). Sau khi đăng nhập, vào các trang **Cụm vCenter**, **Tài khoản kết nối**, **Cài đặt** để cấu hình vCenter/SSH/AI key/SSO.
+Ứng dụng chạy tại `http://localhost:3000` (đổi qua biến `PORT`). Lần khởi động đầu tiên, schema MySQL, tài khoản admin, và các bảng cấu hình mặc định sẽ tự động được tạo (có thể tạo schema thủ công trước bằng `schema.sql` ở gốc repo nếu muốn, không bắt buộc). Sau khi đăng nhập, vào các trang **Cụm vCenter**, **Tài khoản kết nối**, **Cài đặt**, **pfSense** để cấu hình vCenter/SSH/AI key/SSO/firewall.
 
 ## Cấu trúc thư mục
 
@@ -95,6 +97,7 @@ netadmin-pro/
 ├── fail2ban-manager.js        # Nghiệp vụ kiểm tra/bật/tắt fail2ban qua SSH
 ├── ssh-credentials.js         # Giải quyết tài khoản kết nối SSH (private key/mật khẩu) cho collector
 ├── vcenter-client.js / vcenter-registry.js / vcenter-actions.js   # Tích hợp vCenter đa cụm
+├── pfsense-client.js / pfsense-collector.js   # Tích hợp firewall pfSense qua REST API
 ├── routes/                    # REST API, mỗi file 1 nhóm tài nguyên
 └── public/                    # Frontend tĩnh (không build step)
     ├── index.html
@@ -104,12 +107,12 @@ netadmin-pro/
 
 ## Phân quyền (RBAC)
 
-Quyền được định nghĩa tập trung tại `permissions-catalog.js`, nhóm theo khu vực chức năng: **Máy chủ, Thiết bị mạng, vCenter/VM, Ngưỡng cảnh báo, Cảnh báo, Bảo mật, Ping, Giám sát Uptime, Quản trị**. 3 vai trò hệ thống (Admin/Operator/Viewer) được seed sẵn khi khởi động lần đầu; có thể tạo thêm vai trò tùy biến trong trang **Vai trò**.
+Quyền được định nghĩa tập trung tại `permissions-catalog.js`, nhóm theo khu vực chức năng: **Máy chủ, Thiết bị mạng, vCenter/VM, Ngưỡng cảnh báo, Cảnh báo, Bảo mật, Ping, Giám sát Uptime, pfSense, Quản trị**. 3 vai trò hệ thống (Admin/Operator/Viewer) được seed sẵn khi khởi động lần đầu; có thể tạo thêm vai trò tùy biến trong trang **Vai trò**.
 
 ## Lưu ý bảo mật
 
 - `.env` không được commit — xem `.env.example` để biết đầy đủ biến cần cấu hình. `.env` chỉ còn `MYSQL_*`/`PORT`/`SESSION_SECRET`/`ADMIN_EMAIL`/`ADMIN_PASSWORD`.
-- Mật khẩu/khóa kết nối hạ tầng thật (vCenter, SSH, AI key, LDAP) quản lý trong ứng dụng, lưu trong MySQL (bảng `vcenter_clusters`, `ssh_credentials`, `app_settings`) — không hardcode trong mã nguồn, không nằm trong `.env`/git. `schema.sql` chỉ chứa cấu trúc bảng (`mysqldump --no-data`), không có dữ liệu thật.
+- Mật khẩu/khóa kết nối hạ tầng thật (vCenter, SSH, AI key, LDAP, pfSense) quản lý trong ứng dụng, lưu trong MySQL (bảng `vcenter_clusters`, `ssh_credentials`, `app_settings`, `pfsense_firewalls`) — không hardcode trong mã nguồn, không nằm trong `.env`/git. `schema.sql` chỉ chứa cấu trúc bảng (`mysqldump --no-data`), không có dữ liệu thật.
 - Session ký bằng `SESSION_SECRET` — đổi giá trị này sẽ đăng xuất toàn bộ người dùng đang đăng nhập.
 - Chatbot AI chỉ thực thi hành động thay đổi hạ tầng (fail2ban, cảnh báo...) sau bước xác nhận rõ ràng trên giao diện, và luôn kiểm tra quyền của người dùng đang chat trước khi chạy.
 

@@ -437,7 +437,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -3520,6 +3520,572 @@ async function saveSettings(e) {
     toast(err.message, 'error');
     btn.disabled = false;
   }
+}
+
+// ─── pfSense (tường lửa) ────────────────────────────────────────────────────
+let pfsenseTab = 'status';
+let pfsenseFirewallId = null;
+let pfsenseFirewallsCache = [];
+let pfsenseInterfacesCache = [];
+let pfsenseRulesCache = [];
+let pfsenseRulesPagination = newPagination(20);
+let pfsenseRulesSearch = '';
+
+async function renderPfsense() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    pfsenseFirewallsCache = await api('/pfsense/firewalls');
+    if (!pfsenseFirewallsCache.find(f => f.id === pfsenseFirewallId)) {
+      pfsenseFirewallId = pfsenseFirewallsCache[0]?.id || null;
+    }
+    // Chưa có firewall nào -> mở thẳng tab Kết nối thay vì các tab đọc dữ liệu trống khó hiểu.
+    if (!pfsenseFirewallsCache.length) pfsenseTab = 'firewalls';
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">pfSense</div><div class="page-subtitle">Quản lý firewall pfSense qua REST API — trạng thái, rule, VPN</div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        ${pfsenseFirewallsCache.length ? `<select class="filter-select" id="pfsenseFirewallSelect" onchange="onPfsenseFirewallChange(this.value)">
+          ${pfsenseFirewallsCache.map(f => `<option value="${f.id}" ${f.id === pfsenseFirewallId ? 'selected' : ''}>${f.name}</option>`).join('')}
+        </select>` : ''}
+      </div>
+    </div>
+    <div class="filter-tabs" id="pfsenseTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${pfsenseTab === 'status' ? 'active' : ''}" data-tab="status" onclick="setPfsenseTab('status')">Trạng thái</div>
+      <div class="filter-tab ${pfsenseTab === 'rules' ? 'active' : ''}" data-tab="rules" onclick="setPfsenseTab('rules')">Rule tường lửa</div>
+      <div class="filter-tab ${pfsenseTab === 'vpn' ? 'active' : ''}" data-tab="vpn" onclick="setPfsenseTab('vpn')">VPN</div>
+      <div class="filter-tab ${pfsenseTab === 'firewalls' ? 'active' : ''}" data-tab="firewalls" onclick="setPfsenseTab('firewalls')" data-permission="pfsense.manage">Kết nối pfSense</div>
+    </div>
+    <div id="pfsenseTabBody"></div>`;
+    applyPermissionVisibility();
+    renderPfsenseTabBody();
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function onPfsenseFirewallChange(id) {
+  pfsenseFirewallId = Number(id);
+  renderPfsenseTabBody();
+}
+
+function setPfsenseTab(tab) {
+  pfsenseTab = tab;
+  document.querySelectorAll('#pfsenseTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderPfsenseTabBody();
+}
+
+function renderPfsenseTabBody() {
+  if (pfsenseTab === 'firewalls') return renderPfsenseFirewallsTab();
+  if (!pfsenseFirewallId) {
+    document.getElementById('pfsenseTabBody').innerHTML = `<div class="empty-state"><h3>Chưa có firewall pfSense nào</h3><p>Vào tab "Kết nối pfSense" để thêm</p></div>`;
+    return;
+  }
+  if (pfsenseTab === 'status') return renderPfsenseStatusTab();
+  if (pfsenseTab === 'rules') return renderPfsenseRulesTab();
+  if (pfsenseTab === 'vpn') return renderPfsenseVpnTab();
+}
+
+// ── Tab: Trạng thái ──
+async function renderPfsenseStatusTab() {
+  const body = document.getElementById('pfsenseTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const { system, interfaces } = await api(`/pfsense/firewalls/${pfsenseFirewallId}/status`);
+    pfsenseInterfacesCache = interfaces;
+    body.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg></div>
+        <div class="stat-label">CPU</div>
+        <div class="stat-value blue">${system.cpu_usage ?? '—'}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l5 5v13a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2z"/></svg></div>
+        <div class="stat-label">RAM</div>
+        <div class="stat-value green">${system.mem_usage ?? '—'}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0018 0V5"/></svg></div>
+        <div class="stat-label">Ổ đĩa</div>
+        <div class="stat-value yellow">${system.disk_usage ?? '—'}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon purple"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+        <div class="stat-label">Uptime</div>
+        <div class="stat-value purple" style="font-size:16px">${system.uptime ?? '—'}</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Phần cứng</div>
+      <div style="font-size:13px;color:var(--fg-muted);line-height:1.8">
+        CPU: ${system.cpu_model || '—'} (${system.cpu_count ?? '?'} lõi)<br>
+        Nền tảng: ${system.platform || '—'}
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:16px">
+      <div class="table-toolbar"><div style="font-weight:600">Interface</div></div>
+      <table>
+        <thead><tr><th>Tên</th><th>Mô tả</th><th>Trạng thái</th><th>Địa chỉ IP</th><th>Gateway</th></tr></thead>
+        <tbody>${interfaces.map(i => `
+          <tr>
+            <td style="font-family:'Fira Code',monospace;font-weight:600">${i.if_name}</td>
+            <td>${i.description || '—'}</td>
+            <td>${i.status === 'up' ? '<span class="status online"><span class="dot"></span>Up</span>' : '<span class="status offline"><span class="dot"></span>Down</span>'}</td>
+            <td style="font-family:'Fira Code',monospace">${i.ip_address || '—'}</td>
+            <td>${i.gateway_status ? (i.gateway_status === 'online' ? '<span class="status online"><span class="dot"></span>Online</span>' : `<span class="status offline"><span class="dot"></span>${i.gateway_status}</span>`) : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div>`; }
+}
+
+// ── Tab: Rule tường lửa ──
+async function renderPfsenseRulesTab() {
+  const body = document.getElementById('pfsenseTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    // Interface list cần cho form thêm/sửa rule — tải kèm nếu chưa có (vd vào thẳng tab Rule).
+    if (!pfsenseInterfacesCache.length) {
+      const status = await api(`/pfsense/firewalls/${pfsenseFirewallId}/status`).catch(() => null);
+      if (status) pfsenseInterfacesCache = status.interfaces;
+    }
+    pfsenseRulesCache = await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules`);
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="pfsenseRuleSearch" placeholder="Tìm theo mô tả/nguồn/đích..." value="${pfsenseRulesSearch}">
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="applyPfsenseChanges(this)" data-permission="pfsense.rules.write">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          Áp dụng thay đổi
+        </button>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddRuleForm()" data-permission="pfsense.rules.write">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm rule
+        </button>
+      </div>
+      <div id="pfsenseRulesTableBody"></div>
+    </div>`;
+    document.getElementById('pfsenseRuleSearch').addEventListener('input', () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        pfsenseRulesSearch = document.getElementById('pfsenseRuleSearch').value;
+        pfsenseRulesPagination.page = 1;
+        renderPfsenseRulesTable();
+      }, 300);
+    });
+    renderPfsenseRulesTable();
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải rule</h3><p>${e.message}</p></div>`; }
+}
+
+function renderPfsenseRulesTable() {
+  const el = document.getElementById('pfsenseRulesTableBody');
+  if (!el) return;
+  const q = pfsenseRulesSearch.trim().toLowerCase();
+  const filtered = !q ? pfsenseRulesCache : pfsenseRulesCache.filter(r =>
+    (r.description || '').toLowerCase().includes(q) || (r.source || '').toLowerCase().includes(q) || (r.destination || '').toLowerCase().includes(q) || (r.interface || '').toLowerCase().includes(q));
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty-state"><h3>Không có rule nào</h3></div>`;
+    return;
+  }
+  const page = paginateRows(filtered, pfsenseRulesPagination);
+  el.innerHTML = `<table>
+    <thead><tr><th>Interface</th><th>Hành động</th><th>Giao thức</th><th>Nguồn</th><th>Đích</th><th>Mô tả</th><th>Bật</th><th></th></tr></thead>
+    <tbody>${page.map(r => `
+      <tr>
+        <td style="font-family:'Fira Code',monospace">${r.interface || '—'}</td>
+        <td>${ruleActionBadge(r.action)}</td>
+        <td style="font-family:'Fira Code',monospace">${r.protocol || 'any'}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:12px">${r.source || '—'}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:12px">${r.destination || '—'}</td>
+        <td>${r.description || '—'}</td>
+        <td><label class="switch" title="${r.enabled ? 'Bật' : 'Tắt'}"><input type="checkbox" ${r.enabled ? 'checked' : ''} data-permission="pfsense.rules.write" onchange="togglePfsenseRule('${r.rule_tracker}', !this.checked, this)"><span class="slider"></span></label></td>
+        <td><div class="actions">
+          <button class="btn-icon edit" title="Sửa" data-permission="pfsense.rules.write" onclick='openEditRuleForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="pfsense.rules.delete" onclick="openDeleteRuleConfirm('${r.rule_tracker}', '${escAttr(r.description || r.rule_tracker)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>${paginationBar(pfsenseRulesPagination, filtered.length, 'pfsenseRulesPagination', 'renderPfsenseRulesTable')}`;
+  applyPermissionVisibility();
+}
+
+function ruleActionBadge(action) {
+  if (action === 'pass') return `<span class="status online"><span class="dot"></span>Pass</span>`;
+  if (action === 'block' || action === 'reject') return `<span class="status offline"><span class="dot"></span>${action === 'block' ? 'Block' : 'Reject'}</span>`;
+  return action || '—';
+}
+
+function openAddRuleForm() {
+  openModal('Thêm rule tường lửa', ruleFormHtml());
+}
+function openEditRuleForm(rule) {
+  openModal(`Sửa rule — ${rule.description || rule.rule_tracker}`, ruleFormHtml(rule));
+}
+function ruleFormHtml(rule) {
+  const isEdit = !!rule;
+  const ifaceOptions = pfsenseInterfacesCache.length
+    ? pfsenseInterfacesCache.map(i => `<option value="${i.if_name}" ${rule?.interface === i.if_name ? 'selected' : ''}>${i.if_name}${i.description ? ' - ' + i.description : ''}</option>`).join('')
+    : `<option value="${rule?.interface || 'wan'}">${rule?.interface || 'wan'}</option>`;
+  return `
+    <form id="ruleForm" onsubmit="saveRule(event, ${isEdit ? `'${rule.rule_tracker}'` : 'null'})">
+      <div class="form-grid">
+        <div class="form-group"><label>Interface *</label><select name="interface" required>${ifaceOptions}</select></div>
+        <div class="form-group"><label>Hành động *</label>
+          <select name="type" required>
+            <option value="pass" ${rule?.action === 'pass' ? 'selected' : ''}>Pass (cho phép)</option>
+            <option value="block" ${rule?.action === 'block' ? 'selected' : ''}>Block (chặn âm thầm)</option>
+            <option value="reject" ${rule?.action === 'reject' ? 'selected' : ''}>Reject (chặn + phản hồi)</option>
+          </select>
+        </div>
+        <div class="form-group"><label>IP version *</label>
+          <select name="ipprotocol" required>
+            <option value="inet" ${!rule || rule?.ipprotocol !== 'inet6' ? 'selected' : ''}>IPv4</option>
+            <option value="inet6">IPv6</option>
+            <option value="inet46">IPv4+IPv6</option>
+          </select>
+        </div>
+        <div class="form-group"><label>Giao thức</label>
+          <select name="protocol">
+            <option value="" ${!rule?.protocol ? 'selected' : ''}>Any</option>
+            ${['tcp', 'udp', 'tcp/udp', 'icmp', 'esp', 'gre'].map(p => `<option value="${p}" ${rule?.protocol === p ? 'selected' : ''}>${p}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label>Nguồn *</label><input type="text" name="source" value="${rule?.source || 'any'}" required placeholder="any, lan, 10.0.0.0/24..."></div>
+        <div class="form-group"><label>Cổng nguồn</label><input type="text" name="source_port" placeholder="để trống = any"></div>
+        <div class="form-group"><label>Đích *</label><input type="text" name="destination" value="${rule?.destination || 'any'}" required placeholder="any, wan:ip, 10.0.0.0/24..."></div>
+        <div class="form-group"><label>Cổng đích</label><input type="text" name="destination_port" placeholder="để trống = any"></div>
+        <div class="form-group full"><label>Mô tả</label><input type="text" name="descr" value="${rule?.description || ''}" placeholder="Mục đích của rule này"></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="log" style="width:auto;margin-right:6px"> Ghi log traffic khớp rule</label>
+        </div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="disabled" ${rule && !rule.enabled ? 'checked' : ''} style="width:auto;margin-right:6px"> Tắt rule (không có hiệu lực)</label>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--fg-muted)">Sau khi lưu, bấm "Áp dụng thay đổi" ở trang danh sách để rule có hiệu lực trên pfSense (đúng hành vi mặc định của pfSense).</div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm rule'}</button>
+      </div>
+    </form>`;
+}
+
+async function saveRule(e, tracker) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    type: fd.get('type'), interface: fd.get('interface'), ipprotocol: fd.get('ipprotocol'),
+    protocol: fd.get('protocol') || undefined, source: fd.get('source'), destination: fd.get('destination'),
+    source_port: fd.get('source_port') || null, destination_port: fd.get('destination_port') || null,
+    descr: fd.get('descr') || '', disabled: fd.get('disabled') === 'on', log: fd.get('log') === 'on'
+  };
+  try {
+    if (tracker) await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules/${tracker}`, 'PUT', payload);
+    else await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules`, 'POST', payload);
+    toast(tracker ? 'Đã cập nhật rule' : 'Đã thêm rule', 'success');
+    closeModal();
+    renderPfsenseRulesTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function togglePfsenseRule(tracker, disabled, checkboxEl) {
+  checkboxEl.disabled = true;
+  try {
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules/${tracker}/toggle`, 'PATCH', { disabled });
+    toast(disabled ? 'Đã tắt rule' : 'Đã bật rule', 'success');
+    renderPfsenseRulesTab();
+  } catch (e) { toast(e.message, 'error'); renderPfsenseRulesTab(); }
+}
+
+function openDeleteRuleConfirm(tracker, label) {
+  openModal('Xóa rule tường lửa', `
+    <form id="ruleDeleteForm" onsubmit="confirmDeleteRule(event, '${tracker}')">
+      <p style="font-size:14px;margin-bottom:12px">Thao tác này sẽ xóa rule <strong>${label}</strong> khỏi pfSense thật. Không thể hoàn tác. Nhớ bấm "Áp dụng thay đổi" sau khi xóa.</p>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteRule(e, tracker) {
+  e.preventDefault();
+  try {
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules/${tracker}`, 'DELETE');
+    toast('Đã xóa rule', 'success');
+    closeModal();
+    renderPfsenseRulesTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function applyPfsenseChanges(btn) {
+  btn.disabled = true;
+  try {
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/apply`, 'POST');
+    toast('Đã áp dụng thay đổi lên pfSense', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; }
+}
+
+// ── Tab: VPN ──
+async function renderPfsenseVpnTab() {
+  const body = document.getElementById('pfsenseTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const [conns, servers] = await Promise.all([
+      api(`/pfsense/firewalls/${pfsenseFirewallId}/vpn`),
+      api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/servers`).catch(() => [])
+    ]);
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar"><div style="font-weight:600">Kết nối VPN đang hoạt động (${conns.length})</div></div>
+      <table>
+        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ từ xa</th><th>Kết nối từ</th></tr></thead>
+        <tbody>${conns.length ? conns.map(c => `
+          <tr>
+            <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
+            <td>${c.tunnel_name}</td>
+            <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
+            <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
+            <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
+          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+    <div class="table-wrap" style="margin-top:16px">
+      <div class="table-toolbar"><div style="font-weight:600">Cấu hình OpenVPN Server</div></div>
+      <table>
+        <thead><tr><th>Tên</th><th>Chế độ</th><th>Cổng</th><th>Số client tối đa</th><th></th></tr></thead>
+        <tbody>${servers.length ? servers.map(s => `
+          <tr>
+            <td style="font-weight:600">${s.description || s.name}</td>
+            <td>${s.mode || '—'}</td>
+            <td>${s.local_port || '—'}</td>
+            <td>${s.maxclients ?? '—'}</td>
+            <td><div class="actions">
+              <button class="btn-icon edit" title="Sửa cấu hình" data-permission="pfsense.vpn.manage" onclick='openEditOpenvpnServerForm(${JSON.stringify(s).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            </div></td>
+          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có OpenVPN server nào</td></tr>`}
+        </tbody>
+      </table>
+    </div>`;
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div>`; }
+}
+
+function openEditOpenvpnServerForm(server) {
+  openModal(`Sửa OpenVPN Server — ${server.description || server.name}`, `
+    <form id="ovpnServerForm" onsubmit="saveOpenvpnServer(event, ${server.id})">
+      <p style="font-size:13px;color:var(--yellow);margin-bottom:12px">⚠ Sửa cấu hình này có thể làm gián đoạn các kết nối VPN đang hoạt động. Xác nhận kỹ trước khi lưu.</p>
+      <div class="form-grid">
+        <div class="form-group full"><label>Mô tả</label><input type="text" name="description" value="${server.description || ''}"></div>
+        <div class="form-group"><label>Số client tối đa</label><input type="number" name="maxclients" value="${server.maxclients ?? ''}" min="1" placeholder="không giới hạn nếu để trống"></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="disable" ${server.disable ? 'checked' : ''} style="width:auto;margin-right:6px"> Tắt server này (ngắt toàn bộ kết nối VPN qua server này)</label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">Lưu thay đổi</button>
+      </div>
+    </form>`);
+}
+
+async function saveOpenvpnServer(e, vpnid) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    description: fd.get('description') || '',
+    maxclients: fd.get('maxclients') ? Number(fd.get('maxclients')) : null,
+    disable: fd.get('disable') === 'on'
+  };
+  try {
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/servers/${vpnid}`, 'PUT', payload);
+    toast('Đã cập nhật cấu hình OpenVPN', 'success');
+    closeModal();
+    renderPfsenseVpnTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// ── Tab: Kết nối pfSense (CRUD) ──
+async function renderPfsenseFirewallsTab() {
+  const body = document.getElementById('pfsenseTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const firewalls = pfsenseFirewallsCache.length ? pfsenseFirewallsCache : await api('/pfsense/firewalls');
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div style="font-size:13px;color:var(--fg-muted)">Kết nối tới firewall pfSense thật qua REST API (pfSense-pkg-API)</div>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddFirewallForm()" data-permission="pfsense.manage">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm firewall
+        </button>
+      </div>
+      <div id="pfsenseFirewallsBody">${renderPfsenseFirewallsTable(firewalls)}</div>
+    </div>`;
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function renderPfsenseFirewallsTable(firewalls) {
+  if (!firewalls.length) {
+    return `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20"/></svg><h3>Chưa có firewall pfSense nào</h3><p>Bấm "Thêm firewall" để kết nối</p></div>`;
+  }
+  return `<table>
+    <thead><tr><th>Tên</th><th>Host</th><th>Xác thực</th><th>Trạng thái</th><th>Đồng bộ lần cuối</th><th>Bật</th><th>Hành động</th></tr></thead>
+    <tbody>${firewalls.map(f => `
+      <tr>
+        <td style="font-weight:600">${f.name}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:13px">${f.host}:${f.port}</td>
+        <td style="font-size:13px">${f.auth_type === 'api_key' ? 'API Key' : `Basic (${f.username})`}</td>
+        <td>${clusterStatusBadge(f.status, f.last_error)}</td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${f.last_synced_at ? formatTime(f.last_synced_at) : 'chưa đồng bộ'}</span></td>
+        <td>${f.enabled ? '<span class="status online"><span class="dot"></span>Bật</span>' : '<span class="status offline"><span class="dot"></span>Tắt</span>'}</td>
+        <td><div class="actions">
+          <button class="btn-icon" title="Đồng bộ ngay" data-permission="pfsense.sync" onclick="syncOneFirewallUi(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="btn-icon" title="Kiểm tra kết nối" data-permission="pfsense.manage" onclick="testSavedFirewall(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>
+          <button class="btn-icon edit" title="Sửa" data-permission="pfsense.manage" onclick='openEditFirewallForm(${JSON.stringify({ id: f.id, name: f.name, host: f.host, port: f.port, auth_type: f.auth_type, username: f.username, insecure: !!f.insecure, enabled: !!f.enabled }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="pfsense.manage" onclick="openDeleteFirewallConfirm(${f.id},'${escAttr(f.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function openAddFirewallForm() {
+  openModal('Thêm kết nối pfSense', firewallFormHtml());
+}
+function openEditFirewallForm(fw) {
+  openModal(`Sửa kết nối — ${fw.name}`, firewallFormHtml(fw));
+}
+function firewallFormHtml(fw) {
+  const isEdit = !!fw;
+  const authType = fw?.auth_type || 'basic';
+  return `
+    <form id="firewallForm" onsubmit="saveFirewall(event, ${isEdit ? fw.id : 'null'})">
+      <div class="form-grid">
+        <div class="form-group full"><label>Tên *</label><input type="text" name="name" value="${fw?.name || ''}" required placeholder="vd: FDS pfSense"></div>
+        <div class="form-group"><label>Host *</label><input type="text" name="host" value="${fw?.host || ''}" required placeholder="pfsense.example.local"></div>
+        <div class="form-group"><label>Port</label><input type="number" name="port" value="${fw?.port || 443}" placeholder="443"></div>
+        <div class="form-group full"><label>Kiểu xác thực</label>
+          <select name="auth_type" onchange="togglePfsenseAuthFields(this.value)">
+            <option value="basic" ${authType === 'basic' ? 'selected' : ''}>Username/Password (Basic Auth)</option>
+            <option value="api_key" ${authType === 'api_key' ? 'selected' : ''}>API Key</option>
+          </select>
+        </div>
+        <div id="pfsenseBasicFields" style="display:${authType === 'basic' ? 'contents' : 'none'}">
+          <div class="form-group"><label>Username</label><input type="text" name="username" value="${fw?.username || ''}"></div>
+          <div class="form-group"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : ''}</label><input type="password" name="password" autocomplete="new-password"></div>
+        </div>
+        <div class="form-group full" id="pfsenseApiKeyField" style="display:${authType === 'api_key' ? '' : 'none'}">
+          <label>API Key ${isEdit ? '(để trống nếu giữ nguyên)' : ''}</label><input type="password" name="api_key" autocomplete="new-password">
+        </div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="insecure" ${fw?.insecure !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bỏ qua xác thực chứng chỉ tự ký (self-signed cert)</label>
+        </div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="enabled" ${fw?.enabled !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bật (tham gia đồng bộ tự động)</label>
+        </div>
+      </div>
+      <div id="firewallTestResult" style="margin-top:8px;font-size:13px"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="testFirewallForm(this)">Kiểm tra kết nối</button>
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm firewall'}</button>
+      </div>
+    </form>`;
+}
+
+function togglePfsenseAuthFields(authType) {
+  document.getElementById('pfsenseBasicFields').style.display = authType === 'basic' ? 'contents' : 'none';
+  document.getElementById('pfsenseApiKeyField').style.display = authType === 'api_key' ? '' : 'none';
+}
+
+async function testFirewallForm(btn) {
+  const form = document.getElementById('firewallForm');
+  const fd = new FormData(form);
+  const payload = {
+    host: fd.get('host'), port: Number(fd.get('port')) || 443, auth_type: fd.get('auth_type'),
+    username: fd.get('username'), password: fd.get('password'), api_key: fd.get('api_key'),
+    insecure: fd.get('insecure') === 'on'
+  };
+  const resultEl = document.getElementById('firewallTestResult');
+  btn.disabled = true;
+  resultEl.innerHTML = `<span style="color:var(--fg-dim)">Đang kiểm tra...</span>`;
+  try {
+    const result = await api('/pfsense/firewalls/test', 'POST', payload);
+    resultEl.innerHTML = result.ok
+      ? `<span style="color:var(--accent)">✓ ${result.message}${result.platform ? ' — ' + result.platform : ''}</span>`
+      : `<span style="color:var(--red)">✗ ${result.message}</span>`;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveFirewall(e, id) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    name: fd.get('name'), host: fd.get('host'), port: Number(fd.get('port')) || 443, auth_type: fd.get('auth_type'),
+    username: fd.get('username') || '', password: fd.get('password') || '', api_key: fd.get('api_key') || '',
+    insecure: fd.get('insecure') === 'on', enabled: fd.get('enabled') === 'on'
+  };
+  try {
+    if (id) await api(`/pfsense/firewalls/${id}`, 'PUT', payload);
+    else await api('/pfsense/firewalls', 'POST', payload);
+    toast(id ? 'Đã cập nhật' : 'Đã thêm firewall', 'success');
+    closeModal();
+    renderPfsense();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function testSavedFirewall(id, btn) {
+  btn.disabled = true;
+  try {
+    const result = await api(`/pfsense/firewalls/${id}/test`, 'POST');
+    toast(result.ok ? `Kết nối thành công: ${result.message}` : `Lỗi kết nối: ${result.message}`, result.ok ? 'success' : 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; renderPfsenseFirewallsTab(); }
+}
+
+async function syncOneFirewallUi(id, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/pfsense/firewalls/${id}/sync`, 'POST');
+    toast('Đã đồng bộ', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { renderPfsenseFirewallsTab(); }
+}
+
+function openDeleteFirewallConfirm(id, name) {
+  openModal('Xóa kết nối pfSense', `
+    <form id="firewallDeleteForm" onsubmit="confirmDeleteFirewall(event, ${id}, '${escAttr(name)}')">
+      <p style="font-size:14px;margin-bottom:12px">Thao tác này sẽ xóa kết nối <strong>${name}</strong> và toàn bộ dữ liệu đã đồng bộ (không thay đổi gì trên pfSense thật, chỉ xóa dữ liệu theo dõi). Không thể hoàn tác.</p>
+      <div class="form-group full"><label>Gõ chính xác tên để xác nhận</label><input type="text" name="confirmName" placeholder="${name}" autocomplete="off" required></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteFirewall(e, id, name) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const confirmName = fd.get('confirmName');
+  if (confirmName !== name) { toast('Tên không khớp — đã hủy xóa', 'error'); return; }
+  try {
+    await api(`/pfsense/firewalls/${id}`, 'DELETE', { confirmName });
+    toast(`Đã xóa "${name}"`, 'success');
+    closeModal();
+    pfsenseFirewallId = null;
+    renderPfsense();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 // ─── UPTIME MONITORS (Giám sát Uptime) ─────────────────────────────────────────

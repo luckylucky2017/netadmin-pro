@@ -70,6 +70,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/chat', requireAuth, require('./routes/chat'));
   app.use('/api/ssh-credentials', requireAuth, require('./routes/ssh-credentials'));
   app.use('/api/settings', requireAuth, require('./routes/settings'));
+  app.use('/api/pfsense', requireAuth, require('./routes/pfsense'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([
@@ -127,4 +128,5 @@ if (!process.env.SESSION_SECRET) {
   require('./ipmi-collector').start();
   require('./uptime-collector').start();
   require('./snmp-collector').start();
+  require('./pfsense-collector').start();
 })();

@@ -78,11 +78,13 @@ body { background: var(--bg); color: var(--fg); font-family: 'Fira Sans', system
 .stat-value.red { color: var(--red); }
 .stat-value.blue { color: var(--blue); }
 .stat-value.yellow { color: var(--yellow); }
+.stat-value.purple { color: var(--purple); }
 .stat-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
 .stat-icon.green { background: var(--accent-dim); color: var(--accent); }
 .stat-icon.blue { background: var(--blue-dim); color: var(--blue); }
 .stat-icon.red { background: var(--red-dim); color: var(--red); }
 .stat-icon.yellow { background: var(--yellow-dim); color: var(--yellow); }
+.stat-icon.purple { background: var(--purple-dim); color: var(--purple); }
 
 /* Table */
 .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }

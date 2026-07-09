@@ -31,6 +31,11 @@ const PERMISSIONS = [
   { key: 'monitors.delete', label: 'Xóa monitor uptime', group: 'Giám sát Uptime' },
   { key: 'ssh_credentials.manage', label: 'Quản lý tài khoản kết nối SSH (private key/mật khẩu)', group: 'Quản trị' },
   { key: 'settings.manage', label: 'Quản lý cài đặt hệ thống (AI key, SSO)', group: 'Quản trị' },
+  { key: 'pfsense.manage', label: 'Quản lý kết nối firewall pfSense (thêm/sửa/xóa)', group: 'pfSense' },
+  { key: 'pfsense.sync', label: 'Đồng bộ dữ liệu pfSense', group: 'pfSense' },
+  { key: 'pfsense.rules.write', label: 'Tạo/sửa rule tường lửa pfSense', group: 'pfSense' },
+  { key: 'pfsense.rules.delete', label: 'Xóa rule tường lửa pfSense', group: 'pfSense' },
+  { key: 'pfsense.vpn.manage', label: 'Quản trị cấu hình OpenVPN trên pfSense', group: 'pfSense' },
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
@@ -43,6 +48,7 @@ const OPERATOR_EXCLUDED = new Set([
   'security.ssh_config', 'security.fail2ban.manage', 'users.manage', 'roles.manage',
   'servers.ipmi_config', 'monitors.delete', 'servers.snmp_config', 'devices.snmp_config',
   'vcenter.cluster.manage', 'ssh_credentials.manage', 'settings.manage',
+  'pfsense.manage', 'pfsense.rules.delete', 'pfsense.vpn.manage',
 ]);
 
 module.exports = { PERMISSIONS, PERMISSION_KEYS, OPERATOR_EXCLUDED };

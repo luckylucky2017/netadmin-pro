@@ -6,8 +6,9 @@
 -- hoặc để khởi tạo DB thủ công trước khi khởi động ứng dụng lần đầu (vd qua công cụ DBA/CI).
 --
 -- Không chứa bất kỳ dữ liệu thật nào (mật khẩu, private key, thông tin hạ tầng...) — toàn bộ cấu
--- hình nhạy cảm (vCenter, tài khoản SSH, AI key, SSO) được nhập qua giao diện sau khi đăng nhập,
--- lưu trong các bảng vcenter_clusters/ssh_credentials/app_settings, không nằm trong file này.
+-- hình nhạy cảm (vCenter, tài khoản SSH, AI key, SSO, pfSense) được nhập qua giao diện sau khi đăng
+-- nhập, lưu trong các bảng vcenter_clusters/ssh_credentials/app_settings/pfsense_firewalls, không
+-- nằm trong file này.
 
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
@@ -223,6 +224,82 @@ CREATE TABLE `outbound_connections` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_outbound` (`vm_id`,`remote_ip`,`remote_port`),
   KEY `idx_outbound_vm` (`vm_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `pfsense_firewall_rules`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `pfsense_firewall_rules` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `firewall_id` int NOT NULL,
+  `rule_tracker` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `interface` text COLLATE utf8mb4_unicode_ci,
+  `action` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `protocol` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `source` text COLLATE utf8mb4_unicode_ci,
+  `destination` text COLLATE utf8mb4_unicode_ci,
+  `description` text COLLATE utf8mb4_unicode_ci,
+  `enabled` int DEFAULT '1',
+  `sort_order` int DEFAULT NULL,
+  `raw_json` text COLLATE utf8mb4_unicode_ci,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_pfsense_rule` (`firewall_id`,`rule_tracker`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `pfsense_firewalls`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `pfsense_firewalls` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `host` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `port` int NOT NULL DEFAULT '443',
+  `auth_type` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'basic',
+  `username` text COLLATE utf8mb4_unicode_ci,
+  `password` text COLLATE utf8mb4_unicode_ci,
+  `api_key` text COLLATE utf8mb4_unicode_ci,
+  `insecure` int NOT NULL DEFAULT '1',
+  `enabled` int NOT NULL DEFAULT '1',
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT 'unknown',
+  `last_synced_at` datetime DEFAULT NULL,
+  `last_error` text COLLATE utf8mb4_unicode_ci,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `pfsense_interfaces`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `pfsense_interfaces` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `firewall_id` int NOT NULL,
+  `if_name` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `description` text COLLATE utf8mb4_unicode_ci,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `ip_address` text COLLATE utf8mb4_unicode_ci,
+  `gateway_status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `raw_json` text COLLATE utf8mb4_unicode_ci,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_pfsense_if` (`firewall_id`,`if_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `pfsense_vpn_status`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `pfsense_vpn_status` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `firewall_id` int NOT NULL,
+  `vpn_type` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `tunnel_name` text COLLATE utf8mb4_unicode_ci,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `remote_info` text COLLATE utf8mb4_unicode_ci,
+  `connected_since` datetime DEFAULT NULL,
+  `raw_json` text COLLATE utf8mb4_unicode_ci,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ping_history`;

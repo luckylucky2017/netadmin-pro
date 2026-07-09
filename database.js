@@ -248,6 +248,74 @@ const SCHEMA_SQL = `
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Kết nối tới 1 firewall pfSense qua REST API (pfSense-pkg-API, /api/v2) — cùng mẫu vcenter_clusters:
+  -- mật khẩu/api_key lưu plaintext, không bao giờ trả về client (xem sanitizeFirewall trong routes/pfsense.js).
+  CREATE TABLE IF NOT EXISTS pfsense_firewalls (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INT NOT NULL DEFAULT 443,
+    auth_type VARCHAR(20) NOT NULL DEFAULT 'basic',
+    username TEXT,
+    password TEXT,
+    api_key TEXT,
+    insecure INT NOT NULL DEFAULT 1,
+    enabled INT NOT NULL DEFAULT 1,
+    status VARCHAR(20) DEFAULT 'unknown',
+    last_synced_at DATETIME,
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  -- Cache trạng thái interface (WAN/LAN...) đọc từ /api/v2/status/interfaces, đồng bộ định kỳ để
+  -- trang Trạng thái không phải gọi API pfSense mỗi lần tải trang.
+  CREATE TABLE IF NOT EXISTS pfsense_interfaces (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    firewall_id INT NOT NULL,
+    if_name VARCHAR(64) NOT NULL,
+    description TEXT,
+    status VARCHAR(20),
+    ip_address TEXT,
+    gateway_status VARCHAR(20),
+    raw_json TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_pfsense_if (firewall_id, if_name)
+  );
+
+  -- Cache rule tường lửa từ /api/v2/firewall/rules. rule_tracker lưu giá trị field "tracker" (ổn định,
+  -- không đổi khi rule khác bị thêm/xóa) — dùng để đối chiếu lại "id" (index mảng, có thể lệch) thật
+  -- ngay trước khi sửa/xóa. raw_json giữ nguyên response gốc phòng khi tên trường khác giả định.
+  CREATE TABLE IF NOT EXISTS pfsense_firewall_rules (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    firewall_id INT NOT NULL,
+    rule_tracker VARCHAR(64) NOT NULL,
+    interface TEXT,
+    action VARCHAR(20),
+    protocol VARCHAR(20),
+    source TEXT,
+    destination TEXT,
+    description TEXT,
+    enabled INT DEFAULT 1,
+    sort_order INT,
+    raw_json TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_pfsense_rule (firewall_id, rule_tracker)
+  );
+
+  -- Cache trạng thái VPN (OpenVPN/IPsec) từ /api/v2/status/openvpn/*, /api/v2/status/ipsec/*.
+  CREATE TABLE IF NOT EXISTS pfsense_vpn_status (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    firewall_id INT NOT NULL,
+    vpn_type VARCHAR(20),
+    tunnel_name TEXT,
+    status VARCHAR(20),
+    remote_info TEXT,
+    connected_since DATETIME,
+    raw_json TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   -- One row per VM/server being SSH-monitored: remembers how many lines of the guest's auth log
   -- have already been parsed, so each collection cycle only reads new lines (never the full log).
   CREATE TABLE IF NOT EXISTS ssh_log_cursor (
