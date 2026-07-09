@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetAdmin Pro</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<!-- Login screen — shown until GET /api/auth/me succeeds; #app stays display:none until then -->
+<div id="loginScreen" class="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
+      <span>NetAdmin Pro</span>
+    </div>
+    <div class="filter-tabs" id="loginTabs" style="margin-bottom:18px">
+      <div class="filter-tab active" data-tab="local" onclick="setLoginTab('local')">Email</div>
+      <div class="filter-tab" data-tab="ldap" onclick="setLoginTab('ldap')">LDAP</div>
+    </div>
+
+    <form id="localLoginForm" onsubmit="submitLocalLogin(event)">
+      <div class="form-group full"><label>Email</label><input type="email" name="email" required autofocus placeholder="ban@congty.com"></div>
+      <div class="form-group full"><label>Mật khẩu</label><input type="password" name="password" required></div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px">Đăng nhập</button>
+    </form>
+
+    <form id="ldapLoginForm" onsubmit="submitLdapLogin(event)" style="display:none">
+      <div class="form-group full"><label>Username LDAP/AD</label><input type="text" name="username" placeholder="vd: hoangtt"></div>
+      <div class="form-group full"><label>Mật khẩu</label><input type="password" name="password" required></div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px">Đăng nhập LDAP</button>
+    </form>
+
+    <div class="login-divider"><span>hoặc</span></div>
+    <button type="button" class="btn btn-secondary" style="width:100%" onclick="location.href='/api/auth/saml/login'">
+      Đăng nhập với SSO (Google / SAML)
+    </button>
+    <div id="loginError" class="login-error" style="display:none"></div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
+      <span>NetAdmin Pro</span>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="dashboard">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        Dashboard
+      </a>
+      <a href="#" class="nav-item" data-page="servers">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg>
+        Máy chủ
+      </a>
+      <a href="#" class="nav-item" data-page="devices">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12H2M22 12h-3M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg>
+        Thiết bị mạng
+      </a>
+      <a href="#" class="nav-item" data-page="alerts">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+        Cảnh báo
+        <span class="nav-badge" id="alertNavBadge" style="display:none"></span>
+      </a>
+      <a href="#" class="nav-item" data-page="vcenter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg>
+        vCenter
+      </a>
+      <a href="#" class="nav-item" data-page="security">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9.5 12l1.8 1.8L14.5 10"/></svg>
+        Giám sát bất thường
+      </a>
+      <a href="#" class="nav-item" data-page="monitors">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        Giám sát Uptime
+      </a>
+      <a href="#" class="nav-item" data-page="rules">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>
+        Ngưỡng cảnh báo
+      </a>
+      <a href="#" class="nav-item" data-page="activity">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Nhật ký
+      </a>
+      <a href="#" class="nav-item" data-page="users" data-permission="users.manage" style="display:none">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+        Người dùng
+      </a>
+      <a href="#" class="nav-item" data-page="roles" data-permission="roles.manage" style="display:none">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Vai trò
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn-ping-all" id="btnPingAll" data-permission="ping.write">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+        Ping Tất cả
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <button class="menu-toggle" id="menuToggle">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="topbar-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="globalSearch" placeholder="Tìm kiếm IP, tên thiết bị..." />
+      </div>
+      <div class="topbar-right">
+        <div class="status-badge online" id="dbStatus">
+          <span class="dot"></span> Connected
+        </div>
+        <div class="clock" id="clock"></div>
+        <div class="user-menu" id="userMenu">
+          <span id="userMenuName"></span>
+          <span class="user-role-badge" id="userMenuRole"></span>
+          <button class="btn-icon" id="btnLogout" title="Đăng xuất">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="page-content" id="pageContent">
+      <!-- Pages rendered by JS -->
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Title</h3>
+      <button class="modal-close" id="modalClose">&times;</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- VM Console -->
+<div class="modal-overlay" id="consoleOverlay">
+  <div class="modal console-modal" id="consoleModal">
+    <div class="modal-header">
+      <h3 id="consoleTitle">Console</h3>
+      <div class="console-window-controls">
+        <button class="modal-close" id="consoleMinimize" title="Thu nhỏ">&#8211;</button>
+        <button class="modal-close" id="consoleMaximize" title="Phóng to">&#9723;</button>
+        <button class="modal-close" id="consoleClose" title="Đóng">&times;</button>
+      </div>
+    </div>
+    <div class="modal-body" id="consoleBody" style="padding:0;overflow:hidden;display:flex;flex-direction:column;height:70vh">
+      <div class="console-toolbar" id="consoleToolbar">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="sendVmKeyCombo('cad')">Ctrl+Alt+Del</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="sendVmKeyCombo('altTab')">Alt+Tab</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="sendVmKeyCombo('ctrlEsc')">Ctrl+Esc</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="sendVmKeyCombo('winKey')">Win</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="sendVmKeyCombo('esc')">Esc</button>
+        <select class="filter-select" id="consoleFKeySelect" onchange="sendVmFKey(this.value); this.value='';">
+          <option value="">F1-F12…</option>
+          <option value="1">F1</option><option value="2">F2</option><option value="3">F3</option><option value="4">F4</option>
+          <option value="5">F5</option><option value="6">F6</option><option value="7">F7</option><option value="8">F8</option>
+          <option value="9">F9</option><option value="10">F10</option><option value="11">F11</option><option value="12">F12</option>
+        </select>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="toggleVirtualKeyboard()">Bàn phím ảo</button>
+      </div>
+      <div id="wmksContainer" style="position:relative;overflow:hidden;width:100%;flex:1;background:#000"></div>
+      <div id="consoleKeyboard" class="console-keyboard" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Restore pill shown while a console is minimized (connection stays alive in the background) -->
+<div class="console-min-pill" id="consoleMinPill" style="display:none" onclick="restoreConsole()">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+  <span id="consoleMinPillLabel">Console</span>
+</div>
+
+<!-- Toast -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Chatbot -->
+<button class="chat-fab" id="chatFab" title="Trợ lý AI" style="display:none">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+</button>
+<div class="chat-panel" id="chatPanel" style="display:none">
+  <div class="chat-panel-header">
+    <span>Trợ lý AI — NetAdmin Pro</span>
+    <button class="modal-close" id="chatPanelClose" title="Đóng">&times;</button>
+  </div>
+  <div class="chat-panel-body" id="chatPanelBody">
+    <div class="chat-bubble chat-bubble-assistant">Xin chào! Hỏi tôi về trạng thái máy chủ, cảnh báo, VM, uptime… hoặc yêu cầu tôi thực hiện hành động (ví dụ: "bật fail2ban trên VM web-01").</div>
+  </div>
+  <form class="chat-panel-input" id="chatForm">
+    <input type="text" id="chatInput" placeholder="Nhập yêu cầu..." autocomplete="off" />
+    <button type="submit" class="btn btn-primary btn-sm">Gửi</button>
+  </form>
+</div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

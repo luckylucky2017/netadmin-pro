@@ -1,0 +1,31 @@
+{
+  "name": "netadmin-pro",
+  "version": "1.0.0",
+  "description": "Network & Server Administration Tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
+    "@node-saml/node-saml": "^5.1.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "express-mysql-session": "^3.0.3",
+    "express-rate-limit": "^7.1.5",
+    "express-session": "^1.19.0",
+    "geoip-lite": "^1.4.10",
+    "helmet": "^7.1.0",
+    "ldapjs": "^3.0.7",
+    "mysql2": "^3.22.6",
+    "net-snmp": "^3.26.3",
+    "node-ssh": "^13.1.0",
+    "ping": "^0.4.4",
+    "snmp-native": "^1.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

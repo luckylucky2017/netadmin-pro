@@ -1,0 +1,9 @@
+.env
+node_modules/
+uploads/
+*.db
+*.db-shm
+*.db-wal
+archive/
+.claude/
+*.log

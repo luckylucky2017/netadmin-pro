@@ -1,0 +1,44 @@
+// Single source of truth for every permission key in the app — consumed by database.js (seeding
+// system roles), routes/roles.js (GET /permissions, for the role-editor checkbox matrix), and
+// auth.js (dev-time assertion that every requirePermission() call site uses a real key). Keeping
+// this in one place is what stops the seed list and the UI catalog from silently drifting apart.
+const PERMISSIONS = [
+  { key: 'servers.write', label: 'Tạo/sửa máy chủ', group: 'Máy chủ' },
+  { key: 'servers.delete', label: 'Xóa máy chủ', group: 'Máy chủ' },
+  { key: 'servers.ipmi_config', label: 'Cấu hình IPMI (host/username/password)', group: 'Máy chủ' },
+  { key: 'servers.snmp_config', label: 'Cấu hình SNMP v3 cho máy chủ', group: 'Máy chủ' },
+  { key: 'devices.write', label: 'Tạo/sửa thiết bị mạng', group: 'Thiết bị mạng' },
+  { key: 'devices.delete', label: 'Xóa thiết bị mạng', group: 'Thiết bị mạng' },
+  { key: 'devices.snmp_config', label: 'Cấu hình SNMP v3 cho thiết bị mạng', group: 'Thiết bị mạng' },
+  { key: 'vcenter.sync', label: 'Đồng bộ vCenter', group: 'vCenter / VM' },
+  { key: 'vcenter.vm.create', label: 'Tạo VM (rỗng hoặc clone)', group: 'vCenter / VM' },
+  { key: 'vcenter.vm.console', label: 'Mở console VM', group: 'vCenter / VM' },
+  { key: 'vcenter.vm.power', label: 'Bật/tắt/khởi động lại VM', group: 'vCenter / VM' },
+  { key: 'vcenter.vm.edit', label: 'Sửa cấu hình / đổi tên VM', group: 'vCenter / VM' },
+  { key: 'vcenter.vm.delete', label: 'Xóa VM', group: 'vCenter / VM' },
+  { key: 'rules.write', label: 'Tạo/sửa/bật-tắt ngưỡng cảnh báo', group: 'Ngưỡng cảnh báo' },
+  { key: 'rules.delete', label: 'Xóa ngưỡng cảnh báo', group: 'Ngưỡng cảnh báo' },
+  { key: 'alerts.write', label: 'Ghi nhận / xử lý cảnh báo', group: 'Cảnh báo' },
+  { key: 'alerts.delete', label: 'Xóa cảnh báo', group: 'Cảnh báo' },
+  { key: 'security.ssh_config', label: 'Bật/tắt giám sát SSH cho VM', group: 'Bảo mật' },
+  { key: 'security.fail2ban.check', label: 'Kiểm tra trạng thái fail2ban', group: 'Bảo mật' },
+  { key: 'security.fail2ban.manage', label: 'Bật/tắt (cài đặt) fail2ban', group: 'Bảo mật' },
+  { key: 'ping.write', label: 'Ping thủ công', group: 'Ping' },
+  { key: 'users.manage', label: 'Quản lý người dùng', group: 'Quản trị' },
+  { key: 'roles.manage', label: 'Quản lý vai trò', group: 'Quản trị' },
+  { key: 'monitors.write', label: 'Tạo/sửa/kiểm tra ngay monitor uptime', group: 'Giám sát Uptime' },
+  { key: 'monitors.delete', label: 'Xóa monitor uptime', group: 'Giám sát Uptime' },
+];
+
+const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
+
+// Excluded from Operator: every *.delete key, plus the "keys to the kingdom" admin-only actions —
+// exactly what requireRole('admin') vs requireRole('admin','operator') already encoded before this
+// migration, preserved here so the seeded Operator role has zero behavior change.
+const OPERATOR_EXCLUDED = new Set([
+  'servers.delete', 'devices.delete', 'vcenter.vm.delete', 'rules.delete', 'alerts.delete',
+  'security.ssh_config', 'security.fail2ban.manage', 'users.manage', 'roles.manage',
+  'servers.ipmi_config', 'monitors.delete', 'servers.snmp_config', 'devices.snmp_config',
+]);
+
+module.exports = { PERMISSIONS, PERMISSION_KEYS, OPERATOR_EXCLUDED };
