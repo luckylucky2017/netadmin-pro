@@ -567,6 +567,36 @@ async function ensureSchemaAndMigrations() {
   // actual SSH connect() call sites (ssh-credentials.js) resolve key/password from the credential.
   try { await pool.query("ALTER TABLE servers ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Interface + OpenVPN client bandwidth (in/out bps) — pfSense's API only exposes cumulative byte
+  // counters, not a rate, so bps is derived from the delta against the previous poll's snapshot,
+  // same convention as servers.snmp_if_prev_snapshot in snmp-collector.js. Snapshots live on
+  // pfsense_firewalls (one row per firewall) rather than per-interface/per-connection, since the
+  // whole snapshot is replaced as a unit each sync anyway. client_key identifies one OpenVPN
+  // connection instance across polls so its rate can be computed the same way; pfsense_vpn_status
+  // switches from wipe+reinsert to upsert-by-client_key so a row survives between polls long enough
+  // to compute a delta.
+  const pfsenseBandwidthMigrations = [
+    "ALTER TABLE pfsense_firewalls ADD COLUMN if_bandwidth_snapshot TEXT",
+    "ALTER TABLE pfsense_firewalls ADD COLUMN vpn_bandwidth_snapshot TEXT",
+    "ALTER TABLE pfsense_interfaces ADD COLUMN in_bytes BIGINT",
+    "ALTER TABLE pfsense_interfaces ADD COLUMN out_bytes BIGINT",
+    "ALTER TABLE pfsense_interfaces ADD COLUMN in_bps BIGINT",
+    "ALTER TABLE pfsense_interfaces ADD COLUMN out_bps BIGINT",
+    "ALTER TABLE pfsense_vpn_status ADD COLUMN client_key VARCHAR(191)",
+    "ALTER TABLE pfsense_vpn_status ADD COLUMN bytes_recv BIGINT",
+    "ALTER TABLE pfsense_vpn_status ADD COLUMN bytes_sent BIGINT",
+    "ALTER TABLE pfsense_vpn_status ADD COLUMN rate_recv_bps BIGINT",
+    "ALTER TABLE pfsense_vpn_status ADD COLUMN rate_sent_bps BIGINT",
+  ];
+  for (const m of pfsenseBandwidthMigrations) {
+    try { await pool.query(m); } catch (e) { if (e.errno !== 1060) throw e; }
+  }
+  // client_key was originally added as VARCHAR(64) before switching its derivation from client_id
+  // (confirmed unstable across polls) to common_name+remote_host, which can exceed 64 chars —
+  // MODIFY is safe/idempotent to re-run even once every install is already on VARCHAR(191).
+  await pool.query("ALTER TABLE pfsense_vpn_status MODIFY COLUMN client_key VARCHAR(191)");
+  try { await pool.query("ALTER TABLE pfsense_vpn_status ADD UNIQUE KEY uq_pfsense_vpn (firewall_id, vpn_type, client_key)"); } catch (e) { if (e.errno !== 1061) throw e; }
 }
 
 async function seedIfEmpty() {

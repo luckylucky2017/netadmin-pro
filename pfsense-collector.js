@@ -5,6 +5,21 @@
 const db = require('./database');
 const client = require('./pfsense-client');
 
+// pfSense's API only exposes cumulative in/out byte counters, not a rate — bps is derived from the
+// delta against the previous poll's snapshot (stored in pfsense_firewalls.if_bandwidth_snapshot,
+// internal-only, never sent to the client), same convention as snmp-collector.js's
+// snmp_if_prev_snapshot. First poll after adding a firewall has no prior snapshot, so bps is null
+// that one time; a counter going backwards (interface reset) is also reported as null rather than
+// guessing wraparound arithmetic.
+function computeBps(prevSample, currentBytes, now) {
+  if (!prevSample) return null;
+  const dtSec = (now - prevSample.ts) / 1000;
+  if (dtSec <= 0) return null;
+  const delta = currentBytes - prevSample.bytes;
+  if (delta < 0) return null;
+  return Math.round((delta * 8) / dtSec);
+}
+
 async function syncInterfaces(fw) {
   const [ifaceRes, gwRes] = await Promise.all([
     client.request(fw, 'GET', '/status/interfaces'),
@@ -14,20 +29,35 @@ async function syncInterfaces(fw) {
   // back to RoutingGatewayStatus is srcip (the gateway's monitored source IP), not name-to-name.
   const gateways = gwRes?.data || [];
   const gwStatusBySrcIp = new Map(gateways.map(g => [g.srcip, g.status]));
+
+  let prevSnapshot = {};
+  try { prevSnapshot = JSON.parse(fw.if_bandwidth_snapshot || '{}'); } catch { prevSnapshot = {}; }
+  const now = Date.now();
+  const nextSnapshot = {};
+
   const upsert = db.prepare(`
-    INSERT INTO pfsense_interfaces (firewall_id, if_name, description, status, ip_address, gateway_status, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pfsense_interfaces (firewall_id, if_name, description, status, ip_address, gateway_status, in_bytes, out_bytes, in_bps, out_bps, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       description = VALUES(description), status = VALUES(status), ip_address = VALUES(ip_address),
-      gateway_status = VALUES(gateway_status), raw_json = VALUES(raw_json), updated_at = CURRENT_TIMESTAMP
+      gateway_status = VALUES(gateway_status), in_bytes = VALUES(in_bytes), out_bytes = VALUES(out_bytes),
+      in_bps = VALUES(in_bps), out_bps = VALUES(out_bps), raw_json = VALUES(raw_json), updated_at = CURRENT_TIMESTAMP
   `);
   const data = ifaceRes?.data || [];
   for (const iface of data) {
+    const inBytes = Number(iface.inbytes ?? 0);
+    const outBytes = Number(iface.outbytes ?? 0);
+    const prev = prevSnapshot[iface.name];
+    const in_bps = computeBps(prev ? { bytes: prev.in, ts: prev.ts } : null, inBytes, now);
+    const out_bps = computeBps(prev ? { bytes: prev.out, ts: prev.ts } : null, outBytes, now);
+    nextSnapshot[iface.name] = { in: inBytes, out: outBytes, ts: now };
     await upsert.run(
       fw.id, iface.name, iface.descr || null, iface.status || null, iface.ipaddr || null,
-      gwStatusBySrcIp.get(iface.ipaddr) || null, JSON.stringify(iface)
+      gwStatusBySrcIp.get(iface.ipaddr) || null, inBytes, outBytes, in_bps, out_bps, JSON.stringify(iface)
     );
   }
+  await db.prepare('UPDATE pfsense_firewalls SET if_bandwidth_snapshot = ? WHERE id = ?').run(JSON.stringify(nextSnapshot), fw.id);
+
   const currentNames = new Set(data.map(i => i.name));
   const known = await db.prepare('SELECT if_name FROM pfsense_interfaces WHERE firewall_id = ?').all(fw.id);
   const stale = db.prepare('DELETE FROM pfsense_interfaces WHERE firewall_id = ? AND if_name = ?');
@@ -62,39 +92,69 @@ async function syncRules(fw) {
   return data.length;
 }
 
+// client_id turned out NOT to be stable across polls in live testing (confirmed: the same physical
+// connection got a different client_id on the very next sync, producing duplicate rows instead of
+// clean upserts) — common_name + remote_host (source IP:port, fixed for the life of one TCP/UDP
+// session) is used as the stable key instead. If a client somehow reconnects with a new source port
+// mid-poll, worst case is one cycle showing no rate for that slot, never a wrong one (computeBps()
+// already discards a mismatched delta as null).
 async function syncVpn(fw) {
   const [ovpnRes, ipsecRes] = await Promise.all([
     client.request(fw, 'GET', '/status/openvpn/servers').catch(() => ({ data: [] })),
     client.request(fw, 'GET', '/status/ipsec/sas').catch(() => ({ data: [] }))
   ]);
-  await db.prepare('DELETE FROM pfsense_vpn_status WHERE firewall_id = ?').run(fw.id);
-  const insert = db.prepare(`
-    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+
+  let prevSnapshot = {};
+  try { prevSnapshot = JSON.parse(fw.vpn_bandwidth_snapshot || '{}'); } catch { prevSnapshot = {}; }
+  const now = Date.now();
+  const nextSnapshot = {};
+
+  const upsert = db.prepare(`
+    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, client_key, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      tunnel_name = VALUES(tunnel_name), status = VALUES(status), remote_info = VALUES(remote_info),
+      connected_since = VALUES(connected_since), bytes_recv = VALUES(bytes_recv), bytes_sent = VALUES(bytes_sent),
+      rate_recv_bps = VALUES(rate_recv_bps), rate_sent_bps = VALUES(rate_sent_bps), raw_json = VALUES(raw_json),
+      updated_at = CURRENT_TIMESTAMP
   `);
   const servers = ovpnRes?.data || [];
+  const currentKeys = [];
   let count = 0;
   for (const srv of servers) {
-    const conns = srv.conns || [];
-    if (!conns.length) {
-      await insert.run(fw.id, 'openvpn', srv.name, 'idle', null, null, JSON.stringify(srv));
-      count++;
-      continue;
-    }
-    for (const c of conns) {
-      await insert.run(
+    for (const c of srv.conns || []) {
+      const clientKey = `ovpn-${srv.vpnid}-${c.common_name}-${c.remote_host}`;
+      currentKeys.push(clientKey);
+      const bytesRecv = Number(c.bytes_recv ?? 0);
+      const bytesSent = Number(c.bytes_sent ?? 0);
+      const prev = prevSnapshot[clientKey];
+      const rate_recv_bps = computeBps(prev ? { bytes: prev.recv, ts: prev.ts } : null, bytesRecv, now);
+      const rate_sent_bps = computeBps(prev ? { bytes: prev.sent, ts: prev.ts } : null, bytesSent, now);
+      nextSnapshot[clientKey] = { recv: bytesRecv, sent: bytesSent, ts: now };
+      await upsert.run(
         fw.id, 'openvpn', `${srv.name} · ${c.common_name}`, 'connected', c.remote_host,
         c.connect_time ? new Date(c.connect_time).toISOString().slice(0, 19).replace('T', ' ') : null,
-        JSON.stringify(c)
+        clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, JSON.stringify(c)
       );
       count++;
     }
   }
   const sas = ipsecRes?.data || [];
   for (const sa of sas) {
-    await insert.run(fw.id, 'ipsec', sa.name || sa['con-name'] || 'ipsec', sa.state || 'unknown', sa['remote-host'] || null, null, JSON.stringify(sa));
+    const clientKey = `ipsec-${sa.uniqueid ?? sa.con_id ?? sa.name}`;
+    currentKeys.push(clientKey);
+    await upsert.run(
+      fw.id, 'ipsec', sa.name || sa['con-name'] || 'ipsec', sa.state || 'unknown', sa.remote_host || null,
+      null, clientKey, null, null, null, null, JSON.stringify(sa)
+    );
     count++;
   }
+  await db.prepare('UPDATE pfsense_firewalls SET vpn_bandwidth_snapshot = ? WHERE id = ?').run(JSON.stringify(nextSnapshot), fw.id);
+
+  const currentKeySet = new Set(currentKeys);
+  const known = await db.prepare('SELECT client_key FROM pfsense_vpn_status WHERE firewall_id = ?').all(fw.id);
+  const stale = db.prepare('DELETE FROM pfsense_vpn_status WHERE firewall_id = ? AND client_key = ?');
+  for (const { client_key } of known) if (!currentKeySet.has(client_key)) await stale.run(fw.id, client_key);
   return count;
 }
 

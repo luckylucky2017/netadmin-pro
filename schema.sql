@@ -266,6 +266,8 @@ CREATE TABLE `pfsense_firewalls` (
   `last_error` text COLLATE utf8mb4_unicode_ci,
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `if_bandwidth_snapshot` text COLLATE utf8mb4_unicode_ci,
+  `vpn_bandwidth_snapshot` text COLLATE utf8mb4_unicode_ci,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -282,6 +284,10 @@ CREATE TABLE `pfsense_interfaces` (
   `gateway_status` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `raw_json` text COLLATE utf8mb4_unicode_ci,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `in_bytes` bigint DEFAULT NULL,
+  `out_bytes` bigint DEFAULT NULL,
+  `in_bps` bigint DEFAULT NULL,
+  `out_bps` bigint DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_pfsense_if` (`firewall_id`,`if_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -299,7 +305,13 @@ CREATE TABLE `pfsense_vpn_status` (
   `connected_since` datetime DEFAULT NULL,
   `raw_json` text COLLATE utf8mb4_unicode_ci,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`)
+  `client_key` varchar(191) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `bytes_recv` bigint DEFAULT NULL,
+  `bytes_sent` bigint DEFAULT NULL,
+  `rate_recv_bps` bigint DEFAULT NULL,
+  `rate_sent_bps` bigint DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_pfsense_vpn` (`firewall_id`,`vpn_type`,`client_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ping_history`;

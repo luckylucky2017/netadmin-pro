@@ -6,10 +6,12 @@ const collector = require('../pfsense-collector');
 const { requirePermission, logActivity } = require('../auth');
 
 // password/api_key are credentials — never returned to the client, same treatment as
-// vcenter_clusters.password.
+// vcenter_clusters.password. if_bandwidth_snapshot/vpn_bandwidth_snapshot are internal bookkeeping
+// (raw byte counters used to compute bps deltas between polls) — same treatment as
+// servers.snmp_if_prev_snapshot, no UI ever needs the raw snapshot.
 function sanitizeFirewall(fw) {
   if (!fw) return fw;
-  const { password, api_key, ...rest } = fw;
+  const { password, api_key, if_bandwidth_snapshot, vpn_bandwidth_snapshot, ...rest } = fw;
   return { ...rest, has_password: !!password, has_api_key: !!api_key };
 }
 
@@ -116,7 +118,7 @@ router.get('/firewalls/:id/status', async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
   try {
     const sys = await client.testConnection(fw);
-    const interfaces = await db.prepare('SELECT if_name, description, status, ip_address, gateway_status, updated_at FROM pfsense_interfaces WHERE firewall_id = ? ORDER BY if_name ASC').all(fw.id);
+    const interfaces = await db.prepare('SELECT if_name, description, status, ip_address, gateway_status, in_bytes, out_bytes, in_bps, out_bps, updated_at FROM pfsense_interfaces WHERE firewall_id = ? ORDER BY if_name ASC').all(fw.id);
     res.json({ system: sys, interfaces });
   } catch (e) {
     res.status(502).json({ error: e.message });
@@ -125,7 +127,7 @@ router.get('/firewalls/:id/status', async (req, res) => {
 
 router.get('/firewalls/:id/vpn', async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
-  const rows = await db.prepare('SELECT vpn_type, tunnel_name, status, remote_info, connected_since, updated_at FROM pfsense_vpn_status WHERE firewall_id = ? ORDER BY vpn_type ASC, tunnel_name ASC').all(fw.id);
+  const rows = await db.prepare('SELECT vpn_type, tunnel_name, status, remote_info, connected_since, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, updated_at FROM pfsense_vpn_status WHERE firewall_id = ? ORDER BY vpn_type ASC, tunnel_name ASC').all(fw.id);
   res.json(rows);
 });
 

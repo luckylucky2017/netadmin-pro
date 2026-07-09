@@ -781,6 +781,14 @@ function fmtBps(v) {
   return v + ' bps';
 }
 
+function fmtBytes(v) {
+  if (v == null) return '—';
+  if (v >= 1_073_741_824) return (v / 1_073_741_824).toFixed(2) + ' GB';
+  if (v >= 1_048_576) return (v / 1_048_576).toFixed(1) + ' MB';
+  if (v >= 1024) return (v / 1024).toFixed(1) + ' KB';
+  return v + ' B';
+}
+
 function renderServerRows() {
   const tbody = document.getElementById('serverTableBody');
   if (!serverRows.length) {
@@ -3622,9 +3630,9 @@ async function renderPfsenseStatusTab() {
       </div>
     </div>
     <div class="table-wrap" style="margin-top:16px">
-      <div class="table-toolbar"><div style="font-weight:600">Interface</div></div>
+      <div class="table-toolbar"><div style="font-weight:600">Interface — băng thông (tự làm mới mỗi lần đồng bộ)</div></div>
       <table>
-        <thead><tr><th>Tên</th><th>Mô tả</th><th>Trạng thái</th><th>Địa chỉ IP</th><th>Gateway</th></tr></thead>
+        <thead><tr><th>Tên</th><th>Mô tả</th><th>Trạng thái</th><th>Địa chỉ IP</th><th>Gateway</th><th>Vào (In)</th><th>Ra (Out)</th><th>Tổng đã truyền</th></tr></thead>
         <tbody>${interfaces.map(i => `
           <tr>
             <td style="font-family:'Fira Code',monospace;font-weight:600">${i.if_name}</td>
@@ -3632,6 +3640,9 @@ async function renderPfsenseStatusTab() {
             <td>${i.status === 'up' ? '<span class="status online"><span class="dot"></span>Up</span>' : '<span class="status offline"><span class="dot"></span>Down</span>'}</td>
             <td style="font-family:'Fira Code',monospace">${i.ip_address || '—'}</td>
             <td>${i.gateway_status ? (i.gateway_status === 'online' ? '<span class="status online"><span class="dot"></span>Online</span>' : `<span class="status offline"><span class="dot"></span>${i.gateway_status}</span>`) : '—'}</td>
+            <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(i.in_bps)}</td>
+            <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(i.out_bps)}</td>
+            <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(i.in_bytes)} / ↑${fmtBytes(i.out_bytes)}</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -3839,19 +3850,23 @@ async function renderPfsenseVpnTab() {
       api(`/pfsense/firewalls/${pfsenseFirewallId}/vpn`),
       api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/servers`).catch(() => [])
     ]);
+    const sortedConns = [...conns].sort((a, b) => ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0)));
     body.innerHTML = `
     <div class="table-wrap">
-      <div class="table-toolbar"><div style="font-weight:600">Kết nối VPN đang hoạt động (${conns.length})</div></div>
+      <div class="table-toolbar"><div style="font-weight:600">Kết nối VPN đang hoạt động (${conns.length}) — sắp xếp theo tổng băng thông đã dùng</div></div>
       <table>
-        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ từ xa</th><th>Kết nối từ</th></tr></thead>
-        <tbody>${conns.length ? conns.map(c => `
+        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
+        <tbody>${sortedConns.length ? sortedConns.map(c => `
           <tr>
             <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
             <td>${c.tunnel_name}</td>
             <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
             <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
+            <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(c.rate_recv_bps)}</td>
+            <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
+            <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
-          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`}
+          </tr>`).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`}
         </tbody>
       </table>
     </div>
