@@ -249,7 +249,9 @@ async function raiseWafAlert(vm, domain, ev, country, blockResult) {
   if (already) return; // still active — waf_events row above already recorded this occurrence
   const title = ev.type === 'scan' ? 'WAF phát hiện dò quét' : 'WAF phát hiện tấn công DoS';
   const action = vm.waf_auto_block
-    ? (blockResult?.ok ? ' — ĐÃ CHẶN IP qua fail2ban' : ` — CHƯA chặn được (${blockResult?.error || 'lỗi không rõ'})`)
+    ? (blockResult?.ok ? ' — ĐÃ CHẶN IP qua fail2ban'
+      : blockResult?.excepted ? ' — bỏ qua, không chặn (IP nằm trong danh sách ngoại lệ)'
+      : ` — CHƯA chặn được (${blockResult?.error || 'lỗi không rõ'})`)
     : ' — chỉ cảnh báo (tự động chặn đang tắt cho VM này)';
   const site = domainLabel(domain, vm.name);
   const message = ev.type === 'scan'

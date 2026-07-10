@@ -135,4 +135,54 @@ router.post('/vms/:id/unblock-ip', requirePermission('waf.block'), async (req, r
   res.json(result);
 });
 
+// ── IP exceptions (global allowlist — see waf-manager.js's banIp, checked before every ban) ────
+function isValidExceptionIp(value) {
+  const cidrM = /^(.+)\/(\d{1,3})$/.exec(value);
+  const base = cidrM ? cidrM[1] : value;
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(base)) {
+    if (!base.split('.').every(o => Number(o) <= 255)) return false;
+    if (cidrM && (Number(cidrM[2]) < 0 || Number(cidrM[2]) > 32)) return false;
+    return true;
+  }
+  // Bare IPv6 only — no CIDR support for v6 (matchesException treats it as exact-match anyway).
+  if (!cidrM && /^[0-9a-fA-F:]+$/.test(value) && value.includes(':')) return true;
+  return false;
+}
+
+router.get('/exceptions', requirePermission('waf.jail.check'), async (req, res) => {
+  res.json(await db.prepare('SELECT * FROM waf_ip_exceptions ORDER BY created_at DESC').all());
+});
+
+router.post('/exceptions', requirePermission('waf.block'), async (req, res) => {
+  const ip = String(req.body?.ip || '').trim();
+  const note = String(req.body?.note || '').trim().slice(0, 255) || null;
+  if (!isValidExceptionIp(ip)) {
+    return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
+  }
+  try {
+    await db.prepare('INSERT INTO waf_ip_exceptions (ip, note, created_by) VALUES (?, ?, ?)').run(ip, note, req.user.name || req.user.email);
+  } catch (e) {
+    if (e.errno === 1062) return res.status(400).json({ error: 'IP/CIDR này đã có trong danh sách ngoại lệ' });
+    throw e;
+  }
+  await logActivity(req.user, 'CREATE', 'waf_ip_exception', null, ip, `Thêm ngoại lệ IP WAF: ${ip}${note ? ' — ' + note : ''}`);
+  // Best-effort: proactively unban this IP on every VM whose jail is currently running, so adding
+  // an exception for an already-banned false positive takes effect immediately rather than only
+  // preventing future bans. One VM's SSH failure must never block the others.
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
+  `).all();
+  await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
+  res.json({ message: 'OK' });
+});
+
+router.delete('/exceptions/:id', requirePermission('waf.block'), async (req, res) => {
+  const row = await db.prepare('SELECT * FROM waf_ip_exceptions WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
+  await db.prepare('DELETE FROM waf_ip_exceptions WHERE id = ?').run(row.id);
+  await logActivity(req.user, 'DELETE', 'waf_ip_exception', row.id, row.ip, `Xóa ngoại lệ IP WAF: ${row.ip}`);
+  res.json({ message: 'OK' });
+});
+
 module.exports = router;

@@ -380,6 +380,19 @@ const SCHEMA_SQL = `
     INDEX idx_waf_events_time (occurred_at)
   );
 
+  -- Global IP/CIDR allowlist (applies across every VM's jail) — checked by waf-manager.js's banIp()
+  -- before every ban attempt, auto or manual, so a trusted source (office IP, uptime-check service,
+  -- load tester) never gets blocked by mistake regardless of which VM it hits. Global rather than
+  -- per-VM: the typical case for an exception (a known-safe source) isn't tied to one server.
+  CREATE TABLE IF NOT EXISTS waf_ip_exceptions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    ip VARCHAR(64) NOT NULL,
+    note VARCHAR(255),
+    created_by VARCHAR(255),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_waf_ip_exception (ip)
+  );
+
   -- One row per (VM, access_log file) discovered by parsing that VM's /etc/nginx/**/*.conf files
   -- (server_name + access_log directives per server block) — a VM commonly hosts several domains,
   -- each logging to its own file. Re-synced every collector poll: rows for logs no longer present in

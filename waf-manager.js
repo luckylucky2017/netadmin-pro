@@ -186,8 +186,45 @@ async function stopJail(vm, user = null) {
 // defense-in-depth since it gets interpolated straight into a remote shell command below.
 const SAFE_IP_RE = /^[0-9a-fA-F:.]+$/;
 
+function isIpv4(ip) { return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip || ''); }
+
+function ipv4ToInt(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(p => Number.isNaN(p) || p < 0 || p > 255)) return null;
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+// Pure, testable: does `ip` fall under exception entry `entryIp`? entryIp may be a bare IPv4/IPv6
+// address (exact match) or an IPv4 CIDR range like "203.0.113.0/24" — CIDR ranges are IPv4-only,
+// IPv6 exceptions are always exact-match to keep this simple.
+function matchesException(ip, entryIp) {
+  if (!ip || !entryIp) return false;
+  const cidrM = /^(.+)\/(\d{1,2})$/.exec(entryIp);
+  if (cidrM && isIpv4(cidrM[1]) && isIpv4(ip)) {
+    const prefixLen = Number(cidrM[2]);
+    if (prefixLen < 0 || prefixLen > 32) return false;
+    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
+    const a = ipv4ToInt(ip), b = ipv4ToInt(cidrM[1]);
+    if (a === null || b === null) return false;
+    return (a & mask) === (b & mask);
+  }
+  return ip === entryIp;
+}
+
+function isExceptedIp(ip, exceptions) {
+  return exceptions.some(e => matchesException(ip, e.ip));
+}
+
+async function getExceptions() {
+  return db.prepare('SELECT id, ip, note FROM waf_ip_exceptions').all();
+}
+
 async function banIp(vm, ip) {
   if (!SAFE_IP_RE.test(ip || '')) return { ok: false, error: `Địa chỉ IP không hợp lệ: "${ip}"` };
+  const exceptions = await getExceptions();
+  if (isExceptedIp(ip, exceptions)) {
+    return { ok: false, excepted: true, error: 'IP nằm trong danh sách ngoại lệ — không bị chặn' };
+  }
   let ssh;
   try {
     ssh = await connect(vm);
@@ -234,4 +271,7 @@ async function listBannedIps(vm) {
   }
 }
 
-module.exports = { JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT };
+module.exports = {
+  JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
+  matchesException, isExceptedIp, getExceptions,
+};

@@ -3276,6 +3276,7 @@ async function renderWaf(search = '') {
     <div class="filter-tabs" id="wafTabs" style="margin-bottom:16px">
       <div class="filter-tab ${wafTab === 'events' ? 'active' : ''}" data-tab="events" onclick="setWafTab('events')">Sự kiện</div>
       <div class="filter-tab ${wafTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setWafTab('manage')">Quản lý giám sát</div>
+      <div class="filter-tab ${wafTab === 'exceptions' ? 'active' : ''}" data-tab="exceptions" onclick="setWafTab('exceptions')">Ngoại lệ IP</div>
     </div>
     <div id="wafTabBody"></div>`;
     document.getElementById('wafRefreshSelect').value = String(wafRefreshMs);
@@ -3313,6 +3314,7 @@ function setWafTab(tab) {
 
 function renderWafTabBody(search = '') {
   if (wafTab === 'manage') renderWafManage();
+  else if (wafTab === 'exceptions') renderWafExceptions();
   else renderWafEvents(search);
 }
 
@@ -3608,6 +3610,74 @@ async function wafUnblockIpFromModal(vmId, ip) {
     const result = await api(`/waf/vms/${vmId}/unblock-ip`, 'POST', { ip });
     if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); openWafBannedIpsModal(vmId); }
     else toast(result.error || 'Không gỡ chặn được', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function renderWafExceptions() {
+  document.getElementById('wafTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:0">Danh sách IP/dải mạng KHÔNG BAO GIỜ bị chặn — áp dụng cho mọi VM (jail nào cũng kiểm tra danh sách này trước khi chặn), cả tự động lẫn bấm "Chặn ngay" thủ công. Thêm 1 IP đang bị chặn vào đây sẽ tự động gỡ chặn ngay trên các VM đang bật jail. Dùng dạng <code>203.0.113.5</code> (1 IP) hoặc <code>203.0.113.0/24</code> (dải mạng, chỉ hỗ trợ IPv4).</p>
+      </div>
+      <div class="table-toolbar" style="gap:8px" data-permission="waf.block">
+        <input type="text" id="wafExceptionIpInput" placeholder="IP hoặc CIDR, vd 203.0.113.5" style="flex:1;max-width:240px">
+        <input type="text" id="wafExceptionNoteInput" placeholder="Ghi chú (vd: IP văn phòng)" style="flex:1;max-width:280px">
+        <button class="btn btn-primary btn-sm" onclick="addWafException()">Thêm ngoại lệ</button>
+      </div>
+      <div id="wafExceptionsTableWrap"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  applyPermissionVisibility();
+  loadWafExceptions();
+}
+
+async function loadWafExceptions() {
+  const wrap = document.getElementById('wafExceptionsTableWrap');
+  try {
+    const rows = await api('/waf/exceptions');
+    if (!wrap) return;
+    if (!rows.length) {
+      wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg><h3>Chưa có ngoại lệ nào</h3><p>Thêm IP/CIDR tin cậy để không bao giờ bị WAF chặn nhầm</p></div>`;
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr><th>IP / CIDR</th><th>Ghi chú</th><th>Người thêm</th><th>Ngày thêm</th><th>Hành động</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
+          <td>${r.note ? escHtml(r.note) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${r.created_by ? escHtml(r.created_by) : '—'}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+          <td><button class="btn-icon delete" data-permission="waf.block" title="Xóa ngoại lệ" onclick="deleteWafException(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+async function addWafException() {
+  const ipInput = document.getElementById('wafExceptionIpInput');
+  const noteInput = document.getElementById('wafExceptionNoteInput');
+  const ip = ipInput.value.trim();
+  const note = noteInput.value.trim();
+  if (!ip) { toast('Nhập IP hoặc CIDR', 'error'); return; }
+  try {
+    await api('/waf/exceptions', 'POST', { ip, note });
+    toast(`Đã thêm ngoại lệ ${ip}`, 'success');
+    ipInput.value = '';
+    noteInput.value = '';
+    loadWafExceptions();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function deleteWafException(id, ip) {
+  if (!confirm(`Xóa ngoại lệ ${ip}? IP này sẽ có thể bị WAF chặn lại nếu vượt ngưỡng.`)) return;
+  try {
+    await api(`/waf/exceptions/${id}`, 'DELETE');
+    toast(`Đã xóa ngoại lệ ${ip}`, 'success');
+    loadWafExceptions();
   } catch (e) { toast(e.message, 'error'); }
 }
 
