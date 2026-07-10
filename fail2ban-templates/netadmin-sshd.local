@@ -1,0 +1,11 @@
+# NetAdmin Pro — enables fail2ban's stock sshd jail (NOT enabled by default on every distro/version,
+# confirmed missing out-of-the-box on Ubuntu 24.04 — see fail2ban-manager.js).
+#
+# Auto-deployed by the app's "Bật fail2ban" action (Giám sát bất thường -> Quản lý VM giám sát) to
+# every monitored VM. To apply manually on a new machine instead of going through the app:
+#   sudo cp netadmin-sshd.local /etc/fail2ban/jail.d/netadmin-sshd.local
+#   sudo fail2ban-client reload --restart
+# (plain "reload" without --restart will NOT pick up a jail that wasn't already running — confirmed
+# on fail2ban 1.0.2.)
+[sshd]
+enabled = true

@@ -10,11 +10,26 @@
 // uses against the pre-existing sshd jail. Keeping 100% of detection logic in one place (the
 // collector) avoids two independent, driftable definitions of "what counts as an attack."
 const { NodeSSH } = require('node-ssh');
+const fs = require('fs');
+const path = require('path');
 const db = require('./database');
 const { logActivity } = require('./auth');
 const sshCredentials = require('./ssh-credentials');
 
 const JAIL_NAME = 'netadmin-waf';
+
+// Real, on-disk config files (fail2ban-templates/) are the single source of truth for what gets
+// deployed — not just JS string literals — so an admin can also apply them manually on a machine
+// set up outside this app (`sudo cp ... && fail2ban-client reload --restart`, see the comment header
+// in each template file for the exact commands). Loaded once at require-time; stripped of their `#`
+// comment header before being written to the remote host, so production /etc/fail2ban/* files stay
+// minimal instead of carrying this repo's internal dev commentary.
+function loadTemplate(filename) {
+  const raw = fs.readFileSync(path.join(__dirname, 'fail2ban-templates', filename), 'utf8');
+  return raw.split('\n').filter(line => !line.trim().startsWith('#')).join('\n').trim();
+}
+const WAF_FILTER_TEMPLATE = loadTemplate('netadmin-waf-filter.local');
+const WAF_JAIL_TEMPLATE = loadTemplate('netadmin-waf-jail.local');
 
 // Absolute path, safe charset only (letters/digits/_-./) — this value comes from an admin-editable
 // text field (routes/waf.js's PATCH /waf/vms/:id) and gets interpolated into a remote shell command
@@ -56,22 +71,14 @@ fi
 // --restart` is required to make it actually scan jail.d and start newly-added jails; every reload
 // call in this file/fail2ban-manager.js uses that flag for exactly this reason.
 function buildWafJailFilesScript(logPath) {
+  const jailContent = WAF_JAIL_TEMPLATE.replace('__WAF_LOG_PATH__', logPath);
   return `
 sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
-[Definition]
-failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER<HOST>$
-ignoreregex =
+${WAF_FILTER_TEMPLATE}
 FILTER_EOF
-sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<JAIL_EOF
-[${JAIL_NAME}]
-enabled = true
-filter = ${JAIL_NAME}
-logpath = ${logPath}
-maxretry = 100000
-findtime = 1
-bantime = 3600
-action = %(action_)s
+sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<'JAIL_EOF'
+${jailContent}
 JAIL_EOF
 `.trim();
 }

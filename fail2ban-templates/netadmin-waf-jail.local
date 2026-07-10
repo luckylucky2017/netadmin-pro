@@ -1,0 +1,20 @@
+# NetAdmin Pro — WAF jail definition. Pairs with netadmin-waf-filter.local (deploy both).
+#
+# logpath below is a PLACEHOLDER (__WAF_LOG_PATH__) — the app substitutes it with the real nginx
+# access.log path per VM/domain before deploying (waf-manager.js's buildWafJailFilesScript). If
+# applying this file manually on a new machine, replace __WAF_LOG_PATH__ with the real path first:
+#   sed -i 's#__WAF_LOG_PATH__#/var/log/nginx/access.log#' netadmin-waf-jail.local
+#   sudo cp netadmin-waf-jail.local /etc/fail2ban/jail.d/netadmin-waf.local
+#   sudo fail2ban-client reload --restart
+#
+# maxretry/findtime are set absurdly high/tight on purpose — this jail's filter never actually
+# matches (see netadmin-waf-filter.local), so these values are irrelevant to real bans; every real
+# ban comes from the app explicitly calling `fail2ban-client set netadmin-waf banip <ip>`.
+[netadmin-waf]
+enabled = true
+filter = netadmin-waf
+logpath = __WAF_LOG_PATH__
+maxretry = 100000
+findtime = 1
+bantime = 3600
+action = %(action_)s

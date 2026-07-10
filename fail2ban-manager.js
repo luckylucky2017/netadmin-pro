@@ -11,10 +11,18 @@
 // page's jail silently unconfigured. waf-manager.js's own installJail/checkStatus/stopJail still
 // exist for WAF-page-only actions (e.g. checking just the WAF jail without touching sshd).
 const { NodeSSH } = require('node-ssh');
+const fs = require('fs');
+const path = require('path');
 const db = require('./database');
 const { logActivity } = require('./auth');
 const sshCredentials = require('./ssh-credentials');
 const wafManager = require('./waf-manager');
+
+// Real, on-disk file (fail2ban-templates/netadmin-sshd.local) is the source of truth — same reason
+// as waf-manager.js's WAF templates: an admin can `sudo cp` it manually on a machine set up outside
+// this app instead of only being able to get this content via the "Bật fail2ban" button.
+const SSHD_JAIL_TEMPLATE = fs.readFileSync(path.join(__dirname, 'fail2ban-templates', 'netadmin-sshd.local'), 'utf8')
+  .split('\n').filter(line => !line.trim().startsWith('#')).join('\n').trim();
 
 // "systemctl is-active" only proves the DAEMON is running — it says nothing about whether the sshd
 // JAIL is actually enabled inside it. Confirmed on real hosts: Ubuntu 24.04's fail2ban package does
@@ -82,8 +90,7 @@ case "$PKG_MGR" in
 esac
 sudo -n mkdir -p /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
-[sshd]
-enabled = true
+${SSHD_JAIL_TEMPLATE}
 SSHD_EOF
 ${includeWaf ? wafManager.buildWafJailFilesScript(wafLogPath) : ''}
 sudo -n systemctl enable --now fail2ban

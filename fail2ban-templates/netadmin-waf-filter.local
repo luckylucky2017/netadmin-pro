@@ -1,0 +1,16 @@
+# NetAdmin Pro — WAF jail's filter. Deliberately NEVER matches anything real: all detection (dò
+# quét/DoS/DDoS) happens in nginx-waf-collector.js's own log parsing, not fail2ban's regex engine.
+# This jail exists purely as a ban/unban target (`fail2ban-client set netadmin-waf banip <ip>`).
+#
+# The <HOST> group is required even though this pattern can never match — fail2ban 1.0.2 rejects a
+# filter with zero capture groups at `reload` time ("No failure-id group in '...'"), which aborts
+# the WHOLE reload and was observed tearing down an already-running jail as a side effect (see
+# waf-manager.js's buildWafJailFilesScript comment).
+#
+# Auto-deployed by the app to /etc/fail2ban/filter.d/netadmin-waf.local. To apply manually:
+#   sudo cp netadmin-waf-filter.local /etc/fail2ban/filter.d/netadmin-waf.local
+#   sudo cp netadmin-waf-jail.local /etc/fail2ban/jail.d/netadmin-waf.local   (edit logpath first!)
+#   sudo fail2ban-client reload --restart
+[Definition]
+failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER<HOST>$
+ignoreregex =
