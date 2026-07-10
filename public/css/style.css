@@ -87,7 +87,12 @@ body { background: var(--bg); color: var(--fg); font-family: 'Fira Sans', system
 .stat-icon.purple { background: var(--purple-dim); color: var(--purple); }
 
 /* Table */
-.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+/* overflow-x: auto (not hidden) — every table in the app shares this wrapper, and several have
+   8-10 columns with nowrap headers that don't fit narrower viewports. With plain `hidden`, the
+   extra columns were silently clipped with no way to reach them; this keeps the page itself from
+   scrolling horizontally (body already sets overflow-x: hidden) while letting each wide table
+   scroll within its own container instead of breaking the layout. */
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow-x: auto; overflow-y: hidden; }
 .table-toolbar { display: flex; align-items: center; gap: 12px; padding: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .search-box { display: flex; align-items: center; gap: 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; flex: 1; min-width: 200px; }
 .search-box input { background: none; border: none; outline: none; color: var(--fg); font-size: 14px; width: 100%; padding: 8px 0; }
