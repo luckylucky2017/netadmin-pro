@@ -363,6 +363,7 @@ const SCHEMA_SQL = `
     id INT PRIMARY KEY AUTO_INCREMENT,
     vm_id INT NOT NULL,
     vm_name VARCHAR(255),
+    domain VARCHAR(255),
     event_type VARCHAR(20) NOT NULL,
     src_ip VARCHAR(64),
     country VARCHAR(10),
@@ -379,14 +380,32 @@ const SCHEMA_SQL = `
     INDEX idx_waf_events_time (occurred_at)
   );
 
-  -- Per-poll total request count per VM, used as the rolling baseline nginx-waf-collector.js compares
-  -- each new poll's total against to flag a distributed (DDoS) spike — short-lived, only the last
-  -- ~60 samples per VM are kept (pruned by the collector itself), not a long-term history table.
-  CREATE TABLE IF NOT EXISTS waf_traffic_stats (
+  -- One row per (VM, access_log file) discovered by parsing that VM's /etc/nginx/**/*.conf files
+  -- (server_name + access_log directives per server block) — a VM commonly hosts several domains,
+  -- each logging to its own file. Re-synced every collector poll: rows for logs no longer present in
+  -- the current config are deleted (see nginx-waf-collector.js's discoverAndSyncDomainLogs), along
+  -- with their ssh_log_cursor row so a re-added domain starts its lookback fresh rather than resuming
+  -- a stale cursor. domain is NULL for the single-path fallback used when no server_name could be
+  -- parsed (or /etc/nginx isn't readable at all) — falls back to vcenter_vms.waf_log_path.
+  CREATE TABLE IF NOT EXISTS waf_domain_logs (
+    id INT PRIMARY KEY AUTO_INCREMENT,
     vm_id INT NOT NULL,
+    domain VARCHAR(255),
+    log_path VARCHAR(255) NOT NULL,
+    conf_file VARCHAR(255),
+    discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_waf_domain_log (vm_id, log_path)
+  );
+
+  -- Per-poll total request count per (VM, log file), used as the rolling baseline
+  -- nginx-waf-collector.js compares each new poll's total against to flag a distributed (DDoS)
+  -- spike on that specific domain — short-lived, only the last ~20 samples per log file are kept
+  -- (pruned by the collector itself), not a long-term history table.
+  CREATE TABLE IF NOT EXISTS waf_traffic_stats (
+    domain_log_id INT NOT NULL,
     sample_ts DATETIME NOT NULL,
     request_count INT NOT NULL,
-    PRIMARY KEY (vm_id, sample_ts)
+    PRIMARY KEY (domain_log_id, sample_ts)
   );
 
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
@@ -626,6 +645,12 @@ async function ensureSchemaAndMigrations() {
     "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_status VARCHAR(20)",
     "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_checked_at DATETIME",
     "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_error TEXT",
+    // Off by default — only meaningful when this VM sits behind a reverse proxy/load balancer that
+    // sets X-Forwarded-For, in which case $remote_addr in the access log is always the proxy, not
+    // the real client. Turning this on makes nginx-waf-collector.js use the first XFF hop as the
+    // detection/ban IP instead — turning it on for a VM that ISN'T behind a proxy would let a client
+    // spoof the XFF header to frame/ban an arbitrary IP, so it must stay an explicit per-VM opt-in.
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_trust_xff INT DEFAULT 0",
   ];
   for (const m of wafMigrations) {
     try { await pool.query(m); } catch (e) { if (e.errno !== 1060) throw e; }

@@ -26,15 +26,26 @@ router.get('/stats', async (req, res) => {
   res.json({ scan, dos, ddos, blocked, monitored });
 });
 
-// VMs list for "Quản lý giám sát": which are eligible (have an SSH credential + IP — same
-// prerequisite ssh-security/fail2ban already require) and which are currently opted into WAF.
+// VMs list for "Quản lý giám sát": which are eligible (have an SSH credential + IP — assigned on
+// the "Giám sát bất thường" → "Quản lý VM giám sát" tab, reused as-is here, no separate credential
+// picker on this page) and which are currently opted into WAF.
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id,
-           waf_enabled, waf_log_path, waf_auto_block, waf_jail_status, waf_jail_checked_at, waf_jail_error
+           waf_enabled, waf_log_path, waf_auto_block, waf_trust_xff, waf_jail_status, waf_jail_checked_at, waf_jail_error
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
+});
+
+// Domains/log files discovered from this VM's /etc/nginx config by the last collector poll — for
+// the "Quản lý giám sát" tab to show what's actually being tailed, since one VM commonly serves
+// several domains each with its own access_log.
+router.get('/vms/:id/domains', async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT id, domain, log_path, conf_file, discovered_at FROM waf_domain_logs WHERE vm_id = ? ORDER BY domain ASC
+  `).all(req.params.id);
+  res.json(rows);
 });
 
 const SAFE_LOG_PATH_RE = wafManager.SAFE_LOG_PATH_RE;
@@ -45,14 +56,15 @@ router.patch('/vms/:id', requirePermission('waf.manage'), async (req, res) => {
   const enabled = req.body?.enabled ? 1 : 0;
   const logPath = String(req.body?.logPath || '/var/log/nginx/access.log').trim();
   const autoBlock = req.body?.autoBlock ? 1 : 0;
+  const trustXff = req.body?.trustXff ? 1 : 0;
   if (enabled && !SAFE_LOG_PATH_RE.test(logPath)) {
     return res.status(400).json({ error: 'Đường dẫn log không hợp lệ — phải là đường dẫn tuyệt đối, chỉ gồm chữ/số/_-./ ' });
   }
-  await db.prepare('UPDATE vcenter_vms SET waf_enabled = ?, waf_log_path = ?, waf_auto_block = ? WHERE id = ?')
-    .run(enabled, logPath, autoBlock, vm.id);
+  await db.prepare('UPDATE vcenter_vms SET waf_enabled = ?, waf_log_path = ?, waf_auto_block = ?, waf_trust_xff = ? WHERE id = ?')
+    .run(enabled, logPath, autoBlock, trustXff, vm.id);
   await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
     enabled
-      ? `Bật giám sát WAF (log: ${logPath}, tự động chặn: ${autoBlock ? 'bật' : 'tắt'})`
+      ? `Bật giám sát WAF (log dự phòng: ${logPath}, tự động chặn: ${autoBlock ? 'bật' : 'tắt'}, tin X-Forwarded-For: ${trustXff ? 'bật' : 'tắt'})`
       : 'Tắt giám sát WAF');
   res.json({ message: 'OK' });
 });

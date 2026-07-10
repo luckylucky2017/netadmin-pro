@@ -3388,12 +3388,13 @@ function renderWafEventRows() {
   const events = paginateRows(sortedEvents, wafEventPagination);
   const rowOffset = (wafEventPagination.page - 1) * wafEventPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Hành động</th></tr></thead>
       <tbody>${events.map((ev, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(ev.occurred_at)}</span></td>
           <td style="font-weight:600">${ev.vm_name || '—'}</td>
+          <td>${ev.domain ? escHtml(ev.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span class="severity ${WAF_EVENT_CLASS[ev.event_type] || 'unknown'}"><span class="dot"></span>${WAF_EVENT_LABEL[ev.event_type] || ev.event_type}</span></td>
           <td>${ev.src_ip ? `<span style="font-family:monospace">${escHtml(ev.src_ip)}</span>` : '<span style="color:var(--fg-dim)">— (phân tán)</span>'}</td>
           <td>${ev.country || '—'}</td>
@@ -3430,11 +3431,13 @@ async function renderWafManage() {
   document.getElementById('wafTabBody').innerHTML = `
     <div class="table-wrap">
       <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
-        <p style="margin-bottom:8px">Chỉ VM đã có "Tài khoản kết nối" SSH (cấu hình ở trang Giám sát bất thường) mới bật giám sát WAF được. Nhập đường dẫn log nginx thật trên VM đó (mặc định /var/log/nginx/access.log), bấm Lưu để bắt đầu giám sát.</p>
-        <p style="margin-bottom:6px">access.log thường chỉ root/group adm đọc được — nếu không đọc được, cần thêm quyền sudo cho user kết nối (thay <code>USER</code> bằng username tài khoản kết nối):</p>
-        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/wc -l *, /usr/bin/tail -n +* *, /usr/bin/test -f *' | sudo tee /etc/sudoers.d/netadmin-waf-monitor</pre>
+        <p style="margin-bottom:8px">Chỉ VM đã có "Tài khoản kết nối" SSH (gán ở trang Giám sát bất thường → tab "Quản lý VM giám sát" — dùng chung, không cấu hình lại ở đây) mới bật giám sát WAF được.</p>
+        <p style="margin-bottom:8px">Hệ thống tự dò các domain đang chạy trên VM bằng cách đọc <code>server_name</code>/<code>access_log</code> trong <code>/etc/nginx/**/*.conf</code> mỗi lượt quét — mỗi domain 1 file log riêng sẽ được theo dõi độc lập (xem cột "Domain đã dò"). Ô "Log dự phòng" chỉ dùng khi KHÔNG dò được domain nào (vd không đọc được /etc/nginx).</p>
+        <p style="margin-bottom:6px">Cần quyền sudo đọc config + log (thay <code>USER</code> bằng username tài khoản kết nối):</p>
+        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/find /etc/nginx*, /usr/bin/cat /etc/nginx/*, /usr/bin/wc -l *, /usr/bin/tail -n +* *, /usr/bin/test -f *' | sudo tee /etc/sudoers.d/netadmin-waf-monitor</pre>
         <p style="margin-bottom:6px">Cột <strong>Jail WAF</strong>: bấm "Cài đặt" để tự động cấu hình 1 jail fail2ban riêng dùng để chặn IP (việc PHÁT HIỆN dò quét/DoS/DDoS do hệ thống này tự làm, không phụ thuộc fail2ban). Cần quyền sudo:</p>
         <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client, /usr/bin/tee, /usr/bin/mkdir, /usr/bin/sed' | sudo tee /etc/sudoers.d/netadmin-waf-jail</pre>
+        <p style="margin-bottom:0">Cột <strong>Tin X-Forwarded-For</strong>: CHỈ bật nếu VM này nằm sau 1 reverse proxy/load balancer thật (khi đó $remote_addr trong log luôn là IP của proxy, không phải khách thật) — bật nhầm cho VM nhận traffic trực tiếp sẽ cho phép giả mạo header để đổ lỗi/chặn nhầm IP bất kỳ.</p>
       </div>
       <div class="table-toolbar">
         <div class="search-box">
@@ -3483,16 +3486,18 @@ function renderWafManageRows() {
   const rowOffset = (wafManagePagination.page - 1) * wafManagePagination.pageSize;
   wrap.innerHTML = `<table>
         <thead><tr>
-          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}<th>Đường dẫn log</th><th>Bật giám sát</th><th>Tự động chặn</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
+          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = !!(v.ssh_credential_id && v.ip_address);
           return `<tr data-vm-id="${v.id}">
             <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
             <td style="font-weight:600">${v.name}</td>
             <td>${v.ip_address || '—'}</td>
-            <td><input type="text" class="waf-log-path" data-id="${v.id}" value="${escAttr(v.waf_log_path || '/var/log/nginx/access.log')}" style="min-width:220px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
+            <td><button class="btn-icon" title="Xem domain đã dò được" ${eligible ? '' : 'disabled'} onclick="openWafDomainsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/></svg></button></td>
+            <td><input type="text" class="waf-log-path" data-id="${v.id}" value="${escAttr(v.waf_log_path || '/var/log/nginx/access.log')}" style="min-width:200px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}"><input type="checkbox" class="waf-enabled" data-id="${v.id}" ${v.waf_enabled ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="Tự động chặn IP khi phát hiện tấn công"><input type="checkbox" class="waf-auto-block" data-id="${v.id}" ${v.waf_auto_block ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
+            <td><label class="toggle-switch" data-permission="waf.manage" title="CHỈ bật nếu VM này sau reverse proxy/load balancer thật"><input type="checkbox" class="waf-trust-xff" data-id="${v.id}" ${v.waf_trust_xff ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td>${wafJailCell(v)}</td>
             <td><div class="actions">
               <button class="btn ${v.waf_enabled ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.waf_enabled ? 'Đã lưu — đang giám sát WAF' : 'Chưa lưu'}" data-permission="waf.manage" ${eligible ? '' : 'disabled'} onclick="saveWafConfig(${v.id}, this)">Lưu</button>
@@ -3507,16 +3512,44 @@ function renderWafManageRows() {
 async function saveWafConfig(id, btn) {
   const enabledCb = document.querySelector(`.waf-enabled[data-id="${id}"]`);
   const autoBlockCb = document.querySelector(`.waf-auto-block[data-id="${id}"]`);
+  const trustXffCb = document.querySelector(`.waf-trust-xff[data-id="${id}"]`);
   const logPathInput = document.querySelector(`.waf-log-path[data-id="${id}"]`);
   const enabled = !!enabledCb?.checked;
   const autoBlock = !!autoBlockCb?.checked;
+  const trustXff = !!trustXffCb?.checked;
   const logPath = logPathInput?.value.trim() || '/var/log/nginx/access.log';
   btn.disabled = true;
   try {
-    await api(`/waf/vms/${id}`, 'PATCH', { enabled, logPath, autoBlock });
+    await api(`/waf/vms/${id}`, 'PATCH', { enabled, logPath, autoBlock, trustXff });
     toast(enabled ? 'Đã bật giám sát WAF' : 'Đã tắt giám sát WAF', 'success');
     renderWaf();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function openWafDomainsModal(vmId) {
+  const vm = wafState.vms.find(v => v.id === vmId);
+  if (!vm) return;
+  openModal(`Domain đã dò được — ${vm.name}`, `<div class="loading"><div class="spinner"></div></div>`);
+  try {
+    const rows = await api(`/waf/vms/${vmId}/domains`);
+    const body = document.getElementById('modalBody');
+    if (!rows.length) {
+      body.innerHTML = `<div class="empty-state"><h3>Chưa dò được domain nào</h3><p>Kiểm tra quyền đọc /etc/nginx, hoặc hệ thống đang dùng "Log dự phòng" nếu VM chỉ có 1 site không khai báo server_name.</p></div>`;
+      return;
+    }
+    body.innerHTML = `<table>
+      <thead><tr><th>Domain</th><th>Đường dẫn log</th><th>File cấu hình</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="font-weight:600">${r.domain ? escHtml(r.domain) : '<span style="color:var(--fg-dim)">(mặc định)</span>'}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.log_path)}</td>
+          <td style="font-family:monospace;font-size:12px;color:var(--fg-muted)">${r.conf_file ? escHtml(r.conf_file) : '—'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
 }
 
 async function refreshWafManageVms() {
