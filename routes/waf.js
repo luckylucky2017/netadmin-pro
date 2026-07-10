@@ -104,15 +104,29 @@ router.post('/vms/:id/jail/stop', requirePermission('waf.jail.manage'), async (r
 });
 
 // Aggregated "IP đang bị chặn" tab — DB-backed (waf_banned_ips, synced every collector poll), not a
-// live SSH call, so this stays fast regardless of how many VMs are monitored. Country/loại vi phạm
-// enrichment comes from the most recent matching waf_events row for that (vm, ip), best-effort only
-// (may be null if the IP was blocked manually with no prior detected event).
+// live SSH call, so this stays fast regardless of how many VMs are monitored. The "reason blocked"
+// context (event_types, total_hits, sample_paths) is aggregated across EVERY waf_events row ever
+// recorded for that (vm, ip) — not just the latest — so a repeat offender's full pattern is visible,
+// not just its most recent hit. Best-effort: all null if the IP was blocked manually with no prior
+// detected event. sample_paths caps at 8 distinct paths via SUBSTRING_INDEX-on-GROUP_CONCAT (the
+// standard MySQL "top N of a GROUP_CONCAT" trick — avoids an unbounded string for a long-running
+// repeat offender with hundreds of distinct probed URLs).
 router.get('/banned-ips', requirePermission('waf.jail.check'), async (req, res) => {
   const rows = await db.prepare(`
     SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
-           (SELECT e.country FROM waf_events e WHERE e.vm_id = b.vm_id AND e.src_ip = b.ip ORDER BY e.occurred_at DESC LIMIT 1) AS country,
-           (SELECT e.event_type FROM waf_events e WHERE e.vm_id = b.vm_id AND e.src_ip = b.ip ORDER BY e.occurred_at DESC LIMIT 1) AS event_type
-    FROM waf_banned_ips b JOIN vcenter_vms v ON v.id = b.vm_id
+           agg.country, agg.event_types, agg.total_hits, agg.event_count, agg.sample_paths
+    FROM waf_banned_ips b
+    JOIN vcenter_vms v ON v.id = b.vm_id
+    LEFT JOIN (
+      SELECT vm_id, src_ip,
+        SUBSTRING_INDEX(GROUP_CONCAT(country ORDER BY occurred_at DESC SEPARATOR ','), ',', 1) AS country,
+        GROUP_CONCAT(DISTINCT event_type ORDER BY event_type SEPARATOR ', ') AS event_types,
+        SUM(hit_count) AS total_hits,
+        COUNT(*) AS event_count,
+        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT path ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths
+      FROM waf_events
+      GROUP BY vm_id, src_ip
+    ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
     ORDER BY b.last_seen DESC
   `).all();
   res.json(rows);

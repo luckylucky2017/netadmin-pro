@@ -3324,6 +3324,13 @@ function renderWafTabBody(search = '') {
 const WAF_EVENT_LABEL = { scan: 'Dò quét', dos: 'DoS', ddos: 'DDoS', manual_block: 'Chặn thủ công' };
 const WAF_EVENT_CLASS = { scan: 'warning', dos: 'critical', ddos: 'critical', manual_block: 'unknown' };
 
+// "Loại vi phạm" cell in "IP đang bị chặn" aggregates every distinct event_type ever recorded for
+// that (vm, ip) as a comma-separated string (see routes/waf.js's GET /banned-ips) — map each token
+// through the Vietnamese label instead of showing the raw DB value.
+function formatWafEventTypes(csv) {
+  return csv.split(',').map(t => t.trim()).filter(Boolean).map(t => WAF_EVENT_LABEL[t] || t).join(', ');
+}
+
 function renderWafEvents(search = '') {
   const monitoredVms = wafState.vms.filter(v => v.waf_enabled);
   document.getElementById('wafTabBody').innerHTML = `
@@ -3486,21 +3493,28 @@ function renderWafBannedRows() {
   const rows = paginateRows(sortedRows, wafBannedPagination);
   const rowOffset = (wafBannedPagination.page - 1) * wafBannedPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Lần đầu chặn', 'first_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Còn chặn tới', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
-      <tbody>${rows.map((r, i) => `
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần đầu chặn', 'first_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Còn chặn tới', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
+      <tbody>${rows.map((r, i) => {
+        const paths = r.sample_paths ? r.sample_paths.split('|||').filter(Boolean) : [];
+        const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 50) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
+        const pathsTitle = paths.length ? paths.map(escAttr).join('\n') : '';
+        return `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td style="font-weight:600">${r.vm_name || '—'}</td>
           <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
           <td>${r.country || '—'}</td>
-          <td>${r.event_type ? (WAF_EVENT_LABEL[r.event_type] || r.event_type) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${r.event_types ? formatWafEventTypes(r.event_types) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${pathsTitle}">${pathsPreview}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.first_seen)}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần cuối xác nhận vẫn còn bị chặn">${formatTime(r.last_seen)}</span></td>
           <td><div class="actions">
             <button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
             <button class="btn btn-secondary btn-sm" data-permission="waf.block" title="Gỡ chặn và không bao giờ chặn IP này nữa" onclick="wafAddExceptionFromBanned('${escAttr(r.ip)}', this)">+ Ngoại lệ</button>
           </div></td>
-        </tr>`).join('')}
+        </tr>`;
+      }).join('')}
       </tbody></table>${paginationBar(wafBannedPagination, sortedRows.length, 'wafBannedPagination', 'renderWafBannedRows')}`;
   applyPermissionVisibility();
 }
