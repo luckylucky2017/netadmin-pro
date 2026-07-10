@@ -25,22 +25,40 @@ async function buildConnectOptions(row) {
   return { ...base, privateKey: cred.private_key, passphrase: cred.passphrase || undefined };
 }
 
-// Ad-hoc test — credential doesn't need to be attached to any server/VM row yet (used by the
-// "Kiểm tra kết nối" button when adding/editing a credential in the UI). Opens and immediately
-// closes a real SSH connection; throws on failure (caller — the route handler — turns that into
-// {ok:false, message}, same pattern as vCenter cluster connection testing).
-async function testConnection({ credentialId, host, port }) {
-  const cred = await getCredential(credentialId);
-  if (!cred) throw new Error('Không tìm thấy tài khoản kết nối');
+// Ad-hoc test — used by the "Kiểm tra kết nối" button when adding/editing a credential in the UI.
+// Tests whatever is CURRENTLY TYPED in the form, not stale already-saved values: credentialId is
+// optional (omitted entirely for a brand-new, not-yet-saved credential); when given (editing an
+// existing one), blank private_key/passphrase/password fall back to what's already saved — same
+// "blank = keep existing" merge routes/ssh-credentials.js's PUT uses, so the test reflects exactly
+// what clicking "Lưu thay đổi" would actually persist, without requiring a save first. Opens and
+// immediately closes a real SSH connection; throws on failure (caller — the route handler — turns
+// that into {ok:false, message}, same pattern as vCenter cluster connection testing).
+async function testConnection({ credentialId, host, port, auth_type, username, private_key, passphrase, password }) {
   if (!host) throw new Error('Thiếu host để kiểm tra');
+  const cred = credentialId ? await getCredential(credentialId) : null;
+  if (credentialId && !cred) throw new Error('Không tìm thấy tài khoản kết nối');
+  const effective = {
+    auth_type: auth_type || cred?.auth_type || 'private_key',
+    username: username || cred?.username,
+    private_key: private_key || cred?.private_key,
+    passphrase: passphrase || cred?.passphrase,
+    password: password || cred?.password,
+  };
+  if (!effective.username) throw new Error('Thiếu username');
   const { NodeSSH } = require('node-ssh');
   const ssh = new NodeSSH();
-  const opts = { host, port: port || 22, username: cred.username, readyTimeout: 8000 };
-  if (cred.auth_type === 'password') opts.password = cred.password;
-  else { opts.privateKey = cred.private_key; opts.passphrase = cred.passphrase || undefined; }
+  const opts = { host, port: port || 22, username: effective.username, readyTimeout: 8000 };
+  if (effective.auth_type === 'password') {
+    if (!effective.password) throw new Error('Thiếu mật khẩu');
+    opts.password = effective.password;
+  } else {
+    if (!effective.private_key) throw new Error('Thiếu private key');
+    opts.privateKey = effective.private_key;
+    opts.passphrase = effective.passphrase || undefined;
+  }
   await ssh.connect(opts);
   ssh.dispose();
-  return { ok: true, message: `Kết nối SSH thành công tới ${host}:${opts.port} với user "${cred.username}"` };
+  return { ok: true, message: `Kết nối SSH thành công tới ${host}:${opts.port} với user "${effective.username}"` };
 }
 
 module.exports = { getCredential, buildConnectOptions, testConnection };

@@ -3461,13 +3461,20 @@ async function testCredentialConnection(id) {
   const port = Number(document.getElementById('credTestPort').value) || 22;
   const resultEl = document.getElementById('credTestResult');
   if (!host) { resultEl.innerHTML = `<span style="color:var(--yellow)">Nhập host để kiểm tra</span>`; return; }
-  if (!id) {
-    resultEl.innerHTML = `<span style="color:var(--yellow)">Lưu tài khoản trước, sau đó bấm "Kiểm tra kết nối" lại ở trang danh sách</span>`;
-    return;
-  }
+  // Gửi kèm toàn bộ giá trị ĐANG GÕ trong form (kể cả chưa lưu) — trước đây nút này chỉ test giá
+  // trị đã lưu trong DB, nên gõ mật khẩu/passphrase mới rồi bấm "Kiểm tra" ngay dễ gây hiểu lầm là
+  // sai trong khi thực ra chỉ là chưa bấm "Lưu thay đổi". Trường trống khi đang sửa (id có giá trị)
+  // vẫn được backend hiểu là "giữ nguyên giá trị đã lưu", đúng ngữ nghĩa nút Lưu.
+  const fd = new FormData(document.getElementById('credentialForm'));
+  const payload = {
+    credentialId: id, host, port,
+    auth_type: fd.get('auth_type'), username: fd.get('username'),
+    private_key: fd.get('private_key') || '', passphrase: fd.get('passphrase') || '',
+    password: fd.get('password') || ''
+  };
   resultEl.innerHTML = `<span style="color:var(--fg-dim)">Đang kiểm tra...</span>`;
   try {
-    const result = await api('/ssh-credentials/test', 'POST', { credentialId: id, host, port });
+    const result = await api('/ssh-credentials/test', 'POST', payload);
     resultEl.innerHTML = result.ok ? `<span style="color:var(--accent)">✓ ${result.message}</span>` : `<span style="color:var(--red)">✗ ${result.message}</span>`;
   } catch (e) {
     resultEl.innerHTML = `<span style="color:var(--red)">✗ ${e.message}</span>`;

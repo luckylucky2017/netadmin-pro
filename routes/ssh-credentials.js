@@ -99,11 +99,13 @@ router.delete('/:id', requirePermission('ssh_credentials.manage'), async (req, r
   res.json({ message: 'Đã xóa' });
 });
 
+// credentialId is optional — omitted for a not-yet-saved credential (every auth field must be given
+// directly), present when editing an existing one (blank auth fields fall back to what's saved).
 router.post('/test', requirePermission('ssh_credentials.manage'), async (req, res) => {
-  const { credentialId, host, port } = req.body;
-  if (!credentialId || !host) return res.status(400).json({ error: 'Thiếu credentialId/host' });
+  const { credentialId, host, port, auth_type, username, private_key, passphrase, password } = req.body;
+  if (!host) return res.status(400).json({ error: 'Thiếu host' });
   try {
-    const result = await sshCredentials.testConnection({ credentialId, host, port });
+    const result = await sshCredentials.testConnection({ credentialId, host, port, auth_type, username, private_key, passphrase, password });
     res.json(result);
   } catch (e) {
     res.json({ ok: false, message: e.message });
