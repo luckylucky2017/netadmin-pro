@@ -72,8 +72,12 @@ router.patch('/vms/:id', requirePermission('waf.manage'), async (req, res) => {
 async function getWafVm(req, res) {
   // ssh_credential_id is what waf-manager.js's connect()/sshCredentials.buildConnectOptions actually
   // resolves the SSH connection from — mirrors routes/security.js's getMonitoredVm reasoning.
+  // ssh_port MUST be selected too — buildConnectOptions() falls back to port 22 whenever
+  // row.ssh_port is undefined, which silently broke every jail action for any VM configured with a
+  // non-default SSH port (this row was missing it; caught via a real "not_installed"/timeout report
+  // on a VM using port 6565).
   const vm = await db.prepare(`
-    SELECT id, name, ip_address, ssh_credential_id, waf_log_path, waf_auto_block
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port, waf_log_path, waf_auto_block
     FROM vcenter_vms WHERE id = ?
   `).get(req.params.id);
   if (!vm) { res.status(404).json({ error: 'Không tìm thấy VM' }); return null; }
