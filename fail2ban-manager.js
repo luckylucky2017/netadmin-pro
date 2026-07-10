@@ -88,7 +88,7 @@ SSHD_EOF
 ${includeWaf ? wafManager.buildWafJailFilesScript(wafLogPath) : ''}
 sudo -n systemctl enable --now fail2ban
 sleep 2
-sudo -n fail2ban-client reload 2>/dev/null || true
+sudo -n fail2ban-client reload --restart 2>/dev/null || true
 sleep 1
 ACTIVE=$(systemctl is-active fail2ban 2>/dev/null || sudo -n systemctl is-active fail2ban 2>/dev/null)
 if [ "$ACTIVE" != "active" ]; then

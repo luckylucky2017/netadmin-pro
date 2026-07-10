@@ -2,7 +2,8 @@
 // "Quản lý giám sát" — mirrors fail2ban-manager.js exactly, but for a dedicated jail (JAIL_NAME)
 // instead of the stock sshd one.
 //
-// Deliberate design: this jail's own fail2ban filter NEVER matches anything (see FILTER_CONTENT) —
+// Deliberate design: this jail's own fail2ban filter NEVER matches anything (see
+// buildWafJailFilesScript below) —
 // all detection (dò quét/DoS/DDoS) happens in nginx-waf-collector.js's own log parsing, not in
 // fail2ban's regex engine. The jail exists purely as a ban/unban target (`fail2ban-client set
 // netadmin-waf banip <ip>`), the same mechanism ssh-security-collector.js's tryImmediateBan already
@@ -42,12 +43,24 @@ fi
 // (package install + sshd jail + WAF jail, one single reload) instead of duplicating this content or
 // running a second separate SSH round-trip. buildInstallScript() below still uses it standalone for
 // the WAF page's own "Cài đặt jail" button, which only needs the WAF side.
+//
+// failregex MUST include a <HOST> group — confirmed on a real host (fail2ban 1.0.2): a filter with
+// zero capture groups fails validation at `fail2ban-client reload` time ("No failure-id group in
+// '...'"), which aborts the WHOLE reload transaction and was observed tearing down this jail even
+// though it had been running fine before (a later reload — e.g. triggered by the sshd-jail install
+// below — re-validates every already-loaded filter, not just the one that changed). The placeholder
+// text before <HOST> still makes this practically unmatchable against any real log line.
+//
+// Also confirmed on the same real host: plain `fail2ban-client reload` does NOT pick up a brand-new
+// jail that wasn't already running — it only reloads config for jails already active. `reload
+// --restart` is required to make it actually scan jail.d and start newly-added jails; every reload
+// call in this file/fail2ban-manager.js uses that flag for exactly this reason.
 function buildWafJailFilesScript(logPath) {
   return `
 sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
 [Definition]
-failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER$
+failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER<HOST>$
 ignoreregex =
 FILTER_EOF
 sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<JAIL_EOF
@@ -83,7 +96,7 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
   sudo -n systemctl enable --now fail2ban
 fi
 ${buildWafJailFilesScript(logPath)}
-sudo -n fail2ban-client reload
+sudo -n fail2ban-client reload --restart
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
 if echo "$OUT" | grep -qi "Status for the jail"; then echo "FINAL_STATUS:running"; else echo "FINAL_STATUS:error"; echo "$OUT"; fi
@@ -95,7 +108,7 @@ if echo "$OUT" | grep -qi "Status for the jail"; then echo "FINAL_STATUS:running
 const STOP_SCRIPT = `
 if [ -f /etc/fail2ban/jail.d/${JAIL_NAME}.local ]; then
   sudo -n sed -i 's/^enabled = true/enabled = false/' /etc/fail2ban/jail.d/${JAIL_NAME}.local
-  sudo -n fail2ban-client reload
+  sudo -n fail2ban-client reload --restart
 fi
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
