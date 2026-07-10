@@ -603,6 +603,11 @@ async function ensureSchemaAndMigrations() {
   // the UI can warn on connections from an unexpected country.
   try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN country VARCHAR(10)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN is_foreign INT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // The virtual/tunnel IP pfSense actually assigned this OpenVPN client for the current session
+  // (status/openvpn/servers' conns[].virtual_addr) — distinct from pfsense_vpn_status.remote_info,
+  // which is the client's real-world source IP:port, not its address inside the VPN.
+  try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN tunnel_ip VARCHAR(64)"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

@@ -3944,8 +3944,8 @@ async function renderPfsenseVpnTab() {
     <div class="table-wrap">
       <div class="table-toolbar"><div style="font-weight:600" id="pfVpnConnsTitle">Kết nối VPN đang hoạt động — sắp xếp theo tổng băng thông đã dùng</div></div>
       <table>
-        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Quốc gia</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
-        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="9"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>IP tunnel VPN</th><th>Quốc gia</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
+        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="10"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
     </div>
     <div class="table-wrap" style="margin-top:16px">
@@ -3981,12 +3981,13 @@ async function loadPfsenseVpnData() {
             <td>${c.tunnel_name}</td>
             <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
             <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
+            <td style="font-family:'Fira Code',monospace;font-size:12px;color:var(--accent)">${c.tunnel_ip || '—'}</td>
             <td>${c.is_foreign ? `<span class="severity critical blink"><span class="dot"></span>${c.country || '?'} - nước ngoài</span>` : (c.country ? `<span style="font-size:12px;color:var(--fg-muted)">${c.country}</span>` : '<span style="font-size:12px;color:var(--fg-muted)">—</span>')}</td>
             <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(c.rate_recv_bps)}</td>
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
-          </tr>`).join('') : `<tr><td colspan="9" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+          </tr>`).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
     document.getElementById('pfsenseVpnServersTableBody').innerHTML = servers.length ? servers.map(s => `
           <tr>
             <td style="font-weight:600">${s.description || s.name}</td>
@@ -4000,7 +4001,7 @@ async function loadPfsenseVpnData() {
     applyPermissionVisibility();
   } catch (e) {
     const el = document.getElementById('pfsenseVpnConnsTableBody');
-    if (el) el.innerHTML = `<tr><td colspan="9"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
+    if (el) el.innerHTML = `<tr><td colspan="10"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
   }
 }
 

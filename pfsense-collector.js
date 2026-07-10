@@ -121,14 +121,14 @@ async function syncVpn(fw) {
   const nextSnapshot = {};
 
   const upsert = db.prepare(`
-    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, client_key, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, country, is_foreign, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, client_key, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, country, is_foreign, tunnel_ip, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       tunnel_name = VALUES(tunnel_name), status = VALUES(status), remote_info = VALUES(remote_info),
       connected_since = VALUES(connected_since), bytes_recv = VALUES(bytes_recv), bytes_sent = VALUES(bytes_sent),
       rate_recv_bps = VALUES(rate_recv_bps), rate_sent_bps = VALUES(rate_sent_bps),
-      country = VALUES(country), is_foreign = VALUES(is_foreign), raw_json = VALUES(raw_json),
-      updated_at = CURRENT_TIMESTAMP
+      country = VALUES(country), is_foreign = VALUES(is_foreign), tunnel_ip = VALUES(tunnel_ip),
+      raw_json = VALUES(raw_json), updated_at = CURRENT_TIMESTAMP
   `);
   const servers = ovpnRes?.data || [];
   const currentKeys = [];
@@ -147,7 +147,7 @@ async function syncVpn(fw) {
       await upsert.run(
         fw.id, 'openvpn', `${srv.name} · ${c.common_name}`, 'connected', c.remote_host,
         c.connect_time ? new Date(c.connect_time).toISOString().slice(0, 19).replace('T', ' ') : null,
-        clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, country, isForeign, JSON.stringify(c)
+        clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, country, isForeign, c.virtual_addr || null, JSON.stringify(c)
       );
       count++;
     }
@@ -159,7 +159,7 @@ async function syncVpn(fw) {
     const { country, isForeign } = classifyIp(extractIp(sa.remote_host));
     await upsert.run(
       fw.id, 'ipsec', sa.name || sa['con-name'] || 'ipsec', sa.state || 'unknown', sa.remote_host || null,
-      null, clientKey, null, null, null, null, country, isForeign, JSON.stringify(sa)
+      null, clientKey, null, null, null, null, country, isForeign, null, JSON.stringify(sa)
     );
     count++;
   }

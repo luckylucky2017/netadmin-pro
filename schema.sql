@@ -312,6 +312,7 @@ CREATE TABLE `pfsense_vpn_status` (
   `rate_sent_bps` bigint DEFAULT NULL,
   `country` varchar(10) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `is_foreign` int DEFAULT '0',
+  `tunnel_ip` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_pfsense_vpn` (`firewall_id`,`vpn_type`,`client_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
