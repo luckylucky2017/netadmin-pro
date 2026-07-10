@@ -410,16 +410,21 @@ const SCHEMA_SQL = `
   -- One row per (VM, access_log file) discovered by parsing that VM's /etc/nginx/**/*.conf files
   -- (server_name + access_log directives per server block) — a VM commonly hosts several domains,
   -- each logging to its own file. Re-synced every collector poll: rows for logs no longer present in
-  -- the current config are deleted (see nginx-waf-collector.js's discoverAndSyncDomainLogs), along
-  -- with their ssh_log_cursor row so a re-added domain starts its lookback fresh rather than resuming
-  -- a stale cursor. domain is NULL for the single-path fallback used when no server_name could be
+  -- the current config are deleted (see nginx-waf-collector.js's discoverAndSyncDomainLogs) — deleting
+  -- the row naturally discards its cursor too, since last_byte_offset lives right on this row (not a
+  -- separate cursor table), so a re-added domain starts its lookback fresh rather than resuming a
+  -- stale position. domain is NULL for the single-path fallback used when no server_name could be
   -- parsed (or /etc/nginx isn't readable at all) — falls back to vcenter_vms.waf_log_path.
+  -- last_byte_offset (NULL until first poll) is a BYTE offset, not a line count — deliberately not
+  -- reusing ssh_log_cursor's line-count-based tracking, which requires an O(file size) "wc -l" on
+  -- every poll, see nginx-waf-collector.js's header comment for the real-world load this caused.
   CREATE TABLE IF NOT EXISTS waf_domain_logs (
     id INT PRIMARY KEY AUTO_INCREMENT,
     vm_id INT NOT NULL,
     domain VARCHAR(255),
     log_path VARCHAR(255) NOT NULL,
     conf_file VARCHAR(255),
+    last_byte_offset BIGINT,
     discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_waf_domain_log (vm_id, log_path)
   );
@@ -688,6 +693,10 @@ async function ensureSchemaAndMigrations() {
   // request was flagged instead of just "scan". Nullable — a plain volume/4xx-based scan detection
   // (no specific payload signature matched) or a dos/ddos/manual_block row leaves this null.
   try { await pool.query("ALTER TABLE waf_events ADD COLUMN attack_category VARCHAR(30)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Byte-offset cursor, replacing the O(file-size) wc-l/tail-n approach — see waf_domain_logs'
+  // CREATE TABLE comment and nginx-waf-collector.js's header comment for why.
+  try { await pool.query("ALTER TABLE waf_domain_logs ADD COLUMN last_byte_offset BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
 
   // Interface + OpenVPN client bandwidth (in/out bps) — pfSense's API only exposes cumulative byte
   // counters, not a rate, so bps is derived from the delta against the previous poll's snapshot,

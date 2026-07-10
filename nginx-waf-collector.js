@@ -13,13 +13,23 @@
 // for server_name+access_log pairs every poll, and each discovered (vm, log_path) gets its own
 // tailing cursor/detection/alerting, tagged with its domain. VMs with no discoverable per-domain
 // config fall back to the single vcenter_vms.waf_log_path.
+//
+// Cursor is tracked by BYTE OFFSET (waf_domain_logs.last_byte_offset), not line count — deliberately
+// NOT reusing ssh-security-collector.js's ssh_log_cursor/wc-l/tail-n approach. `wc -l` is O(file
+// size) — reading the ENTIRE access.log just to count lines on every ~30s poll caused real, reported
+// CPU/disk load on busy proxy servers with large logs, and `tail -n +N` has the same scan-from-start
+// cost for the "from line N" form (only "last N lines" gets GNU tail's backward-seek optimization).
+// `stat -c %s` (O(1), just reads inode metadata) + `tail -c +N` (seeks directly to a byte offset,
+// no scan) avoid reading any log content at all when nothing new has been written since the last
+// poll, and only read the genuinely new bytes otherwise — see buildTailFromOffsetScript/
+// collectLogFile below.
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
 const wafManager = require('./waf-manager');
 const { classifyIp } = require('./ssh-security-collector');
 
-const INITIAL_LOOKBACK_LINES = 1000; // access.log is far higher-volume than auth.log
+const INITIAL_LOOKBACK_BYTES = 500000; // ~500KB bounded first-ever read — avoids scanning a huge historical log
 const SCAN_ERROR_THRESHOLD = 20;     // >= this many 4xx/suspicious-path hits from 1 IP in a batch
 const DOS_REQUEST_THRESHOLD = 50;    // >= this many requests from 1 IP within DOS_WINDOW_SEC
 const DOS_WINDOW_SEC = 10;
@@ -72,7 +82,11 @@ function parseNginxLine(line) {
     remoteAddr,
     xffIp: firstXffIp(xff),
     timestamp: parseNginxTimestamp(timeLocal),
-    method: reqM ? reqM[1] : null,
+    // Truncated defensively — waf_events.method is VARCHAR(10) and real HTTP methods are all well
+    // under that (GET/POST/DELETE/OPTIONS/...); a garbage/malformed request line (e.g. a byte-offset
+    // read landing mid-line before stripPartialFirstLine existed) could otherwise produce an
+    // arbitrarily long "method" token and crash the INSERT entirely instead of just one bad row.
+    method: reqM ? reqM[1].slice(0, 10) : null,
     path: reqM ? reqM[2] : (request || null),
     status: Number(statusStr),
     referer,
@@ -242,32 +256,77 @@ function discoverDomainLogs(rawOutput) {
   return results;
 }
 
-function buildDetectScript(path) {
-  return `
-if sudo -n test -f "${path}" 2>/dev/null || test -f "${path}" 2>/dev/null; then
-  echo "LOGFILE:${path}"
-  N=$(sudo -n wc -l "${path}" 2>/dev/null | awk '{print $1}')
-  if [ -z "$N" ]; then N=$(wc -l "${path}" 2>/dev/null | awk '{print $1}'); fi
-  echo "$N"
-else
-  echo "LOGFILE:none"
-fi
+// Batches stat+conditional-tail for MULTIPLE domain logs into ONE SSH round-trip, not one per
+// domain — critical at real scale: some real VMs here serve 100-300+ domains, so N separate round
+// trips per poll was itself a major contributor to server load, independent of the O(file size)
+// wc-l/tail-n issue.
+//
+// A first version of this ran one `sudo -n stat`/`tail` PER domain inside the batch — still just 1
+// SSH round trip, but measured at ~14s per 100 domains on a real host: sudo itself has real
+// per-invocation overhead (policy lookup, PAM, logging), and spawning it 100+ times in one script
+// dominates the runtime even though each individual stat is O(1). Fixed by collapsing the size-check
+// into ONE `stat` call covering every path in the batch at once (GNU stat accepts multiple file
+// operands, one output line each) — tail is then only spawned per-domain for files that actually
+// grew, which in practice is a small fraction of the batch on any given poll.
+//
+// Each domain's output is wrapped in a "===LOG:<id>===" marker (same delimiting idiom as
+// DISCOVER_SCRIPT/discoverDomainLogs above) so parseBatchTailOutput can match results back to the
+// right waf_domain_logs row. offset===null means "never polled before": read a bounded recent chunk
+// (tail -c N, seeks from the end, still O(1)) instead of the whole file; otherwise reads only the
+// genuinely new bytes via tail -c +N (seeks directly to that byte position).
+const MAX_DOMAINS_PER_BATCH = 100; // keep each single SSH command comfortably sized even at 300+ domains
+
+function buildBatchTailScript(domainLogs) {
+  const quotedPaths = domainLogs.map(row => `"${row.logPath}"`).join(' ');
+  // Falls back to a non-sudo stat only if sudo produced literally no output (sudo unavailable/not
+  // configured at all) — NOT per-file, since GNU stat exits non-zero if even one of many operands
+  // fails (e.g. a config-referenced log that was never created), which would otherwise wrongly
+  // discard every already-successful line and retry the entire batch without sudo.
+  const statScript = `
+STAT_OUT=$(sudo -n stat -c '%n|%s' ${quotedPaths} 2>/dev/null)
+if [ -z "$STAT_OUT" ]; then STAT_OUT=$(stat -c '%n|%s' ${quotedPaths} 2>/dev/null); fi
 `.trim();
+
+  const blocks = domainLogs.map(row => {
+    const offset = row.lastByteOffset;
+    const isInitial = offset === null;
+    const tailCmd = isInitial ? `tail -c ${INITIAL_LOOKBACK_BYTES} "${row.logPath}"` : `tail -c +$((${offset} + 1)) "${row.logPath}"`;
+    const minSize = isInitial ? 0 : offset;
+    return `
+echo "===LOG:${row.id}==="
+SIZE=$(printf '%s\\n' "$STAT_OUT" | grep -F "${row.logPath}|" | tail -1 | cut -d'|' -f2)
+if [ -z "$SIZE" ]; then
+  echo "SIZE:none"
+elif [ "$SIZE" -gt ${minSize} ]; then
+  echo "SIZE:$SIZE"
+  sudo -n ${tailCmd} 2>/dev/null || ${tailCmd} 2>/dev/null
+else
+  echo "SIZE:$SIZE"
+fi`.trim();
+  });
+  return statScript + '\n' + blocks.join('\n');
 }
 
-function buildTailScript(path, startLine) {
-  return `sudo -n tail -n +$((${startLine} + 1)) "${path}" 2>/dev/null || tail -n +$((${startLine} + 1)) "${path}" 2>/dev/null`;
+// Pure, testable: splits buildBatchTailScript's combined stdout back into per-domain
+// { sizeToken, chunk } results, keyed by waf_domain_logs id.
+function parseBatchTailOutput(stdout) {
+  const results = new Map();
+  const parts = (stdout || '').split(/^===LOG:(\d+)===$/m);
+  for (let i = 1; i < parts.length; i += 2) {
+    const id = Number(parts[i]);
+    const lines = (parts[i + 1] || '').split('\n');
+    const sizeLineIdx = lines.findIndex(l => l.startsWith('SIZE:'));
+    if (sizeLineIdx === -1) { results.set(id, { sizeToken: null, chunk: '' }); continue; }
+    results.set(id, { sizeToken: lines[sizeLineIdx].slice(5).trim(), chunk: lines.slice(sizeLineIdx + 1).join('\n') });
+  }
+  return results;
 }
 
 const insertEvent = db.prepare(`
   INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at, attack_category)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const getCursor = db.prepare('SELECT last_line_count FROM ssh_log_cursor WHERE source_type = ? AND source_id = ?');
-const upsertCursor = db.prepare(`
-  INSERT INTO ssh_log_cursor (source_type, source_id, last_line_count, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-  ON DUPLICATE KEY UPDATE last_line_count = VALUES(last_line_count), updated_at = CURRENT_TIMESTAMP
-`);
+const setByteOffset = db.prepare('UPDATE waf_domain_logs SET last_byte_offset = ? WHERE id = ?');
 const recordTraffic = db.prepare(`
   INSERT INTO waf_traffic_stats (domain_log_id, sample_ts, request_count) VALUES (?, ?, ?)
   ON DUPLICATE KEY UPDATE request_count = VALUES(request_count)
@@ -400,57 +459,80 @@ async function discoverAndSyncDomainLogs(vm, ssh) {
   const rows = [];
   for (const d of discovered) {
     const { lastInsertRowid } = await upsertDomainLog.run(vm.id, d.domain, d.logPath, d.confFile);
-    rows.push({ id: lastInsertRowid, domain: d.domain, logPath: d.logPath });
+    // upsertDomainLog only touches domain/conf_file (ON DUPLICATE KEY UPDATE doesn't mention
+    // last_byte_offset), so a domain rediscovered on every poll keeps its existing cursor — this
+    // fetch just reads back whatever that current value is (NULL the first time this row is ever
+    // created, a real byte offset afterward).
+    const existing = await db.prepare('SELECT last_byte_offset FROM waf_domain_logs WHERE id = ?').get(lastInsertRowid);
+    rows.push({ id: lastInsertRowid, domain: d.domain, logPath: d.logPath, lastByteOffset: existing?.last_byte_offset ?? null });
   }
   const currentIds = new Set(rows.map(r => r.id));
   const known = await db.prepare('SELECT id FROM waf_domain_logs WHERE vm_id = ?').all(vm.id);
   for (const { id } of known) {
-    if (!currentIds.has(id)) {
-      await db.prepare('DELETE FROM waf_domain_logs WHERE id = ?').run(id);
-      await db.prepare("DELETE FROM ssh_log_cursor WHERE source_type = 'nginx_domain' AND source_id = ?").run(id);
-    }
+    if (!currentIds.has(id)) await db.prepare('DELETE FROM waf_domain_logs WHERE id = ?').run(id);
   }
   return rows;
 }
 
-async function collectLogFile(vm, ssh, domainLogRow) {
-  const { id: domainLogId, domain, logPath } = domainLogRow;
-  const detect = await ssh.execCommand(buildDetectScript(logPath));
-  const logfile = /^LOGFILE:(\S+)/m.exec(detect.stdout)?.[1];
-  if (!logfile || logfile === 'none') {
+// tail -c N (the bounded first-ever-poll read) cuts at an arbitrary BYTE position, not a line
+// boundary — its first "line" is very likely a partial fragment missing its own beginning. Strips
+// that fragment so it's never mis-parsed as a real (truncated) request; the caller must advance its
+// offset bookkeeping by skippedBytes to stay accurate. Incremental reads (tail -c +N) never need this
+// — their offset is always exactly at a newline boundary carried over from the previous poll.
+function stripPartialFirstLine(chunk) {
+  const firstNewlineIdx = chunk.indexOf('\n');
+  if (firstNewlineIdx === -1) return { skippedBytes: Buffer.byteLength(chunk, 'utf8'), cleanedChunk: '' };
+  const skipped = chunk.slice(0, firstNewlineIdx + 1);
+  return { skippedBytes: Buffer.byteLength(skipped, 'utf8'), cleanedChunk: chunk.slice(firstNewlineIdx + 1) };
+}
+
+// Pure post-processing of one domain's already-fetched batch result (no SSH access) — the SSH round
+// trip itself happens once, in bulk, in collectVm via buildBatchTailScript.
+async function processLogFileResult(vm, domainLogRow, sizeToken, chunk) {
+  const { id: domainLogId, domain, logPath, lastByteOffset } = domainLogRow;
+  const isInitial = lastByteOffset == null;
+  if (!sizeToken || sizeToken === 'none') {
     console.warn(`[nginx-waf] ${vm.name}: không tìm thấy log tại ${logPath}`);
     return;
   }
-  const lineCountRaw = detect.stdout.trim().split('\n')[1];
-  if (!/^\d+$/.test(lineCountRaw || '')) {
-    console.warn(`[nginx-waf] ${vm.name}: không đọc được ${logfile} — cần cấu hình sudoers NOPASSWD (xem trang Giám sát WAF)`);
+  if (sizeToken === 'error' || !/^\d+$/.test(sizeToken)) {
+    console.warn(`[nginx-waf] ${vm.name}: không đọc được ${logPath} — cần cấu hình sudoers NOPASSWD (xem trang Giám sát WAF)`);
     return;
   }
-  const totalLines = Number(lineCountRaw);
+  const newSize = Number(sizeToken);
+  const rotated = !isInitial && newSize < lastByteOffset; // file truncated/rotated since last poll
+  let nextOffset = (isInitial || rotated) ? Math.max(0, newSize - INITIAL_LOOKBACK_BYTES) : lastByteOffset;
 
-  const cursor = await getCursor.get('nginx_domain', domainLogId);
-  let startLine;
-  if (!cursor) startLine = Math.max(0, totalLines - INITIAL_LOOKBACK_LINES);
-  else if (totalLines < cursor.last_line_count) startLine = 0; // log rotated
-  else startLine = cursor.last_line_count;
-
-  if (totalLines > startLine) {
-    const tail = await ssh.execCommand(buildTailScript(logfile, startLine));
-    const hits = [];
-    for (const line of tail.stdout.split('\n').filter(Boolean)) {
-      const parsed = parseNginxLine(line);
-      if (!parsed) continue;
-      // waf_trust_xff opt-in (see routes/waf.js) — default is remote_addr, the real TCP peer.
-      // Only trust X-Forwarded-For when the admin has confirmed this VM sits behind a reverse
-      // proxy/load balancer that sets it; otherwise every request would appear to come from the
-      // same proxy IP, breaking both detection (all traffic bucketed under 1 "attacker") and
-      // auto-block (would ban the proxy itself, taking down all real traffic).
-      parsed.ip = vm.waf_trust_xff ? (parsed.xffIp || parsed.remoteAddr) : parsed.remoteAddr;
-      hits.push(parsed);
+  if (!rotated) {
+    let effectiveChunk = chunk;
+    if (isInitial && chunk) {
+      const { skippedBytes, cleanedChunk } = stripPartialFirstLine(chunk);
+      nextOffset += skippedBytes;
+      effectiveChunk = cleanedChunk;
     }
-    if (hits.length) await processHits(vm, domain, domainLogId, hits);
+    const lastNewlineIdx = effectiveChunk.lastIndexOf('\n');
+    if (lastNewlineIdx !== -1) {
+      // Only advance the cursor past COMPLETE lines — a trailing fragment with no newline yet is
+      // either the log mid-write or an unusually long single line; leave it for the next poll
+      // rather than risk splitting a line across two batches.
+      const consumedText = effectiveChunk.slice(0, lastNewlineIdx + 1);
+      nextOffset += Buffer.byteLength(consumedText, 'utf8');
+      const hits = [];
+      for (const line of consumedText.split('\n').filter(Boolean)) {
+        const parsed = parseNginxLine(line);
+        if (!parsed) continue;
+        // waf_trust_xff opt-in (see routes/waf.js) — default is remote_addr, the real TCP peer.
+        // Only trust X-Forwarded-For when the admin has confirmed this VM sits behind a reverse
+        // proxy/load balancer that sets it; otherwise every request would appear to come from the
+        // same proxy IP, breaking both detection (all traffic bucketed under 1 "attacker") and
+        // auto-block (would ban the proxy itself, taking down all real traffic).
+        parsed.ip = vm.waf_trust_xff ? (parsed.xffIp || parsed.remoteAddr) : parsed.remoteAddr;
+        hits.push(parsed);
+      }
+      if (hits.length) await processHits(vm, domain, domainLogId, hits);
+    }
   }
-  await upsertCursor.run('nginx_domain', domainLogId, totalLines);
+  await setByteOffset.run(nextOffset, domainLogId);
 }
 
 const upsertBannedIp = db.prepare(`
@@ -482,9 +564,18 @@ async function collectVm(vm) {
     if (!domainLogs.length) {
       console.warn(`[nginx-waf] ${vm.name}: không phát hiện được domain/log nginx nào (kiểm tra quyền đọc /etc/nginx hoặc đường dẫn log dự phòng)`);
     }
-    for (const row of domainLogs) {
-      try { await collectLogFile(vm, ssh, row); }
-      catch (e) { console.error(`[nginx-waf] ${vm.name} — ${row.domain || row.logPath}: ${e.message}`); }
+    // Batched into groups of MAX_DOMAINS_PER_BATCH SSH round trips total, not one round trip per
+    // domain — some real VMs here serve 100-300+ domains, so this is the difference between ~3
+    // SSH exec calls per poll and hundreds.
+    for (let i = 0; i < domainLogs.length; i += MAX_DOMAINS_PER_BATCH) {
+      const batch = domainLogs.slice(i, i + MAX_DOMAINS_PER_BATCH);
+      const result = await ssh.execCommand(buildBatchTailScript(batch));
+      const parsed = parseBatchTailOutput(result.stdout);
+      for (const row of batch) {
+        const r = parsed.get(row.id);
+        try { await processLogFileResult(vm, row, r?.sizeToken, r?.chunk || ''); }
+        catch (e) { console.error(`[nginx-waf] ${vm.name} — ${row.domain || row.logPath}: ${e.message}`); }
+      }
     }
     await resolveStaleWafAlerts(vm);
   } catch (e) {
@@ -524,4 +615,5 @@ module.exports = {
   parseNginxLine, parseNginxTimestamp, detectPerIpEvents, detectDdos,
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
   classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,
+  buildBatchTailScript, parseBatchTailOutput, stripPartialFirstLine,
 };
