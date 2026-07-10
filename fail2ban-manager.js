@@ -7,6 +7,13 @@ const db = require('./database');
 const { logActivity } = require('./auth');
 const sshCredentials = require('./ssh-credentials');
 
+// "systemctl is-active" only proves the DAEMON is running — it says nothing about whether the sshd
+// JAIL is actually enabled inside it. Confirmed on real hosts: Ubuntu 24.04's fail2ban package does
+// NOT enable sshd by default (unlike some other distro/version combos where it ships pre-enabled),
+// so a bare `apt-get install fail2ban && systemctl enable --now` can leave the daemon running with
+// zero real protection — the UI would show "Đang chạy" while SSH brute-force is completely
+// unguarded. So CHECK_SCRIPT reports a distinct status when the daemon is up but the sshd jail
+// specifically is missing, instead of conflating the two.
 const CHECK_SCRIPT = `
 if ! command -v fail2ban-client >/dev/null 2>&1 \\
    && ! (command -v dpkg >/dev/null 2>&1 && dpkg -l fail2ban 2>/dev/null | grep -q '^ii') \\
@@ -15,9 +22,17 @@ if ! command -v fail2ban-client >/dev/null 2>&1 \\
   exit 0
 fi
 ACTIVE=$(systemctl is-active fail2ban 2>/dev/null || sudo -n systemctl is-active fail2ban 2>/dev/null)
-if [ "$ACTIVE" = "active" ]; then echo "STATUS:running"; else echo "STATUS:installed_not_running"; fi
+if [ "$ACTIVE" != "active" ]; then echo "STATUS:installed_not_running"; exit 0; fi
+if sudo -n fail2ban-client status sshd 2>&1 | grep -qi "Status for the jail"; then
+  echo "STATUS:running"
+else
+  echo "STATUS:sshd_jail_missing"
+fi
 `.trim();
 
+// Explicitly enables the sshd jail via jail.d (same approach as waf-manager.js's dedicated jail —
+// never rely on distro defaults) rather than just installing the package and hoping jail.conf's
+// shipped default has it on.
 const INSTALL_SCRIPT = `
 set -e
 if command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt
@@ -39,10 +54,23 @@ case "$PKG_MGR" in
     sudo -n yum install -y fail2ban
     ;;
 esac
+sudo -n mkdir -p /etc/fail2ban/jail.d
+sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
+[sshd]
+enabled = true
+SSHD_EOF
 sudo -n systemctl enable --now fail2ban
 sleep 2
+sudo -n fail2ban-client reload 2>/dev/null || true
+sleep 1
 ACTIVE=$(systemctl is-active fail2ban 2>/dev/null || sudo -n systemctl is-active fail2ban 2>/dev/null)
-echo "FINAL_STATUS:$ACTIVE"
+if [ "$ACTIVE" != "active" ]; then
+  echo "FINAL_STATUS:$ACTIVE"
+elif sudo -n fail2ban-client status sshd 2>&1 | grep -qi "Status for the jail"; then
+  echo "FINAL_STATUS:active"
+else
+  echo "FINAL_STATUS:daemon_active_no_sshd_jail"
+fi
 `.trim();
 
 // Stop (not uninstall) — flipping the toggle off should be cheap to reverse, so this just stops the
@@ -98,8 +126,13 @@ async function installFail2ban(vm, user = null) {
     const finalStatus = /^FINAL_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (finalStatus === 'active') {
       await setStatus.run('running', null, vm.id);
-      await logActivity(user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, 'Cài đặt fail2ban thành công');
+      await logActivity(user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, 'Cài đặt fail2ban thành công (đã bật jail sshd)');
       return { status: 'running', error: null };
+    }
+    if (finalStatus === 'daemon_active_no_sshd_jail') {
+      const error = 'fail2ban đang chạy nhưng không bật được jail sshd (kiểm tra /etc/fail2ban/jail.d/netadmin-sshd.local trên VM)';
+      await setStatus.run('sshd_jail_missing', error, vm.id);
+      return { status: 'sshd_jail_missing', error };
     }
     const passwordRequired = /a password is required|sudo:.*password/i.test(result.stderr || '');
     const error = passwordRequired

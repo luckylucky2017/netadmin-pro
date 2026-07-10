@@ -2979,11 +2979,14 @@ const FAIL2BAN_LABEL = {
   installed_not_running: 'Đã cài, chưa chạy',
   installing: 'Đang cài đặt…',
   running: 'Đang chạy',
+  // Daemon fail2ban đang chạy nhưng jail sshd chưa được bật — trước đây bị nhầm hiện thành "Đang
+  // chạy" (chỉ kiểm tra systemctl is-active) dù thực tế không hề bảo vệ SSH; xem fail2ban-manager.js.
+  sshd_jail_missing: 'Chạy nhưng CHƯA bảo vệ SSH',
   error: 'Lỗi'
 };
 const FAIL2BAN_CLASS = {
   unknown: 'unknown', not_installed: 'offline', installed_not_running: 'warning',
-  installing: 'installing', running: 'online', error: 'offline'
+  installing: 'installing', running: 'online', sshd_jail_missing: 'warning', error: 'offline'
 };
 
 function fail2banToggle(v) {
@@ -2992,7 +2995,7 @@ function fail2banToggle(v) {
   const checked = status === 'running';
   const disabled = !monitored || status === 'installing';
   const extraClass = status === 'installing' ? 'installing' : (status === 'error' ? 'error' : '');
-  const title = status === 'error' && v.fail2ban_error ? escAttr(v.fail2ban_error)
+  const title = (status === 'error' || status === 'sshd_jail_missing') && v.fail2ban_error ? escAttr(v.fail2ban_error)
     : !monitored ? 'Bật giám sát SSH trước'
     : (FAIL2BAN_LABEL[status] || status);
   return `<label class="toggle-switch ${extraClass}" data-permission="security.fail2ban.manage" title="${title}">
