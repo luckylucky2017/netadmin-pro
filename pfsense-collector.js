@@ -4,6 +4,7 @@
 // firewall being unreachable/misconfigured must never block the others from syncing.
 const db = require('./database');
 const client = require('./pfsense-client');
+const { classifyIp } = require('./ssh-security-collector');
 
 // pfSense's API only exposes cumulative in/out byte counters, not a rate — bps is derived from the
 // delta against the previous poll's snapshot (stored in pfsense_firewalls.if_bandwidth_snapshot,
@@ -98,6 +99,16 @@ async function syncRules(fw) {
 // session) is used as the stable key instead. If a client somehow reconnects with a new source port
 // mid-poll, worst case is one cycle showing no rate for that slot, never a wrong one (computeBps()
 // already discards a mismatched delta as null).
+// remote_host from pfSense is "IP:port" (IPv4) or "[IP]:port" (IPv6) — strip the port before
+// handing off to classifyIp(), which expects a bare address.
+function extractIp(remoteHost) {
+  if (!remoteHost) return null;
+  const bracketed = /^\[([^\]]+)\]:\d+$/.exec(remoteHost);
+  if (bracketed) return bracketed[1];
+  const idx = remoteHost.lastIndexOf(':');
+  return idx > 0 ? remoteHost.slice(0, idx) : remoteHost;
+}
+
 async function syncVpn(fw) {
   const [ovpnRes, ipsecRes] = await Promise.all([
     client.request(fw, 'GET', '/status/openvpn/servers').catch(() => ({ data: [] })),
@@ -110,12 +121,13 @@ async function syncVpn(fw) {
   const nextSnapshot = {};
 
   const upsert = db.prepare(`
-    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, client_key, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pfsense_vpn_status (firewall_id, vpn_type, tunnel_name, status, remote_info, connected_since, client_key, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, country, is_foreign, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       tunnel_name = VALUES(tunnel_name), status = VALUES(status), remote_info = VALUES(remote_info),
       connected_since = VALUES(connected_since), bytes_recv = VALUES(bytes_recv), bytes_sent = VALUES(bytes_sent),
-      rate_recv_bps = VALUES(rate_recv_bps), rate_sent_bps = VALUES(rate_sent_bps), raw_json = VALUES(raw_json),
+      rate_recv_bps = VALUES(rate_recv_bps), rate_sent_bps = VALUES(rate_sent_bps),
+      country = VALUES(country), is_foreign = VALUES(is_foreign), raw_json = VALUES(raw_json),
       updated_at = CURRENT_TIMESTAMP
   `);
   const servers = ovpnRes?.data || [];
@@ -131,10 +143,11 @@ async function syncVpn(fw) {
       const rate_recv_bps = computeBps(prev ? { bytes: prev.recv, ts: prev.ts } : null, bytesRecv, now);
       const rate_sent_bps = computeBps(prev ? { bytes: prev.sent, ts: prev.ts } : null, bytesSent, now);
       nextSnapshot[clientKey] = { recv: bytesRecv, sent: bytesSent, ts: now };
+      const { country, isForeign } = classifyIp(extractIp(c.remote_host));
       await upsert.run(
         fw.id, 'openvpn', `${srv.name} · ${c.common_name}`, 'connected', c.remote_host,
         c.connect_time ? new Date(c.connect_time).toISOString().slice(0, 19).replace('T', ' ') : null,
-        clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, JSON.stringify(c)
+        clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, country, isForeign, JSON.stringify(c)
       );
       count++;
     }
@@ -143,9 +156,10 @@ async function syncVpn(fw) {
   for (const sa of sas) {
     const clientKey = `ipsec-${sa.uniqueid ?? sa.con_id ?? sa.name}`;
     currentKeys.push(clientKey);
+    const { country, isForeign } = classifyIp(extractIp(sa.remote_host));
     await upsert.run(
       fw.id, 'ipsec', sa.name || sa['con-name'] || 'ipsec', sa.state || 'unknown', sa.remote_host || null,
-      null, clientKey, null, null, null, null, JSON.stringify(sa)
+      null, clientKey, null, null, null, null, country, isForeign, JSON.stringify(sa)
     );
     count++;
   }

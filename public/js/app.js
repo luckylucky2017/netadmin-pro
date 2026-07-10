@@ -3944,8 +3944,8 @@ async function renderPfsenseVpnTab() {
     <div class="table-wrap">
       <div class="table-toolbar"><div style="font-weight:600" id="pfVpnConnsTitle">Kết nối VPN đang hoạt động — sắp xếp theo tổng băng thông đã dùng</div></div>
       <table>
-        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
-        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="8"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>Quốc gia</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
+        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="9"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
     </div>
     <div class="table-wrap" style="margin-top:16px">
@@ -3967,19 +3967,26 @@ async function loadPfsenseVpnData() {
     ]);
     // Re-check after the awaits — the user may have navigated/switched tabs away while in-flight.
     if (!document.getElementById('pfsenseVpnConnsTableBody')) return;
-    const sortedConns = [...conns].sort((a, b) => ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0)));
-    document.getElementById('pfVpnConnsTitle').textContent = `Kết nối VPN đang hoạt động (${conns.length}) — sắp xếp theo tổng băng thông đã dùng`;
+    // Kết nối từ nước ngoài (khác VN) lên đầu trang trước, sau đó mới theo tổng băng thông — cảnh
+    // báo bất thường quan trọng hơn thứ tự theo lưu lượng.
+    const sortedConns = [...conns].sort((a, b) => {
+      if (!!b.is_foreign !== !!a.is_foreign) return (b.is_foreign ? 1 : 0) - (a.is_foreign ? 1 : 0);
+      return ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0));
+    });
+    const foreignCount = conns.filter(c => c.is_foreign).length;
+    document.getElementById('pfVpnConnsTitle').textContent = `Kết nối VPN đang hoạt động (${conns.length})${foreignCount ? ` — ⚠ ${foreignCount} kết nối từ nước ngoài` : ''} — sắp xếp theo cảnh báo & tổng băng thông đã dùng`;
     document.getElementById('pfsenseVpnConnsTableBody').innerHTML = sortedConns.length ? sortedConns.map(c => `
-          <tr>
+          <tr${c.is_foreign ? ' style="background:rgba(239,68,68,0.08)"' : ''}>
             <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
             <td>${c.tunnel_name}</td>
             <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
             <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
+            <td>${c.is_foreign ? `<span class="severity critical blink"><span class="dot"></span>${c.country || '?'} - nước ngoài</span>` : (c.country ? `<span style="font-size:12px;color:var(--fg-muted)">${c.country}</span>` : '<span style="font-size:12px;color:var(--fg-muted)">—</span>')}</td>
             <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(c.rate_recv_bps)}</td>
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
-          </tr>`).join('') : `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+          </tr>`).join('') : `<tr><td colspan="9" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
     document.getElementById('pfsenseVpnServersTableBody').innerHTML = servers.length ? servers.map(s => `
           <tr>
             <td style="font-weight:600">${s.description || s.name}</td>
@@ -3993,7 +4000,7 @@ async function loadPfsenseVpnData() {
     applyPermissionVisibility();
   } catch (e) {
     const el = document.getElementById('pfsenseVpnConnsTableBody');
-    if (el) el.innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
+    if (el) el.innerHTML = `<tr><td colspan="9"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
   }
 }
 

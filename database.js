@@ -597,6 +597,12 @@ async function ensureSchemaAndMigrations() {
   // MODIFY is safe/idempotent to re-run even once every install is already on VARCHAR(191).
   await pool.query("ALTER TABLE pfsense_vpn_status MODIFY COLUMN client_key VARCHAR(191)");
   try { await pool.query("ALTER TABLE pfsense_vpn_status ADD UNIQUE KEY uq_pfsense_vpn (firewall_id, vpn_type, client_key)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
+  // Same offline GeoIP classification already used for SSH logins (ssh-security-collector.js's
+  // classifyIp, reused directly) — flags a VPN client's remote IP as foreign (outside Vietnam) so
+  // the UI can warn on connections from an unexpected country.
+  try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN country VARCHAR(10)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN is_foreign INT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

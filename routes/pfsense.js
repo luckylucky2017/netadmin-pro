@@ -153,7 +153,7 @@ router.get('/firewalls/:id/status', async (req, res) => {
 
 router.get('/firewalls/:id/vpn', async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
-  const rows = await db.prepare('SELECT vpn_type, tunnel_name, status, remote_info, connected_since, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, updated_at FROM pfsense_vpn_status WHERE firewall_id = ? ORDER BY vpn_type ASC, tunnel_name ASC').all(fw.id);
+  const rows = await db.prepare('SELECT vpn_type, tunnel_name, status, remote_info, connected_since, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, country, is_foreign, updated_at FROM pfsense_vpn_status WHERE firewall_id = ? ORDER BY is_foreign DESC, vpn_type ASC, tunnel_name ASC').all(fw.id);
   res.json(rows);
 });
 
