@@ -393,6 +393,20 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_waf_ip_exception (ip)
   );
 
+  -- Mirrors each VM's netadmin-waf jail "currently banned" list — synced every collector poll
+  -- (reuses the SSH session already open for log tailing, see nginx-waf-collector.js's
+  -- syncBannedIps) so the "IP đang bị chặn" tab is a fast DB read instead of a live SSH round-trip
+  -- per page view. A row disappears the moment fail2ban's bantime expires it (default 3600s) or it's
+  -- unbanned — the sync deletes any (vm, ip) no longer in the live list, same staleness-pruning
+  -- pattern as fail2ban-collector.js's ban-alert reconciliation.
+  CREATE TABLE IF NOT EXISTS waf_banned_ips (
+    vm_id INT NOT NULL,
+    ip VARCHAR(64) NOT NULL,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vm_id, ip)
+  );
+
   -- One row per (VM, access_log file) discovered by parsing that VM's /etc/nginx/**/*.conf files
   -- (server_name + access_log directives per server block) — a VM commonly hosts several domains,
   -- each logging to its own file. Re-synced every collector poll: rows for logs no longer present in

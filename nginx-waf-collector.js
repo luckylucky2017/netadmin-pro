@@ -404,12 +404,31 @@ async function collectLogFile(vm, ssh, domainLogRow) {
   await upsertCursor.run('nginx_domain', domainLogId, totalLines);
 }
 
+const upsertBannedIp = db.prepare(`
+  INSERT INTO waf_banned_ips (vm_id, ip, first_seen, last_seen) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON DUPLICATE KEY UPDATE last_seen = CURRENT_TIMESTAMP
+`);
+
+// Mirrors the jail's live "Banned IP list:" into waf_banned_ips every poll — reuses the SSH session
+// already open for log tailing (see waf-manager.js's listBannedIpsViaSsh). A row disappears the
+// moment it's no longer in the live list (bantime expired, manually unbanned, or the jail itself
+// isn't installed) — same staleness-pruning shape as discoverAndSyncDomainLogs above.
+async function syncBannedIps(vm, ssh) {
+  const { ips } = await wafManager.listBannedIpsViaSsh(ssh).catch(() => ({ ips: [] }));
+  for (const ip of ips) await upsertBannedIp.run(vm.id, ip);
+  const currentSet = new Set(ips);
+  const known = await db.prepare('SELECT ip FROM waf_banned_ips WHERE vm_id = ?').all(vm.id);
+  const stale = db.prepare('DELETE FROM waf_banned_ips WHERE vm_id = ? AND ip = ?');
+  for (const { ip } of known) if (!currentSet.has(ip)) await stale.run(vm.id, ip);
+}
+
 async function collectVm(vm) {
   const opts = await sshCredentials.buildConnectOptions(vm);
   if (!opts) return;
   const ssh = new NodeSSH();
   try {
     await ssh.connect(opts);
+    await syncBannedIps(vm, ssh);
     const domainLogs = await discoverAndSyncDomainLogs(vm, ssh);
     if (!domainLogs.length) {
       console.warn(`[nginx-waf] ${vm.name}: không phát hiện được domain/log nginx nào (kiểm tra quyền đọc /etc/nginx hoặc đường dẫn log dự phòng)`);
@@ -436,6 +455,13 @@ async function collectAll() {
   if (!vms.length) return;
   await Promise.allSettled(vms.map(collectVm));
   await db.prepare("DELETE FROM waf_events WHERE occurred_at < DATE_SUB(NOW(), INTERVAL 30 DAY)").run();
+  // A VM that's no longer monitored (waf_enabled=0) isn't polled above, so any waf_banned_ips rows
+  // left over from before it was turned off would show stale/unverifiable "still banned" state —
+  // clear them rather than let the page imply live info we no longer actually have.
+  const monitoredIds = vms.map(v => v.id);
+  await db.prepare(`
+    DELETE FROM waf_banned_ips WHERE vm_id NOT IN (${monitoredIds.map(() => '?').join(',') || 'NULL'})
+  `).run(...monitoredIds);
 }
 
 function start(intervalMs = 30000) {

@@ -3275,6 +3275,7 @@ async function renderWaf(search = '') {
     </div>
     <div class="filter-tabs" id="wafTabs" style="margin-bottom:16px">
       <div class="filter-tab ${wafTab === 'events' ? 'active' : ''}" data-tab="events" onclick="setWafTab('events')">Sự kiện</div>
+      <div class="filter-tab ${wafTab === 'banned' ? 'active' : ''}" data-tab="banned" onclick="setWafTab('banned')">IP đang bị chặn</div>
       <div class="filter-tab ${wafTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setWafTab('manage')">Quản lý giám sát</div>
       <div class="filter-tab ${wafTab === 'exceptions' ? 'active' : ''}" data-tab="exceptions" onclick="setWafTab('exceptions')">Ngoại lệ IP</div>
     </div>
@@ -3304,6 +3305,7 @@ async function refreshWafData() {
   } catch { /* transient — next tick retries */ }
   if (currentPage !== 'waf') return;
   if (wafTab === 'events') loadWafEvents();
+  else if (wafTab === 'banned') loadWafBanned();
 }
 
 function setWafTab(tab) {
@@ -3315,6 +3317,7 @@ function setWafTab(tab) {
 function renderWafTabBody(search = '') {
   if (wafTab === 'manage') renderWafManage();
   else if (wafTab === 'exceptions') renderWafExceptions();
+  else if (wafTab === 'banned') renderWafBanned(search);
   else renderWafEvents(search);
 }
 
@@ -3421,6 +3424,89 @@ async function wafBlockIpFromEvent(vmId, ip, btn) {
     const result = await api(`/waf/vms/${vmId}/block-ip`, 'POST', { ip });
     if (result.ok) { toast(`Đã chặn IP ${ip}`, 'success'); loadWafEvents(); }
     else { toast(result.error || 'Không chặn được IP', 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ── "IP đang bị chặn" tab: aggregated live-ish view across all VMs (DB-backed, synced by the
+// collector every poll — see routes/waf.js's GET /banned-ips) — distinct from the per-VM modal
+// (openWafBannedIpsModal) which does a fresh on-demand SSH query for just 1 VM.
+let wafBannedRows = [];
+let wafBannedSortState = { key: null, dir: 'asc' };
+let wafBannedPagination = newPagination();
+
+function renderWafBanned(search = '') {
+  document.getElementById('wafTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:0">Danh sách IP hiện đang bị jail WAF chặn trên từng VM — đồng bộ mỗi lượt quét (~30s). Fail2ban tự động gỡ chặn sau 1 giờ (bantime mặc định) kể cả không thao tác gì — bảng này phản ánh đúng trạng thái đó, không phải danh sách chặn vĩnh viễn.</p>
+      </div>
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="wafBannedSearch" placeholder="Tìm theo VM, IP..." value="${search}">
+        </div>
+      </div>
+      <div id="wafBannedBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  document.getElementById('wafBannedSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { wafBannedPagination.page = 1; loadWafBanned(); }, 300);
+  });
+  loadWafBanned(search);
+}
+
+async function loadWafBanned(search) {
+  const s = search ?? document.getElementById('wafBannedSearch')?.value ?? '';
+  try {
+    const rows = await api('/waf/banned-ips');
+    const q = s.trim().toLowerCase();
+    wafBannedRows = q ? rows.filter(r => (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q)) : rows;
+    if (!document.getElementById('wafBannedBody')) return;
+    renderWafBannedRows();
+  } catch (e) {
+    const el = document.getElementById('wafBannedBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+function toggleWafBannedSort(key) {
+  toggleSortState(wafBannedSortState, key);
+  renderWafBannedRows();
+}
+
+function renderWafBannedRows() {
+  const body = document.getElementById('wafBannedBody');
+  if (!wafBannedRows.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg><h3>Hiện không có IP nào bị chặn</h3><p>Sẽ hiện tại đây khi WAF tự động chặn (hoặc bạn chặn thủ công) 1 IP</p></div>`;
+    return;
+  }
+  const sortedRows = applySort(wafBannedRows, wafBannedSortState, (row, key) => row[key]);
+  const rows = paginateRows(sortedRows, wafBannedPagination);
+  const rowOffset = (wafBannedPagination.page - 1) * wafBannedPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Lần đầu chặn', 'first_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Còn chặn tới', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
+      <tbody>${rows.map((r, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td style="font-weight:600">${r.vm_name || '—'}</td>
+          <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+          <td>${r.country || '—'}</td>
+          <td>${r.event_type ? (WAF_EVENT_LABEL[r.event_type] || r.event_type) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.first_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần cuối xác nhận vẫn còn bị chặn">${formatTime(r.last_seen)}</span></td>
+          <td><button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button></td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(wafBannedPagination, sortedRows.length, 'wafBannedPagination', 'renderWafBannedRows')}`;
+  applyPermissionVisibility();
+}
+
+async function wafUnblockIpFromBannedTab(vmId, ip, btn) {
+  if (!confirm(`Gỡ chặn IP ${ip}?`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/waf/vms/${vmId}/unblock-ip`, 'POST', { ip });
+    if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); loadWafBanned(); }
+    else { toast(result.error || 'Không gỡ chặn được', 'error'); btn.disabled = false; }
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
 }
 

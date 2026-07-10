@@ -255,15 +255,26 @@ async function unbanIp(vm, ip) {
   }
 }
 
+// Pure, testable: parses `fail2ban-client status <jail>` stdout into { ips, error }.
+function parseBannedIpsOutput(stdout) {
+  if (!/Status for the jail/i.test(stdout || '')) return { ips: [], error: 'Jail WAF chưa được cài đặt trên VM này' };
+  const m = /Banned IP list:\s*(.*)/.exec(stdout);
+  const ips = m ? m[1].split(/\s+/).filter(Boolean) : [];
+  return { ips, error: null };
+}
+
+// Reuses an already-open SSH session — used by nginx-waf-collector.js's per-poll sync, which
+// already has a connection open for log tailing, so this avoids a second SSH round-trip per VM.
+async function listBannedIpsViaSsh(ssh) {
+  const result = await ssh.execCommand(`sudo -n fail2ban-client status ${JAIL_NAME} 2>&1`);
+  return parseBannedIpsOutput(result.stdout);
+}
+
 async function listBannedIps(vm) {
   let ssh;
   try {
     ssh = await connect(vm);
-    const result = await ssh.execCommand(`sudo -n fail2ban-client status ${JAIL_NAME} 2>&1`);
-    if (!/Status for the jail/i.test(result.stdout)) return { ips: [], error: 'Jail WAF chưa được cài đặt trên VM này' };
-    const m = /Banned IP list:\s*(.*)/.exec(result.stdout);
-    const ips = m ? m[1].split(/\s+/).filter(Boolean) : [];
-    return { ips, error: null };
+    return await listBannedIpsViaSsh(ssh);
   } catch (e) {
     return { ips: [], error: `Không kết nối được SSH: ${e.message}` };
   } finally {
@@ -274,4 +285,5 @@ async function listBannedIps(vm) {
 module.exports = {
   JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
   matchesException, isExceptedIp, getExceptions,
+  parseBannedIpsOutput, listBannedIpsViaSsh,
 };

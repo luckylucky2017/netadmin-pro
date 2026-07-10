@@ -103,6 +103,21 @@ router.post('/vms/:id/jail/stop', requirePermission('waf.jail.manage'), async (r
   res.json(await wafManager.stopJail(vm, req.user));
 });
 
+// Aggregated "IP đang bị chặn" tab — DB-backed (waf_banned_ips, synced every collector poll), not a
+// live SSH call, so this stays fast regardless of how many VMs are monitored. Country/loại vi phạm
+// enrichment comes from the most recent matching waf_events row for that (vm, ip), best-effort only
+// (may be null if the IP was blocked manually with no prior detected event).
+router.get('/banned-ips', requirePermission('waf.jail.check'), async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
+           (SELECT e.country FROM waf_events e WHERE e.vm_id = b.vm_id AND e.src_ip = b.ip ORDER BY e.occurred_at DESC LIMIT 1) AS country,
+           (SELECT e.event_type FROM waf_events e WHERE e.vm_id = b.vm_id AND e.src_ip = b.ip ORDER BY e.occurred_at DESC LIMIT 1) AS event_type
+    FROM waf_banned_ips b JOIN vcenter_vms v ON v.id = b.vm_id
+    ORDER BY b.last_seen DESC
+  `).all();
+  res.json(rows);
+});
+
 router.get('/vms/:id/banned-ips', requirePermission('waf.jail.check'), async (req, res) => {
   const vm = await getWafVm(req, res);
   if (!vm) return;
