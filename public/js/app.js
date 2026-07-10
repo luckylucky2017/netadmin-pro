@@ -3410,7 +3410,9 @@ function renderWafEventRows() {
           <td>${ev.hit_count ?? '—'}</td>
           <td>${ev.blocked ? '<span class="status online"><span class="dot"></span>Đã chặn</span>' : '<span class="status offline"><span class="dot"></span>Chỉ cảnh báo</span>'}</td>
           <td>${blockedForeign ? `<span class="severity critical ${recent ? 'blink' : ''}"><span class="dot"></span>Đã tự động chặn IP từ ${escHtml(ev.country)}</span>` : ''}</td>
-          <td>${!ev.blocked && ev.src_ip ? `<button class="btn-icon" data-permission="waf.block" title="Chặn IP này ngay" onclick="wafBlockIpFromEvent(${ev.vm_id}, '${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>` : ''}</td>
+          <td>${!ev.blocked && ev.src_ip
+            ? `<button class="btn-icon" data-permission="waf.block" title="Chặn IP này ngay" onclick="wafBlockIpFromEvent(${ev.vm_id}, '${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>`
+            : (ev.blocked && ev.src_ip ? `<button class="btn-icon" data-permission="waf.block" title="Mở chặn thủ công — thêm vào ngoại lệ" onclick="wafAddExceptionFromEvent('${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg></button>` : '')}</td>
         </tr>`;
       }).join('')}
       </tbody></table>${paginationBar(wafEventPagination, sortedEvents.length, 'wafEventPagination', 'renderWafEventRows')}`;
@@ -3494,7 +3496,10 @@ function renderWafBannedRows() {
           <td>${r.event_type ? (WAF_EVENT_LABEL[r.event_type] || r.event_type) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.first_seen)}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần cuối xác nhận vẫn còn bị chặn">${formatTime(r.last_seen)}</span></td>
-          <td><button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button></td>
+          <td><div class="actions">
+            <button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
+            <button class="btn btn-secondary btn-sm" data-permission="waf.block" title="Gỡ chặn và không bao giờ chặn IP này nữa" onclick="wafAddExceptionFromBanned('${escAttr(r.ip)}', this)">+ Ngoại lệ</button>
+          </div></td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(wafBannedPagination, sortedRows.length, 'wafBannedPagination', 'renderWafBannedRows')}`;
   applyPermissionVisibility();
@@ -3507,6 +3512,29 @@ async function wafUnblockIpFromBannedTab(vmId, ip, btn) {
     const result = await api(`/waf/vms/${vmId}/unblock-ip`, 'POST', { ip });
     if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); loadWafBanned(); }
     else { toast(result.error || 'Không gỡ chặn được', 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// "Mở chặn thủ công + thêm ngoại lệ" — 1 nút thay vì phải gỡ chặn rồi qua tab Ngoại lệ IP thêm lại
+// thủ công. POST /waf/exceptions đã tự gỡ chặn IP trên mọi VM đang có jail chạy (xem routes/waf.js),
+// nên chỉ cần gọi đúng 1 API này là xong cả 2 việc.
+async function wafAddExceptionFromBanned(ip, btn) {
+  if (!confirm(`Thêm ${ip} vào danh sách ngoại lệ? IP sẽ được gỡ chặn ngay và không bao giờ bị WAF chặn lại (trên mọi VM).`)) return;
+  btn.disabled = true;
+  try {
+    await api('/waf/exceptions', 'POST', { ip, note: 'Thêm từ tab IP đang bị chặn' });
+    toast(`Đã thêm ${ip} vào ngoại lệ và gỡ chặn`, 'success');
+    loadWafBanned();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function wafAddExceptionFromEvent(ip, btn) {
+  if (!confirm(`Thêm ${ip} vào danh sách ngoại lệ? IP sẽ được gỡ chặn ngay và không bao giờ bị WAF chặn lại (trên mọi VM).`)) return;
+  btn.disabled = true;
+  try {
+    await api('/waf/exceptions', 'POST', { ip, note: 'Thêm từ tab Sự kiện' });
+    toast(`Đã thêm ${ip} vào ngoại lệ và gỡ chặn`, 'success');
+    loadWafEvents();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
 }
 
