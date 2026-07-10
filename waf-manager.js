@@ -37,6 +37,32 @@ else
 fi
 `.trim();
 
+// Just the "write the WAF jail's config files" step (no package install, no reload) — factored out
+// so fail2ban-manager.js's unified installFail2ban() can splice this into its own combined script
+// (package install + sshd jail + WAF jail, one single reload) instead of duplicating this content or
+// running a second separate SSH round-trip. buildInstallScript() below still uses it standalone for
+// the WAF page's own "Cài đặt jail" button, which only needs the WAF side.
+function buildWafJailFilesScript(logPath) {
+  return `
+sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
+sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
+[Definition]
+failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER$
+ignoreregex =
+FILTER_EOF
+sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<JAIL_EOF
+[${JAIL_NAME}]
+enabled = true
+filter = ${JAIL_NAME}
+logpath = ${logPath}
+maxretry = 100000
+findtime = 1
+bantime = 3600
+action = %(action_)s
+JAIL_EOF
+`.trim();
+}
+
 // Ensures the fail2ban package itself is present (same apt/dnf/yum detection as
 // fail2ban-manager.js's INSTALL_SCRIPT), then writes a filter that can never match anything real and
 // a jail pointed at the VM's configured nginx log path, and reloads.
@@ -56,22 +82,7 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
   esac
   sudo -n systemctl enable --now fail2ban
 fi
-sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
-sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
-[Definition]
-failregex = ^NEVER_MATCH_NETADMIN_WAF_PLACEHOLDER$
-ignoreregex =
-FILTER_EOF
-sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<JAIL_EOF
-[${JAIL_NAME}]
-enabled = true
-filter = ${JAIL_NAME}
-logpath = ${logPath}
-maxretry = 100000
-findtime = 1
-bantime = 3600
-action = %(action_)s
-JAIL_EOF
+${buildWafJailFilesScript(logPath)}
 sudo -n fail2ban-client reload
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
@@ -285,5 +296,5 @@ async function listBannedIps(vm) {
 module.exports = {
   JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
   matchesException, isExceptedIp, getExceptions,
-  parseBannedIpsOutput, listBannedIpsViaSsh,
+  parseBannedIpsOutput, listBannedIpsViaSsh, buildWafJailFilesScript,
 };

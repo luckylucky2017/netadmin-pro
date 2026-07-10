@@ -41,7 +41,7 @@ router.get('/stats', async (req, res) => {
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_user, ssh_port, ssh_credential_id,
-           fail2ban_status, fail2ban_checked_at, fail2ban_error
+           fail2ban_status, fail2ban_checked_at, fail2ban_error, waf_enabled
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
@@ -128,7 +128,10 @@ async function getMonitoredVm(req, res) {
   // sshCredentials.buildConnectOptions(vm). Omitting it silently makes every VM look
   // credential-less (buildConnectOptions returns null on a missing field) even when a real
   // credential is assigned, regardless of what the DB row actually holds.
-  const vm = await db.prepare('SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  // waf_enabled/waf_log_path are also required here — fail2banManager's checkStatus/installFail2ban
+  // use them to decide whether to also check/configure the netadmin-waf jail alongside sshd (see
+  // fail2ban-manager.js's module header comment on the unified check/install flow).
+  const vm = await db.prepare('SELECT id, name, ip_address, ssh_user, ssh_port, ssh_credential_id, waf_enabled, waf_log_path FROM vcenter_vms WHERE id = ?').get(req.params.id);
   if (!vm) { res.status(404).json({ error: 'Không tìm thấy VM' }); return null; }
   if (!vm.ssh_user || !vm.ip_address) { res.status(400).json({ error: 'VM này chưa bật giám sát SSH (cần cấu hình SSH User trước)' }); return null; }
   return vm;

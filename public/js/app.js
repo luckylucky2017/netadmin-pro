@@ -3146,19 +3146,21 @@ async function handleFail2banToggle(e, id) {
   checkbox.disabled = true;
   try {
     if (turningOn) {
+      const jailsNote = vm.waf_enabled ? ' (jail sshd + jail WAF)' : ' (jail sshd)';
       const check = await api(`/security/vms/${id}/fail2ban/check`, 'POST');
       if (check.status === 'running') {
-        toast(`fail2ban đang chạy trên "${vm.name}"`, 'success');
+        toast(`fail2ban đang chạy đầy đủ trên "${vm.name}"${jailsNote}`, 'success');
       } else {
         const reason = check.status === 'not_installed' ? 'chưa được cài đặt' : (check.error || 'chưa hoạt động');
-        if (confirm(`fail2ban trên VM "${vm.name}" ${reason}. Tự động cài đặt/khởi động ngay bây giờ?`)) {
+        if (confirm(`fail2ban trên VM "${vm.name}" ${reason}. Tự động cài đặt/cấu hình${jailsNote} ngay bây giờ?`)) {
           const install = await api(`/security/vms/${id}/fail2ban/install`, 'POST');
-          if (install.status === 'running') toast(`Đã cài đặt và khởi động fail2ban trên "${vm.name}"`, 'success');
+          if (install.status === 'running') toast(`Đã cài đặt và cấu hình fail2ban trên "${vm.name}"${jailsNote}`, 'success');
           else toast(install.error || 'Cài đặt fail2ban thất bại', 'error');
         }
       }
     } else {
-      if (confirm(`Tắt fail2ban trên VM "${vm.name}"? VM sẽ KHÔNG còn tự động chặn brute-force SSH cho đến khi bật lại.`)) {
+      const wafWarning = vm.waf_enabled ? ' VÀ jail WAF (tắt cả 2 vì chung 1 daemon fail2ban)' : '';
+      if (confirm(`Tắt fail2ban trên VM "${vm.name}"? VM sẽ KHÔNG còn tự động chặn brute-force SSH${wafWarning} cho đến khi bật lại.`)) {
         const stop = await api(`/security/vms/${id}/fail2ban/stop`, 'POST');
         if (stop.status === 'installed_not_running') toast(`Đã tắt fail2ban trên "${vm.name}"`, 'success');
         else toast(stop.error || 'Không tắt được fail2ban', 'error');
