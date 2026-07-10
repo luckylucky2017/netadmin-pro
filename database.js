@@ -625,27 +625,6 @@ async function ensureSchemaAndMigrations() {
 }
 
 async function seedIfEmpty() {
-  const serverCount = await prepare('SELECT COUNT(*) as cnt FROM servers').get();
-  if (serverCount.cnt === 0) {
-    const insertServer = prepare(`
-      INSERT INTO servers (name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, status, tags)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    await insertServer.run('Web Server 01', 'web01.local', '192.168.1.10', 'server', 'Ubuntu 22.04 LTS', 'Intel Xeon E5-2620', '32GB DDR4', '2TB SSD', 'Datacenter A', 'Rack-01', 'online', '["web","production"]');
-    await insertServer.run('DB Server 01', 'db01.local', '192.168.1.11', 'server', 'CentOS 7', 'Intel Xeon E5-2680', '64GB DDR4', '4TB HDD', 'Datacenter A', 'Rack-02', 'online', '["database","production"]');
-    await insertServer.run('Backup Server', 'backup01.local', '192.168.1.20', 'server', 'Debian 11', 'AMD EPYC 7301', '16GB DDR4', '8TB HDD', 'Datacenter B', 'Rack-05', 'online', '["backup"]');
-    await insertServer.run('Dev Server', 'dev01.local', '192.168.1.50', 'vm', 'Ubuntu 20.04', 'Intel i7-10700', '16GB DDR4', '500GB SSD', 'Office', '', 'offline', '["development"]');
-
-    const insertDevice = prepare(`
-      INSERT INTO network_devices (name, ip_address, mac_address, type, brand, model, location, vlan, ports, status, tags)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    await insertDevice.run('Core Switch', '192.168.1.1', '00:1A:2B:3C:4D:5E', 'switch', 'Cisco', 'Catalyst 9300', 'Datacenter A', 'ALL', 48, 'online', '["core","critical"]');
-    await insertDevice.run('Firewall FW01', '192.168.1.254', '00:1A:2B:3C:4D:FF', 'firewall', 'Fortinet', 'FortiGate 100F', 'Datacenter A', 'ALL', 8, 'online', '["security","critical"]');
-    await insertDevice.run('Access Point Floor1', '192.168.1.100', 'AA:BB:CC:DD:EE:01', 'access_point', 'Ubiquiti', 'UniFi AP AC Pro', 'Office Floor 1', 'VLAN10', 0, 'online', '["wifi"]');
-    await insertDevice.run('Router ISP', '10.0.0.1', '00:FF:AA:BB:CC:01', 'router', 'MikroTik', 'RB4011', 'Server Room', '1', 10, 'online', '["wan","critical"]');
-  }
-
   const alertCount = await prepare('SELECT COUNT(*) as cnt FROM alerts').get();
   if (alertCount.cnt === 0) {
     const insertAlert = prepare(`
