@@ -3041,7 +3041,7 @@ function renderManageRows() {
             </select></td>
             <td><input type="number" class="sec-ssh-port" data-id="${v.id}" value="${v.ssh_port || 22}" min="1" max="65535" style="max-width:90px" ${eligible ? '' : 'disabled'}></td>
             <td>${fail2banToggle(v)}</td>
-            <td><button class="btn btn-secondary btn-sm" data-permission="security.ssh_config" ${eligible ? '' : 'disabled'} onclick="saveSecuritySshUser(${v.id}, this)">Lưu</button></td>
+            <td><button class="btn ${v.ssh_credential_id ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.ssh_credential_id ? 'Đã lưu — đang giám sát SSH' : 'Chưa lưu'}" data-permission="security.ssh_config" ${eligible ? '' : 'disabled'} onclick="saveSecuritySshUser(${v.id}, this)">Lưu</button></td>
           </tr>`;
         }).join('')}</tbody>
       </table>${paginationBar(managePagination, sortedVms.length, 'managePagination', 'renderManageRows')}`;
