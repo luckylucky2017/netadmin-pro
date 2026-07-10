@@ -3577,6 +3577,12 @@ let pfsenseInterfacesCache = [];
 let pfsenseRulesCache = [];
 let pfsenseRulesPagination = newPagination(20);
 let pfsenseRulesSearch = '';
+let pfsenseRulesSortState = { key: null, dir: 'asc' };
+
+function togglePfsenseRulesSort(key) {
+  toggleSortState(pfsenseRulesSortState, key);
+  renderPfsenseRulesTable();
+}
 
 async function renderPfsense() {
   const c = document.getElementById('pageContent');
@@ -3706,13 +3712,34 @@ async function renderPfsenseStatusTab() {
       <div style="font-size:13px;color:var(--fg-muted);line-height:1.8" id="pfHardwareInfo">Đang tải...</div>
     </div>
     <div class="table-wrap" style="margin-top:16px">
-      <div class="table-toolbar"><div style="font-weight:600">Interface — băng thông</div></div>
+      <div class="table-toolbar">
+        <div style="font-weight:600">Interface — băng thông</div>
+        <div class="search-box" style="margin-left:auto">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="pfsenseInterfaceSearch" placeholder="Tìm theo tên/mô tả/IP...">
+        </div>
+      </div>
       <table>
-        <thead><tr><th>Tên</th><th>Mô tả</th><th>Trạng thái</th><th>Địa chỉ IP</th><th>Gateway</th><th>Vào (In)</th><th>Ra (Out)</th><th>Tổng đã truyền</th></tr></thead>
+        <thead><tr>${thSort('Tên', 'if_name', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Mô tả', 'description', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Trạng thái', 'status', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Địa chỉ IP', 'ip_address', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Gateway', 'gateway_status', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Vào (In)', 'in_bps', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Ra (Out)', 'out_bps', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}${thSort('Tổng đã truyền', 'total_bytes', pfsenseInterfacesSortState, 'togglePfsenseInterfacesSort')}</tr></thead>
         <tbody id="pfsenseInterfacesTableBody"><tr><td colspan="8"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
     </div>`;
+  document.getElementById('pfsenseInterfaceSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      pfsenseInterfacesSearch = document.getElementById('pfsenseInterfaceSearch').value;
+      renderPfsenseInterfacesTable();
+    }, 300);
+  });
   await loadPfsenseStatusData();
+}
+
+let pfsenseInterfacesSearch = '';
+let pfsenseInterfacesSortState = { key: null, dir: 'asc' };
+
+function togglePfsenseInterfacesSort(key) {
+  toggleSortState(pfsenseInterfacesSortState, key);
+  renderPfsenseInterfacesTable();
 }
 
 async function loadPfsenseStatusData() {
@@ -3728,7 +3755,26 @@ async function loadPfsenseStatusData() {
     document.getElementById('pfStatDisk').textContent = `${system.disk_usage ?? '—'}%`;
     document.getElementById('pfStatUptime').textContent = system.uptime ?? '—';
     document.getElementById('pfHardwareInfo').innerHTML = `CPU: ${system.cpu_model || '—'} (${system.cpu_count ?? '?'} lõi)<br>Nền tảng: ${system.platform || '—'}`;
-    document.getElementById('pfsenseInterfacesTableBody').innerHTML = interfaces.map(i => `
+    renderPfsenseInterfacesTable();
+  } catch (e) {
+    const el = document.getElementById('pfsenseInterfacesTableBody');
+    if (el) el.innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div></td></tr>`;
+  }
+}
+
+function renderPfsenseInterfacesTable() {
+  const el = document.getElementById('pfsenseInterfacesTableBody');
+  if (!el) return;
+  const q = pfsenseInterfacesSearch.trim().toLowerCase();
+  const filtered = !q ? pfsenseInterfacesCache : pfsenseInterfacesCache.filter(i =>
+    i.if_name.toLowerCase().includes(q) || (i.description || '').toLowerCase().includes(q) || (i.ip_address || '').toLowerCase().includes(q));
+  if (!filtered.length) {
+    el.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Không tìm thấy interface nào</td></tr>`;
+    return;
+  }
+  const keyFn = (row, key) => key === 'total_bytes' ? (row.in_bytes || 0) + (row.out_bytes || 0) : row[key];
+  const sorted = applySort(filtered, pfsenseInterfacesSortState, keyFn);
+  el.innerHTML = sorted.map(i => `
           <tr>
             <td style="font-family:'Fira Code',monospace;font-weight:600">${i.if_name}</td>
             <td>${i.description || '—'}</td>
@@ -3739,10 +3785,6 @@ async function loadPfsenseStatusData() {
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(i.out_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(i.in_bytes)} / ↑${fmtBytes(i.out_bytes)}</td>
           </tr>`).join('');
-  } catch (e) {
-    const el = document.getElementById('pfsenseInterfacesTableBody');
-    if (el) el.innerHTML = `<tr><td colspan="8"><div class="empty-state"><h3>Lỗi tải trạng thái</h3><p>${e.message}</p></div></td></tr>`;
-  }
 }
 
 // ── Tab: Rule tường lửa ──
@@ -3797,9 +3839,10 @@ function renderPfsenseRulesTable() {
     el.innerHTML = `<div class="empty-state"><h3>Không có rule nào</h3></div>`;
     return;
   }
-  const page = paginateRows(filtered, pfsenseRulesPagination);
+  const sorted = applySort(filtered, pfsenseRulesSortState, (row, key) => row[key]);
+  const page = paginateRows(sorted, pfsenseRulesPagination);
   el.innerHTML = `<table>
-    <thead><tr><th>Interface</th><th>Hành động</th><th>Giao thức</th><th>Nguồn</th><th>Đích</th><th>Mô tả</th><th>Bật</th><th></th></tr></thead>
+    <thead><tr>${thSort('Interface', 'interface', pfsenseRulesSortState, 'togglePfsenseRulesSort')}${thSort('Hành động', 'action', pfsenseRulesSortState, 'togglePfsenseRulesSort')}${thSort('Giao thức', 'protocol', pfsenseRulesSortState, 'togglePfsenseRulesSort')}${thSort('Nguồn', 'source', pfsenseRulesSortState, 'togglePfsenseRulesSort')}${thSort('Đích', 'destination', pfsenseRulesSortState, 'togglePfsenseRulesSort')}${thSort('Mô tả', 'description', pfsenseRulesSortState, 'togglePfsenseRulesSort')}<th>Bật</th><th></th></tr></thead>
     <tbody>${page.map(r => `
       <tr>
         <td style="font-family:'Fira Code',monospace">${r.interface || '—'}</td>
@@ -3938,15 +3981,32 @@ async function applyPfsenseChanges(btn) {
 
 // ── Tab: VPN ──
 // Same split-skeleton/in-place-refresh convention as the Trạng thái tab above.
+let pfsenseVpnConnsCache = [];
+let pfsenseVpnConnsSearch = '';
+let pfsenseVpnConnsSortState = { key: null, dir: 'asc' };
+let pfsenseVpnConnsPagination = newPagination(20);
+
+function togglePfsenseVpnConnsSort(key) {
+  toggleSortState(pfsenseVpnConnsSortState, key);
+  renderPfsenseVpnConnsTable();
+}
+
 async function renderPfsenseVpnTab() {
   const body = document.getElementById('pfsenseTabBody');
   body.innerHTML = `
     <div class="table-wrap">
-      <div class="table-toolbar"><div style="font-weight:600" id="pfVpnConnsTitle">Kết nối VPN đang hoạt động — sắp xếp theo tổng băng thông đã dùng</div></div>
+      <div class="table-toolbar">
+        <div style="font-weight:600" id="pfVpnConnsTitle">Kết nối VPN đang hoạt động</div>
+        <div class="search-box" style="margin-left:auto">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="pfsenseVpnConnSearch" placeholder="Tìm theo tunnel/IP/quốc gia...">
+        </div>
+      </div>
       <table>
-        <thead><tr><th>Loại</th><th>Tunnel</th><th>Trạng thái</th><th>Địa chỉ IP client</th><th>IP tunnel VPN</th><th>Quốc gia</th><th>Nhận (↓)</th><th>Gửi (↑)</th><th>Tổng đã truyền</th><th>Kết nối từ</th></tr></thead>
+        <thead><tr>${thSort('Loại', 'vpn_type', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tunnel', 'tunnel_name', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Trạng thái', 'status', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Địa chỉ IP client', 'remote_info', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('IP tunnel VPN', 'tunnel_ip', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Quốc gia', 'country', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Nhận (↓)', 'rate_recv_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Gửi (↑)', 'rate_sent_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tổng đã truyền', 'total_bytes', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Kết nối từ', 'connected_since', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}</tr></thead>
         <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="10"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
+      <div id="pfsenseVpnConnsPaginationBar"></div>
     </div>
     <div class="table-wrap" style="margin-top:16px">
       <div class="table-toolbar"><div style="font-weight:600">Cấu hình OpenVPN Server</div></div>
@@ -3955,6 +4015,14 @@ async function renderPfsenseVpnTab() {
         <tbody id="pfsenseVpnServersTableBody"><tr><td colspan="5"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
     </div>`;
+  document.getElementById('pfsenseVpnConnSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => {
+      pfsenseVpnConnsSearch = document.getElementById('pfsenseVpnConnSearch').value;
+      pfsenseVpnConnsPagination.page = 1;
+      renderPfsenseVpnConnsTable();
+    }, 300);
+  });
   await loadPfsenseVpnData();
 }
 
@@ -3967,27 +4035,8 @@ async function loadPfsenseVpnData() {
     ]);
     // Re-check after the awaits — the user may have navigated/switched tabs away while in-flight.
     if (!document.getElementById('pfsenseVpnConnsTableBody')) return;
-    // Kết nối từ nước ngoài (khác VN) lên đầu trang trước, sau đó mới theo tổng băng thông — cảnh
-    // báo bất thường quan trọng hơn thứ tự theo lưu lượng.
-    const sortedConns = [...conns].sort((a, b) => {
-      if (!!b.is_foreign !== !!a.is_foreign) return (b.is_foreign ? 1 : 0) - (a.is_foreign ? 1 : 0);
-      return ((b.bytes_recv || 0) + (b.bytes_sent || 0)) - ((a.bytes_recv || 0) + (a.bytes_sent || 0));
-    });
-    const foreignCount = conns.filter(c => c.is_foreign).length;
-    document.getElementById('pfVpnConnsTitle').textContent = `Kết nối VPN đang hoạt động (${conns.length})${foreignCount ? ` — ⚠ ${foreignCount} kết nối từ nước ngoài` : ''} — sắp xếp theo cảnh báo & tổng băng thông đã dùng`;
-    document.getElementById('pfsenseVpnConnsTableBody').innerHTML = sortedConns.length ? sortedConns.map(c => `
-          <tr${c.is_foreign ? ' style="background:rgba(239,68,68,0.08)"' : ''}>
-            <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
-            <td>${c.tunnel_name}</td>
-            <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
-            <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
-            <td style="font-family:'Fira Code',monospace;font-size:12px;color:var(--accent)">${c.tunnel_ip || '—'}</td>
-            <td>${c.is_foreign ? `<span class="severity critical blink"><span class="dot"></span>${c.country || '?'} - nước ngoài</span>` : (c.country ? `<span style="font-size:12px;color:var(--fg-muted)">${c.country}</span>` : '<span style="font-size:12px;color:var(--fg-muted)">—</span>')}</td>
-            <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(c.rate_recv_bps)}</td>
-            <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
-            <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
-            <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
-          </tr>`).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+    pfsenseVpnConnsCache = conns;
+    renderPfsenseVpnConnsTable();
     document.getElementById('pfsenseVpnServersTableBody').innerHTML = servers.length ? servers.map(s => `
           <tr>
             <td style="font-weight:600">${s.description || s.name}</td>
@@ -4003,6 +4052,48 @@ async function loadPfsenseVpnData() {
     const el = document.getElementById('pfsenseVpnConnsTableBody');
     if (el) el.innerHTML = `<tr><td colspan="10"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
   }
+}
+
+function renderPfsenseVpnConnsTable() {
+  const el = document.getElementById('pfsenseVpnConnsTableBody');
+  if (!el) return;
+  const conns = pfsenseVpnConnsCache;
+  const q = pfsenseVpnConnsSearch.trim().toLowerCase();
+  const filtered = !q ? conns : conns.filter(c =>
+    (c.tunnel_name || '').toLowerCase().includes(q) || (c.remote_info || '').toLowerCase().includes(q) ||
+    (c.tunnel_ip || '').toLowerCase().includes(q) || (c.country || '').toLowerCase().includes(q));
+  // Cảnh báo an ninh (số kết nối nước ngoài) luôn tính trên toàn bộ danh sách, không bị ẩn bởi bộ lọc
+  // tìm kiếm — nhưng bảng bên dưới hiển thị theo đúng những gì đã lọc/sắp xếp/phân trang.
+  const foreignCount = conns.filter(c => c.is_foreign).length;
+  document.getElementById('pfVpnConnsTitle').textContent =
+    `Kết nối VPN đang hoạt động (${conns.length})${foreignCount ? ` — ⚠ ${foreignCount} kết nối từ nước ngoài` : ''}`;
+  if (!filtered.length) {
+    el.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+    document.getElementById('pfsenseVpnConnsPaginationBar').innerHTML = '';
+    return;
+  }
+  // Chưa bấm sắp xếp theo cột nào -> giữ mặc định: nước ngoài lên đầu, sau đó theo tổng băng thông —
+  // cảnh báo bất thường quan trọng hơn thứ tự theo lưu lượng. Bấm vào 1 cột thì tôn trọng lựa chọn đó.
+  const keyFn = (row, key) => key === 'total_bytes' ? (row.bytes_recv || 0) + (row.bytes_sent || 0) : row[key];
+  const sorted = pfsenseVpnConnsSortState.key ? applySort(filtered, pfsenseVpnConnsSortState, keyFn) : [...filtered].sort((a, b) => {
+    if (!!b.is_foreign !== !!a.is_foreign) return (b.is_foreign ? 1 : 0) - (a.is_foreign ? 1 : 0);
+    return keyFn(b, 'total_bytes') - keyFn(a, 'total_bytes');
+  });
+  const page = paginateRows(sorted, pfsenseVpnConnsPagination);
+  el.innerHTML = page.map(c => `
+          <tr${c.is_foreign ? ' style="background:rgba(239,68,68,0.08)"' : ''}>
+            <td style="text-transform:uppercase;font-size:12px;color:var(--fg-muted)">${c.vpn_type}</td>
+            <td>${c.tunnel_name}</td>
+            <td>${c.status === 'connected' ? '<span class="status online"><span class="dot"></span>Đang kết nối</span>' : `<span class="status unknown"><span class="dot"></span>${c.status}</span>`}</td>
+            <td style="font-family:'Fira Code',monospace;font-size:12px">${c.remote_info || '—'}</td>
+            <td style="font-family:'Fira Code',monospace;font-size:12px;color:var(--accent)">${c.tunnel_ip || '—'}</td>
+            <td>${c.is_foreign ? `<span class="severity critical blink"><span class="dot"></span>${c.country || '?'} - nước ngoài</span>` : (c.country ? `<span style="font-size:12px;color:var(--fg-muted)">${c.country}</span>` : '<span style="font-size:12px;color:var(--fg-muted)">—</span>')}</td>
+            <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(c.rate_recv_bps)}</td>
+            <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
+            <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
+            <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
+          </tr>`).join('');
+  document.getElementById('pfsenseVpnConnsPaginationBar').innerHTML = paginationBar(pfsenseVpnConnsPagination, filtered.length, 'pfsenseVpnConnsPagination', 'renderPfsenseVpnConnsTable');
 }
 
 function openEditOpenvpnServerForm(server) {
@@ -4043,6 +4134,12 @@ async function saveOpenvpnServer(e, vpnid) {
 let pfsenseOvpnUsersCache = [];
 let pfsenseOvpnUsersSearch = '';
 let pfsenseOvpnUsersPagination = newPagination(20);
+let pfsenseOvpnUsersSortState = { key: null, dir: 'asc' };
+
+function togglePfsenseOvpnUsersSort(key) {
+  toggleSortState(pfsenseOvpnUsersSortState, key);
+  renderPfsenseOvpnUsersTable();
+}
 
 async function renderPfsenseOvpnUsersTab() {
   const body = document.getElementById('pfsenseTabBody');
@@ -4095,9 +4192,13 @@ function renderPfsenseOvpnUsersTable() {
     el.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><h3>Không có user OpenVPN nào</h3><p>Bấm "Thêm user" để tạo</p></div>`;
     return;
   }
-  const page = paginateRows(filtered, pfsenseOvpnUsersPagination);
+  // "Hết hạn" là chuỗi mm/dd/YYYY — so sánh trực tiếp theo alphabet sẽ sai thứ tự thời gian, nên
+  // chuyển qua ISO (YYYY-MM-DD) trước khi so sánh; "không giới hạn" xếp cuối cùng khi sắp asc.
+  const keyFn = (row, key) => key === 'expires' ? (row.expires ? pfDateToIso(row.expires) : '9999-99-99') : row[key];
+  const sorted = applySort(filtered, pfsenseOvpnUsersSortState, keyFn);
+  const page = paginateRows(sorted, pfsenseOvpnUsersPagination);
   el.innerHTML = `<table>
-    <thead><tr><th>Username</th><th>Mô tả</th><th>Trạng thái</th><th>Hết hạn</th><th>IP VPN</th><th>Kết nối</th><th>Hành động</th></tr></thead>
+    <thead><tr>${thSort('Username', 'name', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Mô tả', 'descr', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Trạng thái', 'disabled', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Hết hạn', 'expires', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('IP VPN', 'staticIp', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Kết nối', 'connected', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}<th>Hành động</th></tr></thead>
     <tbody>${page.map(u => `
       <tr>
         <td style="font-weight:600;font-family:'Fira Code',monospace">${u.name}</td>
