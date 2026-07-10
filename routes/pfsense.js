@@ -323,6 +323,13 @@ router.get('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage
     for (const srv of serversRes?.data || []) {
       for (const c of srv.conns || []) connByName.set(c.common_name, { remoteHost: c.remote_host, connectedSince: c.connect_time });
     }
+    // "Lần cuối kết nối" cho user hiện KHÔNG kết nối phải lấy từ bảng riêng
+    // (pfsense_ovpn_user_last_conn) — pfsense_vpn_status chỉ giữ kết nối đang hoạt động, dữ liệu bị
+    // xóa ngay khi user ngắt kết nối nên không thể trả lời "lần cuối là khi nào" cho user offline.
+    const lastConnRows = await db.prepare(
+      'SELECT username, last_connected_at FROM pfsense_ovpn_user_last_conn WHERE firewall_id = ?'
+    ).all(fw.id);
+    const lastConnByName = new Map(lastConnRows.map(r => [r.username, r.last_connected_at]));
     // Chỉ những user có gắn chứng chỉ mới là user OpenVPN thật — phân biệt với tài khoản hệ thống
     // (admin, backup...) cũng nằm trong cùng danh sách /users.
     const users = (usersRes?.data || [])
@@ -340,7 +347,8 @@ router.get('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage
           staticIp: extractStaticIp(cso),
           connected: !!conn,
           connectedSince: conn?.connectedSince || null,
-          remoteHost: conn?.remoteHost || null
+          remoteHost: conn?.remoteHost || null,
+          lastConnectedAt: conn?.connectedSince || lastConnByName.get(u.name) || null
         };
       });
     res.json(users);

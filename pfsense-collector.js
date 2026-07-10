@@ -130,6 +130,11 @@ async function syncVpn(fw) {
       country = VALUES(country), is_foreign = VALUES(is_foreign), tunnel_ip = VALUES(tunnel_ip),
       raw_json = VALUES(raw_json), updated_at = CURRENT_TIMESTAMP
   `);
+  const lastConnUpsert = db.prepare(`
+    INSERT INTO pfsense_ovpn_user_last_conn (firewall_id, username, last_connected_at, last_remote_host)
+    VALUES (?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE last_connected_at = VALUES(last_connected_at), last_remote_host = VALUES(last_remote_host), updated_at = CURRENT_TIMESTAMP
+  `);
   const servers = ovpnRes?.data || [];
   const currentKeys = [];
   let count = 0;
@@ -144,11 +149,13 @@ async function syncVpn(fw) {
       const rate_sent_bps = computeBps(prev ? { bytes: prev.sent, ts: prev.ts } : null, bytesSent, now);
       nextSnapshot[clientKey] = { recv: bytesRecv, sent: bytesSent, ts: now };
       const { country, isForeign } = classifyIp(extractIp(c.remote_host));
+      const connectedSinceSql = c.connect_time ? new Date(c.connect_time).toISOString().slice(0, 19).replace('T', ' ') : null;
       await upsert.run(
         fw.id, 'openvpn', `${srv.name} · ${c.common_name}`, 'connected', c.remote_host,
-        c.connect_time ? new Date(c.connect_time).toISOString().slice(0, 19).replace('T', ' ') : null,
+        connectedSinceSql,
         clientKey, bytesRecv, bytesSent, rate_recv_bps, rate_sent_bps, country, isForeign, c.virtual_addr || null, JSON.stringify(c)
       );
+      if (c.common_name) await lastConnUpsert.run(fw.id, c.common_name, connectedSinceSql, c.remote_host || null);
       count++;
     }
   }

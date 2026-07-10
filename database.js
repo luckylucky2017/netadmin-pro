@@ -316,6 +316,20 @@ const SCHEMA_SQL = `
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- pfsense_vpn_status is upsert-by-active-connection and its row is DELETED the moment a client
+  -- disconnects (see pfsense-collector.js's stale cleanup), so it can't answer "when did this user
+  -- last connect" once they've gone offline. This table is a separate high-water-mark: one row per
+  -- (firewall, OpenVPN username) that is only ever written forward (never deleted), updated every
+  -- poll a user is seen connected — so it survives disconnects.
+  CREATE TABLE IF NOT EXISTS pfsense_ovpn_user_last_conn (
+    firewall_id INT NOT NULL,
+    username VARCHAR(191) NOT NULL,
+    last_connected_at DATETIME,
+    last_remote_host VARCHAR(191),
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (firewall_id, username)
+  );
+
   -- One row per VM/server being SSH-monitored: remembers how many lines of the guest's auth log
   -- have already been parsed, so each collection cycle only reads new lines (never the full log).
   CREATE TABLE IF NOT EXISTS ssh_log_cursor (

@@ -4290,7 +4290,7 @@ function renderPfsenseOvpnUsersTable() {
   const sorted = applySort(filtered, pfsenseOvpnUsersSortState, keyFn);
   const page = paginateRows(sorted, pfsenseOvpnUsersPagination);
   el.innerHTML = `<table>
-    <thead><tr>${thSort('Username', 'name', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Mô tả', 'descr', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Trạng thái', 'disabled', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Hết hạn', 'expires', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('IP VPN', 'staticIp', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Kết nối', 'connected', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}<th>Hành động</th></tr></thead>
+    <thead><tr>${thSort('Username', 'name', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Mô tả', 'descr', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Trạng thái', 'disabled', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Hết hạn', 'expires', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('IP VPN', 'staticIp', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Kết nối', 'connected', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}${thSort('Lần cuối kết nối', 'lastConnectedAt', pfsenseOvpnUsersSortState, 'togglePfsenseOvpnUsersSort')}<th>Hành động</th></tr></thead>
     <tbody>${page.map(u => `
       <tr>
         <td style="font-weight:600;font-family:'Fira Code',monospace">${u.name}</td>
@@ -4302,6 +4302,7 @@ function renderPfsenseOvpnUsersTable() {
         <td>${ovpnExpiryBadge(u.expires)}</td>
         <td style="font-family:'Fira Code',monospace;font-size:12px">${u.staticIp || '<span style="color:var(--fg-muted)">Tự động</span>'}</td>
         <td>${u.connected ? `<span class="status online" title="${escAttr(u.remoteHost || '')}${u.connectedSince ? ' — từ ' + formatTime(u.connectedSince) : ''}"><span class="dot"></span>Đang kết nối</span>` : '<span class="status offline"><span class="dot"></span>Ngắt kết nối</span>'}</td>
+        <td style="white-space:nowrap">${u.lastConnectedAt ? formatTime(u.lastConnectedAt) : '<span style="color:var(--fg-muted)">Chưa từng kết nối</span>'}</td>
         <td><div class="actions">
           <button class="btn-icon" title="Tải file cấu hình" data-permission="pfsense.vpn.manage" onclick="downloadOvpnUserConfig('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
           <button class="btn-icon edit" title="Sửa user" data-permission="pfsense.vpn.manage" onclick="openEditOvpnUserForm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
