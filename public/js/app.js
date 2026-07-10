@@ -3652,6 +3652,9 @@ async function refreshPfsenseData() {
     else if (pfsenseTab === 'rules') {
       pfsenseRulesCache = await api(`/pfsense/firewalls/${pfsenseFirewallId}/rules`);
       renderPfsenseRulesTable();
+    } else if (pfsenseTab === 'ovpn-users' && document.getElementById('pfsenseOvpnUsersBody')) {
+      pfsenseOvpnUsersCache = await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users`);
+      renderPfsenseOvpnUsersTable();
     }
   } catch { /* transient — next tick retries */ }
 }
@@ -4030,6 +4033,8 @@ async function saveOpenvpnServer(e, vpnid) {
 
 // ── Tab: Người dùng OpenVPN (chứng chỉ + tài khoản + CSO + tải cấu hình) ──
 let pfsenseOvpnUsersCache = [];
+let pfsenseOvpnUsersSearch = '';
+let pfsenseOvpnUsersPagination = newPagination(20);
 
 async function renderPfsenseOvpnUsersTab() {
   const body = document.getElementById('pfsenseTabBody');
@@ -4039,52 +4044,111 @@ async function renderPfsenseOvpnUsersTab() {
     body.innerHTML = `
     <div class="table-wrap">
       <div class="table-toolbar">
-        <div style="font-size:13px;color:var(--fg-muted)">Mỗi user = 1 tài khoản pfSense + 1 chứng chỉ TLS riêng — tạo mới sẽ ký chứng chỉ bằng CA đang dùng cho OpenVPN server</div>
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="pfsenseOvpnUserSearch" placeholder="Tìm theo username/mô tả..." value="${pfsenseOvpnUsersSearch}">
+        </div>
         <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddOvpnUserForm()" data-permission="pfsense.vpn.manage">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Thêm user
         </button>
       </div>
-      <div id="pfsenseOvpnUsersBody">${renderPfsenseOvpnUsersTable(pfsenseOvpnUsersCache)}</div>
+      <div style="font-size:12px;color:var(--fg-muted);padding:0 4px 10px">Mỗi user = 1 tài khoản pfSense + 1 chứng chỉ TLS riêng — tạo mới sẽ ký chứng chỉ bằng CA đang dùng cho OpenVPN server</div>
+      <div id="pfsenseOvpnUsersBody"></div>
     </div>`;
+    document.getElementById('pfsenseOvpnUserSearch').addEventListener('input', () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        pfsenseOvpnUsersSearch = document.getElementById('pfsenseOvpnUserSearch').value;
+        pfsenseOvpnUsersPagination.page = 1;
+        renderPfsenseOvpnUsersTable();
+      }, 300);
+    });
+    renderPfsenseOvpnUsersTable();
     applyPermissionVisibility();
   } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
-function renderPfsenseOvpnUsersTable(users) {
-  if (!users.length) {
-    return `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><h3>Chưa có user OpenVPN nào</h3><p>Bấm "Thêm user" để tạo</p></div>`;
+function ovpnExpiryBadge(expires) {
+  if (!expires) return '<span style="color:var(--fg-muted);font-size:12px">Không giới hạn</span>';
+  const [m, d, y] = expires.split('/').map(Number);
+  const expDate = new Date(y, m - 1, d);
+  const isExpired = expDate.getTime() < Date.now();
+  return `<span style="font-size:12px;color:${isExpired ? 'var(--red)' : 'var(--fg-muted)'}">${isExpired ? '⚠ Đã hết hạn ' : ''}${expires}</span>`;
+}
+
+function renderPfsenseOvpnUsersTable() {
+  const el = document.getElementById('pfsenseOvpnUsersBody');
+  if (!el) return;
+  const q = pfsenseOvpnUsersSearch.trim().toLowerCase();
+  const filtered = !q ? pfsenseOvpnUsersCache : pfsenseOvpnUsersCache.filter(u =>
+    u.name.toLowerCase().includes(q) || (u.descr || '').toLowerCase().includes(q));
+  if (!filtered.length) {
+    el.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/></svg><h3>Không có user OpenVPN nào</h3><p>Bấm "Thêm user" để tạo</p></div>`;
+    return;
   }
-  return `<table>
-    <thead><tr><th>Username</th><th>Mô tả</th><th>Cài đặt nâng cao</th><th>Hành động</th></tr></thead>
-    <tbody>${users.map(u => `
+  const page = paginateRows(filtered, pfsenseOvpnUsersPagination);
+  el.innerHTML = `<table>
+    <thead><tr><th>Username</th><th>Mô tả</th><th>Trạng thái</th><th>Hết hạn</th><th>IP VPN</th><th>Kết nối</th><th>Hành động</th></tr></thead>
+    <tbody>${page.map(u => `
       <tr>
         <td style="font-weight:600;font-family:'Fira Code',monospace">${u.name}</td>
         <td>${u.descr || '—'}</td>
-        <td>${u.hasCso ? '<span class="status online"><span class="dot"></span>Có tùy chỉnh</span>' : '<span class="status unknown"><span class="dot"></span>Mặc định</span>'}</td>
+        <td>
+          <label class="switch" title="${u.disabled ? 'Đã khóa' : 'Active'}"><input type="checkbox" ${!u.disabled ? 'checked' : ''} data-permission="pfsense.vpn.manage" onchange="togglePfsenseOvpnUserActive('${escAttr(u.name)}', !this.checked, this)"><span class="slider"></span></label>
+          ${u.csoBlocked ? '<div style="font-size:11px;color:var(--red);margin-top:2px">Bị chặn VPN (CSO)</div>' : ''}
+        </td>
+        <td>${ovpnExpiryBadge(u.expires)}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:12px">${u.staticIp || '<span style="color:var(--fg-muted)">Tự động</span>'}</td>
+        <td>${u.connected ? `<span class="status online" title="${escAttr(u.remoteHost || '')}${u.connectedSince ? ' — từ ' + formatTime(u.connectedSince) : ''}"><span class="dot"></span>Đang kết nối</span>` : '<span class="status offline"><span class="dot"></span>Ngắt kết nối</span>'}</td>
         <td><div class="actions">
           <button class="btn-icon" title="Tải file cấu hình" data-permission="pfsense.vpn.manage" onclick="downloadOvpnUserConfig('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
-          <button class="btn-icon edit" title="Cài đặt nâng cao" data-permission="pfsense.vpn.manage" onclick="openOvpnUserCsoForm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button>
+          <button class="btn-icon edit" title="Sửa user" data-permission="pfsense.vpn.manage" onclick="openEditOvpnUserForm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
           <button class="btn-icon delete" title="Xóa" data-permission="pfsense.vpn.manage" onclick="openDeleteOvpnUserConfirm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div></td>
       </tr>`).join('')}
-    </tbody></table>`;
+    </tbody></table>${paginationBar(pfsenseOvpnUsersPagination, filtered.length, 'pfsenseOvpnUsersPagination', 'renderPfsenseOvpnUsersTable')}`;
+  applyPermissionVisibility();
+}
+
+async function togglePfsenseOvpnUserActive(name, disabled, checkboxEl) {
+  checkboxEl.disabled = true;
+  try {
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users/${encodeURIComponent(name)}`, 'PATCH', { disabled });
+    toast(disabled ? `Đã khóa user "${name}"` : `Đã kích hoạt user "${name}"`, 'success');
+    const cached = pfsenseOvpnUsersCache.find(u => u.name === name);
+    if (cached) cached.disabled = disabled;
+    renderPfsenseOvpnUsersTable();
+  } catch (e) { toast(e.message, 'error'); renderPfsenseOvpnUsersTable(); }
 }
 
 // Các field CSO (Client Specific Override) hữu ích nhất trong ~26 field pfSense hỗ trợ — không phơi
-// hết ra form, chỉ tập hợp con hay dùng thật: IP tunnel tĩnh, route riêng, DNS riêng, chặn kết nối.
+// hết ra form, chỉ tập hợp con hay dùng thật: IP tunnel tĩnh ("force" IP VPN riêng), route riêng,
+// DNS riêng, chặn kết nối.
 function ovpnCsoFieldsHtml(cso) {
   return `
     <div class="form-grid">
-      <div class="form-group full"><label>Mô tả</label><input type="text" name="description" value="${cso?.description || ''}"></div>
-      <div class="form-group"><label>IP tunnel tĩnh (IPv4)</label><input type="text" name="tunnel_network" value="${cso?.tunnel_network || ''}" placeholder="vd: 192.168.67.50/30"></div>
-      <div class="form-group"><label>Mạng nội bộ riêng cho client này</label><input type="text" name="local_network" value="${(cso?.local_network || []).join(',')}" placeholder="192.168.1.0/24, ..."></div>
-      <div class="form-group"><label>Mạng phía client route về server</label><input type="text" name="remote_network" value="${(cso?.remote_network || []).join(',')}" placeholder="10.10.0.0/24, ..."></div>
+      <div class="form-group"><label>IP tunnel tĩnh (force IP VPN, IPv4)</label><input type="text" name="tunnel_network" value="${cso?.tunnel_network || ''}" placeholder="vd: 192.168.67.50/30 — để trống = cấp tự động"></div>
       <div class="form-group"><label>DNS server riêng</label><input type="text" name="dns_server1" value="${cso?.dns_server1 || ''}" placeholder="để trống = dùng mặc định server"></div>
+      <div class="form-group full"><label>Mạng nội bộ riêng cho client này</label><input type="text" name="local_network" value="${(cso?.local_network || []).join(',')}" placeholder="192.168.1.0/24, ..."></div>
+      <div class="form-group full"><label>Mạng phía client route về server</label><input type="text" name="remote_network" value="${(cso?.remote_network || []).join(',')}" placeholder="10.10.0.0/24, ..."></div>
       <div class="form-group full">
-        <label style="text-transform:none;font-size:14px"><input type="checkbox" name="block" ${cso?.block ? 'checked' : ''} style="width:auto;margin-right:6px"> Chặn user này kết nối (tạm khóa truy cập VPN)</label>
+        <label style="text-transform:none;font-size:14px"><input type="checkbox" name="block" ${cso?.block ? 'checked' : ''} style="width:auto;margin-right:6px"> Chặn user này kết nối VPN (CSO — khác với khóa tài khoản)</label>
       </div>
     </div>`;
+}
+
+// input[type=date] cho ra YYYY-MM-DD, pfSense cần mm/dd/YYYY — 2 chiều chuyển đổi dùng chung cho
+// form thêm mới lẫn sửa user.
+function isoToPfDate(iso) {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-');
+  return `${m}/${d}/${y}`;
+}
+function pfDateToIso(pf) {
+  if (!pf) return '';
+  const [m, d, y] = pf.split('/');
+  return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
 }
 
 function openAddOvpnUserForm() {
@@ -4094,9 +4158,10 @@ function openAddOvpnUserForm() {
         <div class="form-group"><label>Username *</label><input type="text" name="name" required autocomplete="off" placeholder="vd: nguyenvana"></div>
         <div class="form-group"><label>Mật khẩu *</label><input type="password" name="password" required autocomplete="new-password"></div>
         <div class="form-group full"><label>Mô tả</label><input type="text" name="descr" placeholder="Họ tên / đơn vị"></div>
+        <div class="form-group"><label>Ngày hết hạn</label><input type="date" name="expires"><div style="font-size:11px;color:var(--fg-muted);margin-top:4px">Để trống = không giới hạn</div></div>
       </div>
       <details style="margin-top:8px">
-        <summary style="cursor:pointer;font-size:13px;color:var(--fg-muted);margin-bottom:8px">Cài đặt nâng cao (tùy chọn)</summary>
+        <summary style="cursor:pointer;font-size:13px;color:var(--fg-muted);margin-bottom:8px">Cài đặt nâng cao (tùy chọn) — IP VPN tĩnh, route riêng...</summary>
         ${ovpnCsoFieldsHtml()}
       </details>
       <p style="font-size:12px;color:var(--fg-muted);margin-top:8px">Sẽ tạo 1 chứng chỉ TLS mới ký bởi CA hiện dùng cho OpenVPN server, gắn liền với user này.</p>
@@ -4110,7 +4175,6 @@ function openAddOvpnUserForm() {
 function collectOvpnCsoPayload(form) {
   const fd = new FormData(form);
   const payload = {};
-  if (fd.get('description')) payload.description = fd.get('description');
   if (fd.get('tunnel_network')) payload.tunnel_network = fd.get('tunnel_network');
   const local = (fd.get('local_network') || '').split(',').map(s => s.trim()).filter(Boolean);
   if (local.length) payload.local_network = local;
@@ -4127,8 +4191,11 @@ async function saveOvpnUser(e) {
   const cso = collectOvpnCsoPayload(e.target);
   // block=false mặc định không có ý nghĩa tạo CSO nếu không field nào khác được điền — chỉ gửi cso
   // khi có ít nhất 1 tùy chỉnh thật để tránh tạo CSO rỗng vô nghĩa.
-  const hasCsoData = Object.keys(cso).some(k => k !== 'block' ) || cso.block;
-  const payload = { name: fd.get('name'), password: fd.get('password'), descr: fd.get('descr') || '' };
+  const hasCsoData = Object.keys(cso).some(k => k !== 'block') || cso.block;
+  const payload = {
+    name: fd.get('name'), password: fd.get('password'), descr: fd.get('descr') || '',
+    expires: isoToPfDate(fd.get('expires'))
+  };
   if (hasCsoData) payload.cso = cso;
   const btn = e.target.querySelector('button[type=submit]');
   btn.disabled = true;
@@ -4143,16 +4210,21 @@ async function saveOvpnUser(e) {
   }
 }
 
-async function openOvpnUserCsoForm(name) {
-  openModal(`Cài đặt nâng cao — ${name}`, `<div class="loading"><div class="spinner"></div></div>`);
+async function openEditOvpnUserForm(name) {
+  openModal(`Sửa user — ${name}`, `<div class="loading"><div class="spinner"></div></div>`);
+  const cached = pfsenseOvpnUsersCache.find(u => u.name === name) || {};
   let cso = null;
   try {
     cso = await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users/${encodeURIComponent(name)}/cso`);
-  } catch { /* form vẫn mở được (trống) dù load cài đặt hiện tại thất bại */ }
+  } catch { /* form vẫn mở được (CSO trống) dù load cài đặt hiện tại thất bại */ }
   document.getElementById('modalBody').innerHTML = `
-    <form id="ovpnCsoForm" onsubmit="saveOvpnUserCso(event, '${escAttr(name)}')">
+    <form id="ovpnUserEditForm" onsubmit="saveOvpnUserEdit(event, '${escAttr(name)}')">
+      <div class="form-grid">
+        <div class="form-group full"><label>Mô tả</label><input type="text" name="descr" value="${cached.descr || ''}"></div>
+        <div class="form-group"><label>Ngày hết hạn</label><input type="date" name="expires" value="${pfDateToIso(cached.expires)}"><div style="font-size:11px;color:var(--fg-muted);margin-top:4px">Để trống = không giới hạn</div></div>
+      </div>
+      <div style="margin-top:12px;font-size:13px;font-weight:600;color:var(--fg-muted)">Cài đặt nâng cao</div>
       ${ovpnCsoFieldsHtml(cso)}
-      <p style="font-size:12px;color:var(--fg-muted);margin-top:8px">Lưu sẽ ghi đè cài đặt nâng cao hiện có của user này (nếu có).</p>
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
         <button type="submit" class="btn btn-primary">Lưu</button>
@@ -4160,15 +4232,24 @@ async function openOvpnUserCsoForm(name) {
     </form>`;
 }
 
-async function saveOvpnUserCso(e, name) {
+async function saveOvpnUserEdit(e, name) {
   e.preventDefault();
-  const payload = collectOvpnCsoPayload(e.target);
+  const fd = new FormData(e.target);
+  const cso = collectOvpnCsoPayload(e.target);
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
   try {
-    await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users/${encodeURIComponent(name)}/cso`, 'PUT', payload);
-    toast('Đã lưu cài đặt nâng cao', 'success');
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users/${encodeURIComponent(name)}`, 'PATCH', {
+      descr: fd.get('descr') || '', expires: isoToPfDate(fd.get('expires'))
+    });
+    await api(`/pfsense/firewalls/${pfsenseFirewallId}/openvpn/users/${encodeURIComponent(name)}/cso`, 'PUT', cso);
+    toast('Đã lưu thay đổi', 'success');
     closeModal();
     renderPfsenseOvpnUsersTab();
-  } catch (err) { toast(err.message, 'error'); }
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
 }
 
 function downloadOvpnUserConfig(name) {

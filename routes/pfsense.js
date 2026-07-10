@@ -288,25 +288,67 @@ router.put('/firewalls/:id/openvpn/servers/:vpnid', requirePermission('pfsense.v
 router.get('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage'), async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
   try {
-    const [usersRes, csosRes] = await Promise.all([
+    const [usersRes, csosRes, serversRes] = await Promise.all([
       client.request(fw, 'GET', '/users?limit=0'),
-      client.request(fw, 'GET', '/vpn/openvpn/csos?limit=0').catch(() => ({ data: [] }))
+      client.request(fw, 'GET', '/vpn/openvpn/csos?limit=0').catch(() => ({ data: [] })),
+      client.request(fw, 'GET', '/status/openvpn/servers').catch(() => ({ data: [] }))
     ]);
-    const csoNames = new Set((csosRes?.data || []).map(c => c.common_name));
+    const csoByName = new Map((csosRes?.data || []).map(c => [c.common_name, c]));
+    // Trạng thái kết nối thật lấy trực tiếp từ /status/openvpn/servers (không qua bảng cache
+    // pfsense_vpn_status) — trang này đã theo nguyên tắc "không cache" cho toàn bộ dữ liệu user,
+    // và conns[].common_name khớp đúng username (đã xác nhận: CN chứng chỉ = username).
+    const connByName = new Map();
+    for (const srv of serversRes?.data || []) {
+      for (const c of srv.conns || []) connByName.set(c.common_name, { remoteHost: c.remote_host, connectedSince: c.connect_time });
+    }
     // Chỉ những user có gắn chứng chỉ mới là user OpenVPN thật — phân biệt với tài khoản hệ thống
     // (admin, backup...) cũng nằm trong cùng danh sách /users.
     const users = (usersRes?.data || [])
       .filter(u => Array.isArray(u.cert) && u.cert.length > 0)
-      .map(u => ({ name: u.name, descr: u.descr || null, hasCso: csoNames.has(u.name) }));
+      .map(u => {
+        const cso = csoByName.get(u.name);
+        const conn = connByName.get(u.name);
+        return {
+          name: u.name,
+          descr: u.descr || null,
+          disabled: !!u.disabled,
+          expires: u.expires || null,
+          hasCso: !!cso,
+          csoBlocked: !!cso?.block,
+          staticIp: cso?.tunnel_network || null,
+          connected: !!conn,
+          connectedSince: conn?.connectedSince || null,
+          remoteHost: conn?.remoteHost || null
+        };
+      });
     res.json(users);
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
 });
 
+router.patch('/firewalls/:id/openvpn/users/:name', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const name = req.params.name;
+  try {
+    const user = await resolveOpenvpnUser(fw, name);
+    const { disabled, expires, descr } = req.body;
+    await client.request(fw, 'PATCH', '/user', {
+      id: user.id,
+      ...(disabled !== undefined ? { disabled: !!disabled } : {}),
+      ...(expires !== undefined ? { expires: expires || '' } : {}),
+      ...(descr !== undefined ? { descr } : {})
+    });
+    await logActivity(req.user, 'UPDATE', 'pfsense_openvpn_user', fw.id, name);
+    res.json({ message: 'Đã cập nhật user' });
+  } catch (e) {
+    res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message });
+  }
+});
+
 router.post('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage'), async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
-  const { name, password, descr, serverId, cso } = req.body;
+  const { name, password, descr, serverId, expires, cso } = req.body;
   if (!name || !password) return res.status(400).json({ error: 'Thiếu name/password' });
 
   let certRefid;
@@ -323,7 +365,7 @@ router.post('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manag
   }
 
   try {
-    await client.request(fw, 'POST', '/user', { name, password, descr: descr || '', cert: [certRefid] });
+    await client.request(fw, 'POST', '/user', { name, password, descr: descr || '', cert: [certRefid], expires: expires || '' });
   } catch (e) {
     return res.status(502).json({
       error: `Đã tạo chứng chỉ (refid ${certRefid}) nhưng tạo user thất bại: ${e.message} — vào pfSense (System > Cert Manager) xóa chứng chỉ mồ côi này nếu cần.`
