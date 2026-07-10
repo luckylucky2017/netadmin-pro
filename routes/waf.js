@@ -31,7 +31,7 @@ router.get('/stats', async (req, res) => {
 // picker on this page) and which are currently opted into WAF.
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
-    SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id,
+    SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id, ssh_user, ssh_port,
            waf_enabled, waf_log_path, waf_auto_block, waf_trust_xff, waf_jail_status, waf_jail_checked_at, waf_jail_error
     FROM vcenter_vms ORDER BY name ASC
   `).all();

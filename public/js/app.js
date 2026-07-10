@@ -3486,13 +3486,15 @@ function renderWafManageRows() {
   const rowOffset = (wafManagePagination.page - 1) * wafManagePagination.pageSize;
   wrap.innerHTML = `<table>
         <thead><tr>
-          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
+          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}${thSort('Tài khoản SSH', 'ssh_user', wafManageSortState, 'toggleWafManageSort')}${thSort('Port', 'ssh_port', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = !!(v.ssh_credential_id && v.ip_address);
           return `<tr data-vm-id="${v.id}">
             <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
             <td style="font-weight:600">${v.name}</td>
             <td>${v.ip_address || '—'}</td>
+            <td style="font-family:monospace;font-size:12px" title="Cấu hình ở trang Giám sát bất thường → Quản lý VM giám sát">${v.ssh_user ? escHtml(v.ssh_user) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+            <td style="font-family:monospace;font-size:12px" title="Cấu hình ở trang Giám sát bất thường → Quản lý VM giám sát">${v.ssh_port || 22}</td>
             <td><button class="btn-icon" title="Xem domain đã dò được" ${eligible ? '' : 'disabled'} onclick="openWafDomainsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/></svg></button></td>
             <td><input type="text" class="waf-log-path" data-id="${v.id}" value="${escAttr(v.waf_log_path || '/var/log/nginx/access.log')}" style="min-width:200px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}"><input type="checkbox" class="waf-enabled" data-id="${v.id}" ${v.waf_enabled ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
