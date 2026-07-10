@@ -111,7 +111,7 @@ router.post('/vms/:id/jail/stop', requirePermission('waf.jail.manage'), async (r
 // detected event. sample_paths caps at 8 distinct paths via SUBSTRING_INDEX-on-GROUP_CONCAT (the
 // standard MySQL "top N of a GROUP_CONCAT" trick — avoids an unbounded string for a long-running
 // repeat offender with hundreds of distinct probed URLs).
-router.get('/banned-ips', requirePermission('waf.jail.check'), async (req, res) => {
+router.get('/banned-ips', async (req, res) => {
   const rows = await db.prepare(`
     SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
            agg.country, agg.event_types, agg.attack_categories, agg.total_hits, agg.event_count, agg.sample_paths
@@ -179,7 +179,7 @@ function isValidExceptionIp(value) {
   return false;
 }
 
-router.get('/exceptions', requirePermission('waf.jail.check'), async (req, res) => {
+router.get('/exceptions', async (req, res) => {
   res.json(await db.prepare('SELECT * FROM waf_ip_exceptions ORDER BY created_at DESC').all());
 });
 
