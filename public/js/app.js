@@ -3388,8 +3388,11 @@ function renderWafEventRows() {
   const events = paginateRows(sortedEvents, wafEventPagination);
   const rowOffset = (wafEventPagination.page - 1) * wafEventPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Hành động</th></tr></thead>
-      <tbody>${events.map((ev, i) => `
+      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Cảnh báo</th><th>Hành động</th></tr></thead>
+      <tbody>${events.map((ev, i) => {
+        const blockedForeign = !!ev.blocked && !!ev.is_foreign;
+        const recent = blockedForeign && isRecentTimestamp(ev.occurred_at, 300000); // blink for ~5 min after auto-block
+        return `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(ev.occurred_at)}</span></td>
@@ -3401,8 +3404,10 @@ function renderWafEventRows() {
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${ev.path ? escAttr(ev.path) : ''}">${ev.path ? escHtml(ev.path).slice(0, 60) : '—'}</span></td>
           <td>${ev.hit_count ?? '—'}</td>
           <td>${ev.blocked ? '<span class="status online"><span class="dot"></span>Đã chặn</span>' : '<span class="status offline"><span class="dot"></span>Chỉ cảnh báo</span>'}</td>
+          <td>${blockedForeign ? `<span class="severity critical ${recent ? 'blink' : ''}"><span class="dot"></span>Đã tự động chặn IP từ ${escHtml(ev.country)}</span>` : ''}</td>
           <td>${!ev.blocked && ev.src_ip ? `<button class="btn-icon" data-permission="waf.block" title="Chặn IP này ngay" onclick="wafBlockIpFromEvent(${ev.vm_id}, '${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>` : ''}</td>
-        </tr>`).join('')}
+        </tr>`;
+      }).join('')}
       </tbody></table>${paginationBar(wafEventPagination, sortedEvents.length, 'wafEventPagination', 'renderWafEventRows')}`;
   applyPermissionVisibility();
 }
