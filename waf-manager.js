@@ -70,23 +70,28 @@ fi
 // jail that wasn't already running — it only reloads config for jails already active. `reload
 // --restart` is required to make it actually scan jail.d and start newly-added jails; every reload
 // call in this file/fail2ban-manager.js uses that flag for exactly this reason.
-function buildWafJailFilesScript(logPath) {
-  const jailContent = WAF_JAIL_TEMPLATE.replace('__WAF_LOG_PATH__', logPath);
+//
+// No longer takes a logPath argument — the jail's own logpath is a fixed /dev/null (see
+// fail2ban-templates/netadmin-waf-jail.local's header comment for why: this jail's filter never
+// matches anything, and a VM commonly has several per-domain access logs that no single jail
+// logpath could cover anyway). vcenter_vms.waf_log_path is a completely separate concern — it's
+// nginx-waf-collector.js's own fallback path for actual log TAILING when no domain could be
+// auto-discovered from /etc/nginx config, unrelated to this jail's config.
+function buildWafJailFilesScript() {
   return `
 sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
 ${WAF_FILTER_TEMPLATE}
 FILTER_EOF
 sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<'JAIL_EOF'
-${jailContent}
+${WAF_JAIL_TEMPLATE}
 JAIL_EOF
 `.trim();
 }
 
 // Ensures the fail2ban package itself is present (same apt/dnf/yum detection as
-// fail2ban-manager.js's INSTALL_SCRIPT), then writes a filter that can never match anything real and
-// a jail pointed at the VM's configured nginx log path, and reloads.
-function buildInstallScript(logPath) {
+// fail2ban-manager.js's INSTALL_SCRIPT), then writes the WAF jail's config and reloads.
+function buildInstallScript() {
   return `
 set -e
 if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -102,7 +107,7 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
   esac
   sudo -n systemctl enable --now fail2ban
 fi
-${buildWafJailFilesScript(logPath)}
+${buildWafJailFilesScript()}
 sudo -n fail2ban-client reload --restart
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
@@ -155,20 +160,15 @@ async function checkStatus(vm) {
 }
 
 async function installJail(vm, user = null) {
-  if (!SAFE_LOG_PATH_RE.test(vm.waf_log_path || '')) {
-    const error = `Đường dẫn log không hợp lệ: "${vm.waf_log_path}"`;
-    await setStatus.run('error', error, vm.id);
-    return { status: 'error', error };
-  }
   await setStatus.run('installing', null, vm.id);
   let ssh;
   try {
     ssh = await connect(vm);
-    const result = await ssh.execCommand(buildInstallScript(vm.waf_log_path));
+    const result = await ssh.execCommand(buildInstallScript());
     const finalStatus = /^FINAL_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (finalStatus === 'running') {
       await setStatus.run('running', null, vm.id);
-      await logActivity(user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Cài đặt jail WAF thành công (log: ${vm.waf_log_path})`);
+      await logActivity(user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, 'Cài đặt jail WAF thành công');
       return { status: 'running', error: null };
     }
     const passwordRequired = /a password is required|sudo:.*password/i.test(result.stderr || result.stdout || '');

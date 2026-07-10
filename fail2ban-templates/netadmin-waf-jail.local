@@ -1,19 +1,23 @@
 # NetAdmin Pro — WAF jail definition. Pairs with netadmin-waf-filter.local (deploy both).
 #
-# logpath below is a PLACEHOLDER (__WAF_LOG_PATH__) — the app substitutes it with the real nginx
-# access.log path per VM/domain before deploying (waf-manager.js's buildWafJailFilesScript). If
-# applying this file manually on a new machine, replace __WAF_LOG_PATH__ with the real path first:
-#   sed -i 's#__WAF_LOG_PATH__#/var/log/nginx/access.log#' netadmin-waf-jail.local
+# logpath is intentionally /dev/null, NOT a real nginx access.log — this jail's filter never matches
+# anything (see netadmin-waf-filter.local), so fail2ban never actually reads/parses real log content
+# for it; logpath only needs to point at SOMETHING that exists so the jail can start. Real detection
+# happens entirely in nginx-waf-collector.js, which tails each domain's own access log directly (a
+# VM commonly has several, one per vhost — a single logpath here could never cover all of them
+# anyway). Every real ban comes from the app explicitly calling
+# `fail2ban-client set netadmin-waf banip <ip>`, not from this jail parsing anything.
+#
+# Auto-deployed by the app. To apply manually on a new machine instead:
 #   sudo cp netadmin-waf-jail.local /etc/fail2ban/jail.d/netadmin-waf.local
 #   sudo fail2ban-client reload --restart
 #
-# maxretry/findtime are set absurdly high/tight on purpose — this jail's filter never actually
-# matches (see netadmin-waf-filter.local), so these values are irrelevant to real bans; every real
-# ban comes from the app explicitly calling `fail2ban-client set netadmin-waf banip <ip>`.
+# maxretry/findtime are set absurdly high/tight on purpose, for the same reason — irrelevant to real
+# bans since this filter never matches.
 [netadmin-waf]
 enabled = true
 filter = netadmin-waf
-logpath = __WAF_LOG_PATH__
+logpath = /dev/null
 maxretry = 100000
 findtime = 1
 bantime = 3600

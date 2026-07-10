@@ -66,7 +66,7 @@ fi` : ''}
 // comment above) and, when includeWaf, splices in waf-manager.js's own jail-config-writing step so
 // both jails get configured in one combined install + single reload, rather than two separate SSH
 // round-trips that could disagree if one half fails.
-function buildInstallScript(includeWaf, wafLogPath) {
+function buildInstallScript(includeWaf) {
   return `
 set -e
 if command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt
@@ -92,7 +92,7 @@ sudo -n mkdir -p /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
 ${SSHD_JAIL_TEMPLATE}
 SSHD_EOF
-${includeWaf ? wafManager.buildWafJailFilesScript(wafLogPath) : ''}
+${includeWaf ? wafManager.buildWafJailFilesScript() : ''}
 sudo -n systemctl enable --now fail2ban
 sleep 2
 sudo -n fail2ban-client reload --restart 2>/dev/null || true
@@ -183,15 +183,17 @@ async function checkStatus(vm) {
   }
 }
 
-// vm must include waf_enabled/waf_log_path (routes/security.js's getMonitoredVm selects both) so
-// this can decide whether to also provision the WAF jail — see module header comment.
+// vm must include waf_enabled (routes/security.js's getMonitoredVm selects it) so this can decide
+// whether to also provision the WAF jail — see module header comment. waf_log_path is NOT needed
+// here — the WAF jail's own logpath is a fixed /dev/null, unrelated to that field (see
+// waf-manager.js's buildWafJailFilesScript).
 async function installFail2ban(vm, user = null) {
   await setStatus.run('installing', null, vm.id);
   let ssh;
   try {
     ssh = await connect(vm);
     const includeWaf = !!vm.waf_enabled;
-    const result = await ssh.execCommand(buildInstallScript(includeWaf, vm.waf_log_path));
+    const result = await ssh.execCommand(buildInstallScript(includeWaf));
     const sshdStatus = /^SSHD_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (sshdStatus === 'running') {
       await setStatus.run('running', null, vm.id);
