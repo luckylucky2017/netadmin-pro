@@ -32,6 +32,32 @@ async function resolveLiveRuleId(fw, tracker) {
   return rule.id;
 }
 
+// Picks the OpenVPN server a user/cert/export operation targets. serverId is the server's vpnid
+// (what pfSense calls it elsewhere, e.g. status/openvpn/servers) — defaults to the first configured
+// server when omitted, which covers every real deployment seen so far (exactly 1 server).
+async function resolveOpenvpnServer(fw, serverId) {
+  const res = await client.request(fw, 'GET', '/vpn/openvpn/servers?limit=0');
+  const servers = res?.data || [];
+  const server = serverId ? servers.find(s => s.vpnid === Number(serverId)) : servers[0];
+  if (!server) throw Object.assign(new Error('Không tìm thấy OpenVPN server nào trên firewall này'), { statusCode: 404 });
+  return server;
+}
+
+async function resolveOpenvpnUser(fw, name) {
+  const res = await client.request(fw, 'GET', '/users?limit=0');
+  const user = (res?.data || []).find(u => u.name === name);
+  if (!user) throw Object.assign(new Error('Không tìm thấy user OpenVPN này trên pfSense'), { statusCode: 404 });
+  return user;
+}
+
+// CSO (Client Specific Override) has no upsert-by-common_name endpoint — callers that want
+// "create or update" resolve the existing one (if any) first, same id-before-write pattern as
+// resolveLiveRuleId() above.
+async function resolveOpenvpnCso(fw, commonName) {
+  const res = await client.request(fw, 'GET', '/vpn/openvpn/csos?limit=0');
+  return (res?.data || []).find(c => c.common_name === commonName) || null;
+}
+
 // ── Kết nối pfSense — CRUD, Admin-only vì chạm mật khẩu hạ tầng ──
 
 // Read access open to any authenticated role (same convention as GET /vcenter/clusters) —
@@ -226,7 +252,7 @@ router.post('/firewalls/:id/apply', requirePermission('pfsense.rules.write'), as
   }
 });
 
-// ── OpenVPN — chỉ xem + sửa server đã tồn tại, không tạo mới từ đầu (rủi ro PKI) ──
+// ── OpenVPN — xem/sửa cấu hình server đã tồn tại + quản lý user (chứng chỉ, CSO, xuất file) ──
 
 router.get('/firewalls/:id/openvpn/servers', async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
@@ -252,6 +278,153 @@ router.put('/firewalls/:id/openvpn/servers/:vpnid', requirePermission('pfsense.v
     res.json({ message: 'Đã cập nhật cấu hình OpenVPN' });
   } catch (e) {
     res.status(502).json({ error: e.message });
+  }
+});
+
+// ── User OpenVPN — chứng chỉ + tài khoản cục bộ pfSense + CSO (cài đặt nâng cao) + xuất file ──
+// Không cache gì ở đây (không bảng DB nào) — luôn đọc/ghi thẳng qua API pfSense, vì đây là dữ liệu
+// nhạy cảm (username, chứng chỉ) không cần đồng bộ định kỳ như interface/rule/trạng thái VPN.
+
+router.get('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    const [usersRes, csosRes] = await Promise.all([
+      client.request(fw, 'GET', '/users?limit=0'),
+      client.request(fw, 'GET', '/vpn/openvpn/csos?limit=0').catch(() => ({ data: [] }))
+    ]);
+    const csoNames = new Set((csosRes?.data || []).map(c => c.common_name));
+    // Chỉ những user có gắn chứng chỉ mới là user OpenVPN thật — phân biệt với tài khoản hệ thống
+    // (admin, backup...) cũng nằm trong cùng danh sách /users.
+    const users = (usersRes?.data || [])
+      .filter(u => Array.isArray(u.cert) && u.cert.length > 0)
+      .map(u => ({ name: u.name, descr: u.descr || null, hasCso: csoNames.has(u.name) }));
+    res.json(users);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+router.post('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const { name, password, descr, serverId, cso } = req.body;
+  if (!name || !password) return res.status(400).json({ error: 'Thiếu name/password' });
+
+  let certRefid;
+  try {
+    const server = await resolveOpenvpnServer(fw, serverId);
+    const certRes = await client.request(fw, 'POST', '/system/certificate/generate', {
+      descr: name, caref: server.caref, keytype: 'RSA', keylen: 2048, digest_alg: 'sha256',
+      lifetime: 3650, dn_commonname: name, type: 'user'
+    });
+    certRefid = certRes?.data?.refid;
+    if (!certRefid) throw new Error('pfSense không trả về refid chứng chỉ vừa tạo');
+  } catch (e) {
+    return res.status(502).json({ error: `Tạo chứng chỉ thất bại: ${e.message}` });
+  }
+
+  try {
+    await client.request(fw, 'POST', '/user', { name, password, descr: descr || '', cert: [certRefid] });
+  } catch (e) {
+    return res.status(502).json({
+      error: `Đã tạo chứng chỉ (refid ${certRefid}) nhưng tạo user thất bại: ${e.message} — vào pfSense (System > Cert Manager) xóa chứng chỉ mồ côi này nếu cần.`
+    });
+  }
+
+  let warning = null;
+  if (cso && typeof cso === 'object' && Object.keys(cso).length) {
+    try {
+      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...cso });
+    } catch (e) {
+      warning = `Đã tạo user "${name}" nhưng lưu cài đặt nâng cao thất bại: ${e.message} — có thể sửa lại sau ở nút "Cài đặt nâng cao".`;
+    }
+  }
+
+  await logActivity(req.user, 'CREATE', 'pfsense_openvpn_user', fw.id, name);
+  res.status(201).json({ message: warning || `Đã tạo user OpenVPN "${name}"`, warning: !!warning });
+});
+
+router.get('/firewalls/:id/openvpn/users/:name/cso', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    const cso = await resolveOpenvpnCso(fw, req.params.name);
+    res.json(cso || null);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+router.put('/firewalls/:id/openvpn/users/:name/cso', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const name = req.params.name;
+  try {
+    const existing = await resolveOpenvpnCso(fw, name);
+    if (existing) {
+      await client.request(fw, 'PATCH', '/vpn/openvpn/cso', { id: existing.id, ...req.body });
+    } else {
+      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...req.body });
+    }
+    await logActivity(req.user, 'UPDATE', 'pfsense_openvpn_cso', fw.id, name);
+    res.json({ message: 'Đã lưu cài đặt nâng cao' });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+router.delete('/firewalls/:id/openvpn/users/:name', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const name = req.params.name;
+  try {
+    const user = await resolveOpenvpnUser(fw, name);
+    const cso = await resolveOpenvpnCso(fw, name);
+    if (cso) await client.request(fw, 'DELETE', `/vpn/openvpn/cso?id=${cso.id}`, { id: cso.id });
+    await client.request(fw, 'DELETE', `/user?id=${user.id}`, { id: user.id });
+
+    if (req.query.deleteCert === 'true' && Array.isArray(user.cert) && user.cert.length) {
+      const certsRes = await client.request(fw, 'GET', '/system/certificates?limit=0');
+      const certs = certsRes?.data || [];
+      for (const certref of user.cert) {
+        const cert = certs.find(c => c.refid === certref);
+        if (cert) await client.request(fw, 'DELETE', `/system/certificate?id=${cert.id}`, { id: cert.id });
+      }
+    }
+
+    await logActivity(req.user, 'DELETE', 'pfsense_openvpn_user', fw.id, name);
+    res.json({ message: `Đã xóa user "${name}"` });
+  } catch (e) {
+    res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message });
+  }
+});
+
+router.get('/firewalls/:id/openvpn/users/:name/config', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const name = req.params.name;
+  try {
+    const user = await resolveOpenvpnUser(fw, name);
+    const certref = Array.isArray(user.cert) ? user.cert[0] : null;
+    if (!certref) return res.status(400).json({ error: 'User chưa có chứng chỉ' });
+
+    const server = await resolveOpenvpnServer(fw, req.query.serverId);
+    const configsRes = await client.request(fw, 'GET', '/vpn/openvpn/client_export/configs?limit=0');
+    const exportConfig = (configsRes?.data || []).find(c => c.server === server.vpnid);
+    if (!exportConfig) {
+      return res.status(400).json({ error: 'Chưa cấu hình OpenVPN Client Export cho server này trên pfSense — vào System > Pkg Manager cấu hình trước' });
+    }
+
+    const exportRes = await client.request(fw, 'POST', '/vpn/openvpn/client_export', {
+      id: exportConfig.id, type: 'confinline', certref, username: name
+    });
+    const data = exportRes?.data;
+    if (!data?.binary_data) return res.status(502).json({ error: 'pfSense không trả về nội dung file cấu hình' });
+
+    // binary_data is plain-text .ovpn content for type=confinline (confirmed against a real export
+    // in live testing) despite the field name — pfSense's other export types (confzip, inst-*) are
+    // genuinely binary, but this app only ever requests confinline, so no base64 decode is needed.
+    const filename = data.filename || `${name}.ovpn`;
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(data.binary_data);
+  } catch (e) {
+    res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message });
   }
 });
 
