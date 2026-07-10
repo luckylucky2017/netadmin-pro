@@ -683,6 +683,12 @@ async function ensureSchemaAndMigrations() {
     try { await pool.query(m); } catch (e) { if (e.errno !== 1060) throw e; }
   }
 
+  // Which named attack signature (sqli/xss/lfi/rce/sensitive_file/cms_scan — see
+  // nginx-waf-collector.js's ATTACK_SIGNATURES) triggered a 'scan' event, so the UI can show WHY a
+  // request was flagged instead of just "scan". Nullable — a plain volume/4xx-based scan detection
+  // (no specific payload signature matched) or a dos/ddos/manual_block row leaves this null.
+  try { await pool.query("ALTER TABLE waf_events ADD COLUMN attack_category VARCHAR(30)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Interface + OpenVPN client bandwidth (in/out bps) — pfSense's API only exposes cumulative byte
   // counters, not a rate, so bps is derived from the delta against the previous poll's snapshot,
   // same convention as servers.snmp_if_prev_snapshot in snmp-collector.js. Snapshots live on

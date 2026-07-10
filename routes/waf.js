@@ -114,13 +114,14 @@ router.post('/vms/:id/jail/stop', requirePermission('waf.jail.manage'), async (r
 router.get('/banned-ips', requirePermission('waf.jail.check'), async (req, res) => {
   const rows = await db.prepare(`
     SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
-           agg.country, agg.event_types, agg.total_hits, agg.event_count, agg.sample_paths
+           agg.country, agg.event_types, agg.attack_categories, agg.total_hits, agg.event_count, agg.sample_paths
     FROM waf_banned_ips b
     JOIN vcenter_vms v ON v.id = b.vm_id
     LEFT JOIN (
       SELECT vm_id, src_ip,
         SUBSTRING_INDEX(GROUP_CONCAT(country ORDER BY occurred_at DESC SEPARATOR ','), ',', 1) AS country,
         GROUP_CONCAT(DISTINCT event_type ORDER BY event_type SEPARATOR ', ') AS event_types,
+        GROUP_CONCAT(DISTINCT attack_category ORDER BY attack_category SEPARATOR ', ') AS attack_categories,
         SUM(hit_count) AS total_hits,
         COUNT(*) AS event_count,
         SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT path ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths

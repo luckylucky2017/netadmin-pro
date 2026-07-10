@@ -3331,6 +3331,33 @@ function formatWafEventTypes(csv) {
   return csv.split(',').map(t => t.trim()).filter(Boolean).map(t => WAF_EVENT_LABEL[t] || t).join(', ');
 }
 
+// Server-side copy: nginx-waf-collector.js's ATTACK_SIGNATURES/ATTACK_CATEGORY_LABEL.
+const ATTACK_CATEGORY_LABEL = {
+  sqli: 'SQL Injection', xss: 'XSS', rce: 'RCE/Command Injection', lfi: 'LFI/Path Traversal',
+  sensitive_file: 'Lộ file nhạy cảm', cms_scan: 'Dò quét CMS/Admin',
+};
+const ATTACK_CATEGORY_CLASS = {
+  sqli: 'critical', xss: 'critical', rce: 'critical', lfi: 'critical',
+  sensitive_file: 'warning', cms_scan: 'warning',
+};
+
+function wafAttackCategoryBadge(category) {
+  if (!category) return '';
+  const label = ATTACK_CATEGORY_LABEL[category] || category;
+  return `<span class="severity ${ATTACK_CATEGORY_CLASS[category] || 'unknown'}"><span class="dot"></span>${escHtml(label)}</span>`;
+}
+
+// "Loại vi phạm" cell in "IP đang bị chặn": prefer the specific attack categories detected
+// (SQL Injection, XSS, ...) — falls back to the generic event types (Dò quét/DoS/...) only when no
+// specific payload signature ever matched (e.g. a pure volume-based DoS, or a manual block).
+function formatWafViolationType(row) {
+  if (row.attack_categories) {
+    return row.attack_categories.split(',').map(c => c.trim()).filter(Boolean)
+      .map(c => ATTACK_CATEGORY_LABEL[c] || c).join(', ');
+  }
+  return row.event_types ? formatWafEventTypes(row.event_types) : null;
+}
+
 function renderWafEvents(search = '') {
   const monitoredVms = wafState.vms.filter(v => v.waf_enabled);
   document.getElementById('wafTabBody').innerHTML = `
@@ -3400,7 +3427,7 @@ function renderWafEventRows() {
   const events = paginateRows(sortedEvents, wafEventPagination);
   const rowOffset = (wafEventPagination.page - 1) * wafEventPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Cảnh báo</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('Dạng tấn công', 'attack_category', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Cảnh báo</th><th>Hành động</th></tr></thead>
       <tbody>${events.map((ev, i) => {
         const blockedForeign = !!ev.blocked && !!ev.is_foreign;
         const recent = blockedForeign && isRecentTimestamp(ev.occurred_at, 300000); // blink for ~5 min after auto-block
@@ -3411,6 +3438,7 @@ function renderWafEventRows() {
           <td style="font-weight:600">${ev.vm_name || '—'}</td>
           <td>${ev.domain ? escHtml(ev.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span class="severity ${WAF_EVENT_CLASS[ev.event_type] || 'unknown'}"><span class="dot"></span>${WAF_EVENT_LABEL[ev.event_type] || ev.event_type}</span></td>
+          <td>${wafAttackCategoryBadge(ev.attack_category) || '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td>${ev.src_ip ? `<span style="font-family:monospace">${escHtml(ev.src_ip)}</span>` : '<span style="color:var(--fg-dim)">— (phân tán)</span>'}</td>
           <td>${ev.country || '—'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${ev.path ? escAttr(ev.path) : ''}">${ev.path ? escHtml(ev.path).slice(0, 60) : '—'}</span></td>
@@ -3504,7 +3532,7 @@ function renderWafBannedRows() {
           <td style="font-weight:600">${r.vm_name || '—'}</td>
           <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
           <td>${r.country || '—'}</td>
-          <td>${r.event_types ? formatWafEventTypes(r.event_types) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${(() => { const v = formatWafViolationType(r); return v ? v : '<span style="color:var(--fg-dim)">—</span>'; })()}</td>
           <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${pathsTitle}">${pathsPreview}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.first_seen)}</span></td>

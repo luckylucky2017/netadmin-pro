@@ -80,9 +80,46 @@ function parseNginxLine(line) {
   };
 }
 
-// Common vulnerability-scan targets — not exhaustive, tunable. Deliberately avoids broad patterns
-// like `\.php$` that would false-positive on any real PHP app.
-const SUSPICIOUS_PATH_RE = /\.env(\.|$)|\.git\/|\.aws\/credentials|wp-login\.php|wp-admin|xmlrpc\.php|phpmyadmin|\/actuator|\.\.\//i;
+// Named attack-signature patterns checked against the request path (which already includes the
+// query string — nginx's $request has no space-separated query field, so parseNginxLine's `path`
+// captures "/foo?bar=baz" as one token). Checked in this order; the FIRST match wins as the
+// "dominant category" for a request that happens to match more than one (e.g. a payload containing
+// both a script tag and a SQL keyword) — ordered roughly by how actionable/dangerous a confirmed
+// hit is, not by likelihood. Deliberately avoids overly broad patterns (bare `select`, bare `../`,
+// `.php$`) that would false-positive on ordinary traffic; every pattern here requires a fairly
+// specific, rarely-legitimate token combination. Not exhaustive — tunable once real traffic is
+// visible on the page; this is a curated subset of what's realistically detectable from a single
+// access-log line (no request body, no response content), not a full WAF ruleset like ModSecurity
+// CRS.
+const ATTACK_SIGNATURES = [
+  { category: 'sqli', re: /\bunion\b(\s|%20|\+)+(\bselect\b|%73%65%6c%65%63%74)|\bselect\b.{1,60}\bfrom\b|\'\s*or\s*\'?1\'?\s*=\s*\'?1|\bor\b\s+\d+\s*=\s*\d+\s*(--|#|$)|\bsleep\(\s*\d|\bbenchmark\(|\bwaitfor\s+delay\b|\bpg_sleep\(|information_schema|\bxp_cmdshell\b|\bunion\b.{1,10}\bselect\b/i },
+  { category: 'xss', re: /<script[\s>]|%3cscript|javascript:|on(error|load|click|mouseover|focus)\s*=|<img[^>]+onerror|<svg[^>]+onload|document\.(cookie|location)/i },
+  { category: 'rce', re: /;\s*(cat|ls|whoami|id|uname|wget|curl)\b|\$\([^)]*\)|`[^`]*`|\|\s*(nc|netcat|bash|sh)\b|\bexec\s*\(|\bsystem\s*\(|\bpassthru\s*\(|\bshell_exec\s*\(/i },
+  { category: 'lfi', re: /\.\.\/|\.\.%2f|%2e%2e%2f|\/etc\/passwd|\/etc\/shadow|php:\/\/(filter|input)|\bwin\.ini\b|\bboot\.ini\b/i },
+  { category: 'sensitive_file', re: /\.env(\.|$)|\.git\/|\.aws\/credentials|\.ssh\/|id_rsa|wp-config\.php|\.htpasswd|\.htaccess$/i },
+  { category: 'cms_scan', re: /wp-login\.php|wp-admin|xmlrpc\.php|phpmyadmin|adminer\.php|\/actuator|\/manager\/html|\/console\// },
+];
+
+// Vietnamese labels for alert titles/messages — the frontend has its own copy for the events/banned
+// tables (public/js/app.js's ATTACK_CATEGORY_LABEL), kept in sync manually since one lives server-
+// side (Node) and the other client-side (browser globals), same split as WAF_EVENT_LABEL already.
+const ATTACK_CATEGORY_LABEL = {
+  sqli: 'SQL Injection', xss: 'XSS', rce: 'RCE/Command Injection', lfi: 'LFI/Path Traversal',
+  sensitive_file: 'lộ file nhạy cảm', cms_scan: 'dò quét CMS/Admin',
+};
+
+// Pure, testable: which named signature (if any) matches this request path — null if none.
+function classifyAttackPattern(path) {
+  if (!path) return null;
+  for (const sig of ATTACK_SIGNATURES) if (sig.re.test(path)) return sig.category;
+  return null;
+}
+
+// Payload-based categories (a real SQLi/XSS/RCE/LFI string is a strong signal even from just a
+// handful of requests) use a much lower threshold than generic scanning noise (a single stray 404
+// or a sensitive-file/CMS probe is common background bot traffic and needs volume to mean anything).
+const HIGH_SEVERITY_CATEGORIES = new Set(['sqli', 'xss', 'rce', 'lfi']);
+const HIGH_SEVERITY_THRESHOLD = 3;
 
 // Pure, testable: groups a batch of parsed hits by IP (h.ip — set by the caller to remoteAddr or
 // xffIp depending on the VM's waf_trust_xff setting) and flags scan/DoS per IP. No DB/SSH access.
@@ -95,9 +132,18 @@ function detectPerIpEvents(hits) {
   }
   const events = [];
   for (const [ip, ipHits] of byIp) {
-    const errorHits = ipHits.filter(h => h.status >= 400 || SUSPICIOUS_PATH_RE.test(h.path || ''));
-    if (errorHits.length >= SCAN_ERROR_THRESHOLD) {
-      events.push({ type: 'scan', ip, hitCount: errorHits.length, sample: errorHits[errorHits.length - 1] });
+    const flagged = ipHits
+      .map(h => ({ ...h, attackCategory: classifyAttackPattern(h.path) }))
+      .filter(h => h.status >= 400 || h.attackCategory);
+    const highSevHits = flagged.filter(h => HIGH_SEVERITY_CATEGORIES.has(h.attackCategory));
+    if (flagged.length >= SCAN_ERROR_THRESHOLD || highSevHits.length >= HIGH_SEVERITY_THRESHOLD) {
+      const categoryCounts = {};
+      for (const h of flagged) if (h.attackCategory) categoryCounts[h.attackCategory] = (categoryCounts[h.attackCategory] || 0) + 1;
+      const dominantCategory = Object.keys(categoryCounts).sort((a, b) => categoryCounts[b] - categoryCounts[a])[0] || null;
+      // Prefer showing a real attack-payload hit as the sample (not just whichever came last),
+      // so the event's displayed path/status is the actual malicious request, not a generic 404.
+      const sample = highSevHits[highSevHits.length - 1] || flagged[flagged.length - 1];
+      events.push({ type: 'scan', ip, hitCount: flagged.length, attackCategory: dominantCategory, sample });
     }
 
     const sorted = [...ipHits].sort((a, b) => a.timestamp - b.timestamp);
@@ -107,7 +153,7 @@ function detectPerIpEvents(hits) {
       maxInWindow = Math.max(maxInWindow, i - windowStart + 1);
     }
     if (maxInWindow >= DOS_REQUEST_THRESHOLD) {
-      events.push({ type: 'dos', ip, hitCount: maxInWindow, sample: sorted[sorted.length - 1] });
+      events.push({ type: 'dos', ip, hitCount: maxInWindow, attackCategory: null, sample: sorted[sorted.length - 1] });
     }
   }
   return events;
@@ -214,8 +260,8 @@ function buildTailScript(path, startLine) {
 }
 
 const insertEvent = db.prepare(`
-  INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at, attack_category)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const getCursor = db.prepare('SELECT last_line_count FROM ssh_log_cursor WHERE source_type = ? AND source_id = ?');
 const upsertCursor = db.prepare(`
@@ -247,7 +293,10 @@ async function raiseWafAlert(vm, domain, ev, country, blockResult) {
     SELECT id FROM alerts WHERE metric = ? AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
   `).get(metric, vm.id, ev.ip);
   if (already) return; // still active — waf_events row above already recorded this occurrence
-  const title = ev.type === 'scan' ? 'WAF phát hiện dò quét' : 'WAF phát hiện tấn công DoS';
+  const categoryLabel = ev.attackCategory ? ATTACK_CATEGORY_LABEL[ev.attackCategory] || ev.attackCategory : null;
+  const title = ev.type === 'scan'
+    ? (categoryLabel ? `WAF phát hiện ${categoryLabel}` : 'WAF phát hiện dò quét')
+    : 'WAF phát hiện tấn công DoS';
   const action = vm.waf_auto_block
     ? (blockResult?.ok ? ' — ĐÃ CHẶN IP qua fail2ban'
       : blockResult?.excepted ? ' — bỏ qua, không chặn (IP nằm trong danh sách ngoại lệ)'
@@ -255,7 +304,7 @@ async function raiseWafAlert(vm, domain, ev, country, blockResult) {
     : ' — chỉ cảnh báo (tự động chặn đang tắt cho VM này)';
   const site = domainLabel(domain, vm.name);
   const message = ev.type === 'scan'
-    ? `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request lỗi/đường dẫn khả nghi tới "${site}" trên VM "${vm.name}"${action}`
+    ? `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request${categoryLabel ? ` nghi ${categoryLabel}` : ' lỗi/đường dẫn khả nghi'} tới "${site}" trên VM "${vm.name}"${action}`
     : `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request trong ${DOS_WINDOW_SEC}s tới "${site}" trên VM "${vm.name}"${action}`;
   await db.prepare(`
     INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
@@ -316,7 +365,7 @@ async function processHits(vm, domain, domainLogId, hits) {
     await insertEvent.run(
       vm.id, vm.name, domain, ev.type, ev.ip, country, isForeign,
       ev.sample.method, ev.sample.path, ev.sample.status, ev.sample.userAgent,
-      ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp)
+      ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp), ev.attackCategory || null
     );
     await raiseWafAlert(vm, domain, ev, country, blockResult);
   }
@@ -325,7 +374,7 @@ async function processHits(vm, domain, domainLogId, hits) {
   const totalCount = hits.length;
   const recentSamples = await getRecentTraffic.all(domainLogId, DDOS_BASELINE_SAMPLES);
   if (detectDdos(totalCount, recentSamples.map(r => r.request_count))) {
-    await insertEvent.run(vm.id, vm.name, domain, 'ddos', null, null, 0, null, null, null, null, totalCount, 0, toSqlDatetime(lastTs));
+    await insertEvent.run(vm.id, vm.name, domain, 'ddos', null, null, 0, null, null, null, null, totalCount, 0, toSqlDatetime(lastTs), null);
     await raiseDdosAlert(vm, domain, totalCount);
   }
   await recordTraffic.run(domainLogId, toSqlDatetime(lastTs), totalCount);
@@ -474,4 +523,5 @@ module.exports = {
   start, collectAll, collectVm,
   parseNginxLine, parseNginxTimestamp, detectPerIpEvents, detectDdos,
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
+  classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,
 };
