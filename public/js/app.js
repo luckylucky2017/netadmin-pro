@@ -4135,7 +4135,7 @@ async function togglePfsenseOvpnUserActive(name, disabled, checkboxEl) {
 function ovpnCsoFieldsHtml(cso) {
   return `
     <div class="form-grid">
-      <div class="form-group"><label>IP tunnel tĩnh (force IP VPN, IPv4)</label><input type="text" name="tunnel_network" value="${cso?.tunnel_network || ''}" placeholder="vd: 192.168.67.50/30 — để trống = cấp tự động"></div>
+      <div class="form-group"><label>IP VPN tĩnh (force IP, IPv4)</label><input type="text" name="staticIp" value="${cso?.staticIp || ''}" placeholder="vd: 192.168.67.50 — để trống = cấp tự động"><div style="font-size:11px;color:var(--fg-muted);margin-top:4px">Ghi qua ifconfig-push (subnet 255.255.255.0), đúng cách hệ thống này đang dùng</div></div>
       <div class="form-group"><label>DNS server riêng</label><input type="text" name="dns_server1" value="${cso?.dns_server1 || ''}" placeholder="để trống = dùng mặc định server"></div>
       <div class="form-group full"><label>Mạng nội bộ riêng cho client này</label><input type="text" name="local_network" value="${(cso?.local_network || []).join(',')}" placeholder="192.168.1.0/24, ..."></div>
       <div class="form-group full"><label>Mạng phía client route về server</label><input type="text" name="remote_network" value="${(cso?.remote_network || []).join(',')}" placeholder="10.10.0.0/24, ..."></div>
@@ -4181,8 +4181,9 @@ function openAddOvpnUserForm() {
 
 function collectOvpnCsoPayload(form) {
   const fd = new FormData(form);
-  const payload = {};
-  if (fd.get('tunnel_network')) payload.tunnel_network = fd.get('tunnel_network');
+  // staticIp always included (even blank) so the edit form can clear an existing IP by emptying
+  // the field — the backend only treats it as "leave untouched" when the key is absent entirely.
+  const payload = { staticIp: fd.get('staticIp') || '' };
   const local = (fd.get('local_network') || '').split(',').map(s => s.trim()).filter(Boolean);
   if (local.length) payload.local_network = local;
   const remote = (fd.get('remote_network') || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -4196,9 +4197,10 @@ async function saveOvpnUser(e) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const cso = collectOvpnCsoPayload(e.target);
-  // block=false mặc định không có ý nghĩa tạo CSO nếu không field nào khác được điền — chỉ gửi cso
-  // khi có ít nhất 1 tùy chỉnh thật để tránh tạo CSO rỗng vô nghĩa.
-  const hasCsoData = Object.keys(cso).some(k => k !== 'block') || cso.block;
+  // staticIp/block are always present in the payload (see collectOvpnCsoPayload) so can't be used
+  // to detect "did the admin actually customize anything" — check the meaningful fields instead,
+  // to avoid creating a useless empty CSO for every brand-new user.
+  const hasCsoData = !!(cso.staticIp || cso.local_network || cso.remote_network || cso.dns_server1 || cso.block);
   const payload = {
     name: fd.get('name'), password: fd.get('password'), descr: fd.get('descr') || '',
     expires: isoToPfDate(fd.get('expires'))

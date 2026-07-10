@@ -58,6 +58,28 @@ async function resolveOpenvpnCso(fw, commonName) {
   return (res?.data || []).find(c => c.common_name === commonName) || null;
 }
 
+// This deployment's ~90 real CSOs force a client's VPN IP via a raw `ifconfig-push <ip> <mask>`
+// custom_options directive, NOT pfSense's native tunnel_network CSO field (confirmed empty on
+// every single existing CSO checked) — so static-IP read/write has to go through custom_options to
+// match what's actually configured, not the field that would be "correct" on a fresh install.
+const IFCONFIG_PUSH_RE = /^ifconfig-push\s+(\S+)\s+(\S+)/i;
+function extractStaticIp(cso) {
+  const opt = (cso?.custom_options || []).find(o => IFCONFIG_PUSH_RE.test(o));
+  return opt ? IFCONFIG_PUSH_RE.exec(opt)[1] : (cso?.tunnel_network || null);
+}
+
+// Merges a plain `staticIp` field (from our own form) into the custom_options array pfSense
+// actually stores it in — replacing any existing ifconfig-push line, preserving every other
+// custom option untouched. `existingOptions` should be the CSO's current custom_options if editing
+// one, or [] when creating fresh. Netmask is always 255.255.255.0 in every real example seen.
+function applyStaticIpToCsoPayload(payload, existingOptions = []) {
+  const { staticIp, ...rest } = payload;
+  if (staticIp === undefined) return rest;
+  const otherOptions = (existingOptions || []).filter(o => !IFCONFIG_PUSH_RE.test(o));
+  rest.custom_options = staticIp ? [`ifconfig-push ${staticIp} 255.255.255.0`, ...otherOptions] : otherOptions;
+  return rest;
+}
+
 // ── Kết nối pfSense — CRUD, Admin-only vì chạm mật khẩu hạ tầng ──
 
 // Read access open to any authenticated role (same convention as GET /vcenter/clusters) —
@@ -315,7 +337,7 @@ router.get('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manage
           expires: u.expires || null,
           hasCso: !!cso,
           csoBlocked: !!cso?.block,
-          staticIp: cso?.tunnel_network || null,
+          staticIp: extractStaticIp(cso),
           connected: !!conn,
           connectedSince: conn?.connectedSince || null,
           remoteHost: conn?.remoteHost || null
@@ -375,7 +397,7 @@ router.post('/firewalls/:id/openvpn/users', requirePermission('pfsense.vpn.manag
   let warning = null;
   if (cso && typeof cso === 'object' && Object.keys(cso).length) {
     try {
-      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...cso });
+      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...applyStaticIpToCsoPayload(cso, []) });
     } catch (e) {
       warning = `Đã tạo user "${name}" nhưng lưu cài đặt nâng cao thất bại: ${e.message} — có thể sửa lại sau ở nút "Cài đặt nâng cao".`;
     }
@@ -389,7 +411,7 @@ router.get('/firewalls/:id/openvpn/users/:name/cso', requirePermission('pfsense.
   const fw = await requireFirewall(req, res); if (!fw) return;
   try {
     const cso = await resolveOpenvpnCso(fw, req.params.name);
-    res.json(cso || null);
+    res.json(cso ? { ...cso, staticIp: extractStaticIp(cso) } : null);
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
@@ -400,10 +422,11 @@ router.put('/firewalls/:id/openvpn/users/:name/cso', requirePermission('pfsense.
   const name = req.params.name;
   try {
     const existing = await resolveOpenvpnCso(fw, name);
+    const payload = applyStaticIpToCsoPayload(req.body, existing?.custom_options || []);
     if (existing) {
-      await client.request(fw, 'PATCH', '/vpn/openvpn/cso', { id: existing.id, ...req.body });
+      await client.request(fw, 'PATCH', '/vpn/openvpn/cso', { id: existing.id, ...payload });
     } else {
-      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...req.body });
+      await client.request(fw, 'POST', '/vpn/openvpn/cso', { common_name: name, ...payload });
     }
     await logActivity(req.user, 'UPDATE', 'pfsense_openvpn_cso', fw.id, name);
     res.json({ message: 'Đã lưu cài đặt nâng cao' });
