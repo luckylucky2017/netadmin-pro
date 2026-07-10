@@ -71,22 +71,55 @@ router.get('/outbound/stats', async (req, res) => {
 
 // credentialId (not a free-text username) selects which saved account — from "Tài khoản kết nối" —
 // to connect with; ssh_user is kept as a denormalized display cache of the credential's username
-// (see routes/servers.js's resolveSshCredential for the same pattern).
-router.patch('/vms/:id/ssh-user', requirePermission('security.ssh_config'), async (req, res) => {
-  const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(req.params.id);
-  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
-  const credentialId = req.body?.credentialId || null;
+// (see routes/servers.js's resolveSshCredential for the same pattern). Shared by the single-VM
+// PATCH below and the bulk-save route, so both apply identical validation/logging.
+async function updateVmSshUser(vm, credentialId, sshPortRaw, user, bulkSuffix = '') {
   let sshUser = null;
   if (credentialId) {
     const cred = await db.prepare('SELECT username FROM ssh_credentials WHERE id = ?').get(credentialId);
-    if (!cred) return res.status(400).json({ error: 'Không tìm thấy tài khoản kết nối SSH' });
+    if (!cred) throw new Error('Không tìm thấy tài khoản kết nối SSH');
     sshUser = cred.username;
   }
-  const sshPortRaw = Number(req.body?.sshPort);
   const sshPort = sshPortRaw >= 1 && sshPortRaw <= 65535 ? sshPortRaw : null;
   await db.prepare('UPDATE vcenter_vms SET ssh_user = ?, ssh_credential_id = ?, ssh_port = ? WHERE id = ?').run(sshUser, credentialId, sshPort, vm.id);
-  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, sshUser ? `Bật giám sát SSH (user: ${sshUser}, port: ${sshPort || 22})` : 'Tắt giám sát SSH');
-  res.json({ message: 'OK' });
+  await logActivity(user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
+    (sshUser ? `Bật giám sát SSH (user: ${sshUser}, port: ${sshPort || 22})` : 'Tắt giám sát SSH') + bulkSuffix);
+}
+
+router.patch('/vms/:id/ssh-user', requirePermission('security.ssh_config'), async (req, res) => {
+  const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
+  try {
+    await updateVmSshUser(vm, req.body?.credentialId || null, Number(req.body?.sshPort), req.user);
+    res.json({ message: 'OK' });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Bulk equivalent of the route above — each item can carry its own credentialId/sshPort (VMs in
+// the same selection commonly need different accounts/ports), driven by the "Lưu đã chọn" bulk
+// toolbar on the "Quản lý VM giám sát" tab. One bad item (VM deleted mid-edit, bad credential id)
+// doesn't block the rest — same partial-success shape as /alerts/bulk-ack's count, plus a per-item
+// error list so the UI can say exactly which VMs failed and why.
+router.patch('/vms/bulk-ssh-user', requirePermission('security.ssh_config'), async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'Chưa chọn VM nào' });
+  let count = 0;
+  const errors = [];
+  for (const item of items) {
+    const id = Number(item?.id);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(id);
+    if (!vm) { errors.push(`VM #${id}: không tìm thấy`); continue; }
+    try {
+      await updateVmSshUser(vm, item.credentialId || null, Number(item.sshPort), req.user, ' (hàng loạt)');
+      count++;
+    } catch (e) {
+      errors.push(`${vm.name}: ${e.message}`);
+    }
+  }
+  res.json({ message: 'OK', count, errors });
 });
 
 async function getMonitoredVm(req, res) {

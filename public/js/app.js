@@ -2996,6 +2996,7 @@ function fail2banToggle(v) {
 
 let managePagination = newPagination();
 let manageSearchFilter = '';
+let selectedManageVmIds = new Set();
 
 function renderManageRows() {
   const wrap = document.getElementById('securityManageTableWrap');
@@ -3011,8 +3012,14 @@ function renderManageRows() {
   const sortedVms = applySort(filteredVms, manageSortState, (row, key) => row[key]);
   const vms = paginateRows(sortedVms, managePagination);
   const rowOffset = (managePagination.page - 1) * managePagination.pageSize;
+  // Chỉ VM eligible mới chọn/lưu được — checkbox "chọn tất cả" chỉ tính các dòng eligible trên
+  // trang hiện tại, khớp đúng những dòng có nút "Lưu" hoạt động.
+  const eligibleIdsOnPage = vms.filter(v => v.guest_family === 'LINUX' && v.ip_address).map(v => v.id);
+  const allOnPageSelected = eligibleIdsOnPage.length > 0 && eligibleIdsOnPage.every(id => selectedManageVmIds.has(id));
   wrap.innerHTML = `<table>
-        <thead><tr><th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}<th>Tài khoản kết nối</th>${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}${thSort('Fail2ban', 'fail2ban_status', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
+        <thead><tr>
+          <th style="width:32px"><input type="checkbox" id="manageSelectAll" data-permission="security.ssh_config" ${allOnPageSelected ? 'checked' : ''} onchange="toggleSelectAllManageVms(this.checked)" title="Chọn tất cả trong trang này"></th>
+          <th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}<th>Tài khoản kết nối</th>${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}${thSort('Fail2ban', 'fail2ban_status', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = v.guest_family === 'LINUX' && v.ip_address;
           // Chưa gán tài khoản nào -> gợi ý sẵn tài khoản mặc định (vd "dev") thay vì để trống, đỡ
@@ -3021,7 +3028,8 @@ function renderManageRows() {
           const defaultCredId = securityCredentialOptions.find(cr => cr.is_default)?.id;
           const preselectedId = v.ssh_credential_id || (eligible ? defaultCredId : null);
           const credOptions = securityCredentialOptions.map(cr => `<option value="${cr.id}" ${preselectedId === cr.id ? 'selected' : ''}>${cr.name} (${cr.username})</option>`).join('');
-          return `<tr>
+          return `<tr data-vm-id="${v.id}">
+            <td><input type="checkbox" class="manage-row-select" data-permission="security.ssh_config" ${eligible ? '' : 'disabled'} ${selectedManageVmIds.has(v.id) ? 'checked' : ''} onchange="toggleManageVmSelect(${v.id}, this.checked)"></td>
             <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
             <td style="font-weight:600">${v.name}</td>
             <td>${vcPowerBadge(v.power_state)}</td>
@@ -3037,6 +3045,78 @@ function renderManageRows() {
           </tr>`;
         }).join('')}</tbody>
       </table>${paginationBar(managePagination, sortedVms.length, 'managePagination', 'renderManageRows')}`;
+  applyPermissionVisibility();
+  updateManageBulkToolbar();
+}
+
+function toggleManageVmSelect(id, checked) {
+  if (checked) selectedManageVmIds.add(id); else selectedManageVmIds.delete(id);
+  const selectAllBox = document.getElementById('manageSelectAll');
+  if (selectAllBox) {
+    const onPageIds = [...document.querySelectorAll('.manage-row-select:not(:disabled)')].map(cb => Number(cb.closest('tr').dataset.vmId));
+    selectAllBox.checked = onPageIds.length > 0 && onPageIds.every(vid => selectedManageVmIds.has(vid));
+  }
+  updateManageBulkToolbar();
+}
+
+function toggleSelectAllManageVms(checked) {
+  document.querySelectorAll('.manage-row-select:not(:disabled)').forEach(cb => {
+    const id = Number(cb.closest('tr').dataset.vmId);
+    cb.checked = checked;
+    if (checked) selectedManageVmIds.add(id); else selectedManageVmIds.delete(id);
+  });
+  updateManageBulkToolbar();
+}
+
+function clearManageSelection() {
+  selectedManageVmIds.clear();
+  document.querySelectorAll('.manage-row-select').forEach(cb => { cb.checked = false; });
+  const selectAllBox = document.getElementById('manageSelectAll');
+  if (selectAllBox) selectAllBox.checked = false;
+  updateManageBulkToolbar();
+}
+
+function updateManageBulkToolbar() {
+  const toolbar = document.getElementById('manageBulkToolbar');
+  if (!toolbar) return;
+  const n = selectedManageVmIds.size;
+  toolbar.style.display = n ? 'flex' : 'none';
+  const countEl = document.getElementById('manageBulkCount');
+  if (countEl) countEl.textContent = `Đã chọn ${n} VM`;
+}
+
+// Đọc giá trị select/port ĐANG HIỂN THỊ cho các dòng thuộc trang hiện tại (kể cả vừa sửa, chưa
+// bấm "Lưu" riêng lẻ); những VM đã chọn nhưng đang ở trang khác (không có trong DOM lúc này) thì
+// lưu lại đúng giá trị đã biết trong securityState.vms — an toàn hơn là bỏ qua âm thầm.
+async function bulkSaveManageSelected() {
+  if (!selectedManageVmIds.size) return;
+  const items = [];
+  for (const id of selectedManageVmIds) {
+    const row = document.querySelector(`tr[data-vm-id="${id}"]`);
+    if (row) {
+      const credSelect = row.querySelector('.sec-ssh-cred');
+      const portInput = row.querySelector('.sec-ssh-port');
+      items.push({ id, credentialId: credSelect?.value || null, sshPort: Number(portInput?.value) || 22 });
+    } else {
+      const vm = securityState.vms.find(v => v.id === id);
+      if (vm) items.push({ id, credentialId: vm.ssh_credential_id || null, sshPort: vm.ssh_port || 22 });
+    }
+  }
+  const btn = document.getElementById('manageBulkSaveBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const result = await api('/security/vms/bulk-ssh-user', 'PATCH', { items });
+    if (result.errors?.length) {
+      toast(`Đã lưu ${result.count}/${items.length} VM — lỗi: ${result.errors.slice(0, 3).join('; ')}${result.errors.length > 3 ? '...' : ''}`, 'error');
+    } else {
+      toast(`Đã lưu ${result.count} VM`, 'success');
+    }
+    selectedManageVmIds.clear();
+    renderSecurity();
+  } catch (e) {
+    toast(e.message, 'error');
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function refreshManageVms() {
@@ -3101,6 +3181,11 @@ async function renderSecurityManage() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <input type="text" id="manageSearch" placeholder="Tìm theo tên VM, IP..." value="${manageSearchFilter}">
         </div>
+      </div>
+      <div id="manageBulkToolbar" style="display:none;align-items:center;gap:12px;background:var(--surface2);border-bottom:1px solid var(--border);padding:10px 16px">
+        <span style="font-size:13px;color:var(--fg-muted)" id="manageBulkCount"></span>
+        <button class="btn btn-primary btn-sm" id="manageBulkSaveBtn" data-permission="security.ssh_config" onclick="bulkSaveManageSelected()">Lưu đã chọn</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearManageSelection()" style="margin-left:auto">Bỏ chọn</button>
       </div>
       <div id="securityManageTableWrap"></div>
     </div>`;
