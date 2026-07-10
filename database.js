@@ -356,6 +356,39 @@ const SCHEMA_SQL = `
     INDEX idx_ssh_events_time (occurred_at)
   );
 
+  -- Suspicious nginx access-log hits detected by nginx-waf-collector.js (dò quét/DoS/DDoS) — only
+  -- flagged events are stored here, never every raw access.log line (far too high volume). blocked=1
+  -- means waf-manager.js actually banned src_ip via the netadmin-waf fail2ban jail at detection time.
+  CREATE TABLE IF NOT EXISTS waf_events (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    vm_name VARCHAR(255),
+    event_type VARCHAR(20) NOT NULL,
+    src_ip VARCHAR(64),
+    country VARCHAR(10),
+    is_foreign INT NOT NULL DEFAULT 0,
+    method VARCHAR(10),
+    path TEXT,
+    status_code INT,
+    user_agent TEXT,
+    hit_count INT,
+    blocked INT NOT NULL DEFAULT 0,
+    occurred_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_waf_events_vm_time (vm_id, occurred_at),
+    INDEX idx_waf_events_time (occurred_at)
+  );
+
+  -- Per-poll total request count per VM, used as the rolling baseline nginx-waf-collector.js compares
+  -- each new poll's total against to flag a distributed (DDoS) spike — short-lived, only the last
+  -- ~60 samples per VM are kept (pruned by the collector itself), not a long-term history table.
+  CREATE TABLE IF NOT EXISTS waf_traffic_stats (
+    vm_id INT NOT NULL,
+    sample_ts DATETIME NOT NULL,
+    request_count INT NOT NULL,
+    PRIMARY KEY (vm_id, sample_ts)
+  );
+
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
   -- per unique (vm, remote ip, remote port) currently open — not an ever-growing event log — with
   -- first_seen/last_seen tracking so stale (closed) connections can be pruned.
@@ -581,6 +614,22 @@ async function ensureSchemaAndMigrations() {
   // actual SSH connect() call sites (ssh-credentials.js) resolve key/password from the credential.
   try { await pool.query("ALTER TABLE servers ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN ssh_credential_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // WAF monitoring opt-in, per VM — mirrors the ssh_user/fail2ban_status triplet pattern exactly.
+  // waf_enabled gates whether nginx-waf-collector.js tails this VM's log at all; waf_auto_block is a
+  // separate opt-in (defaults off) for whether a detected attacker IP gets actually banned via the
+  // netadmin-waf fail2ban jail, or only raises an alert — see waf-manager.js/nginx-waf-collector.js.
+  const wafMigrations = [
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_enabled INT DEFAULT 0",
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_log_path VARCHAR(255) DEFAULT '/var/log/nginx/access.log'",
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_auto_block INT DEFAULT 0",
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_status VARCHAR(20)",
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_checked_at DATETIME",
+    "ALTER TABLE vcenter_vms ADD COLUMN waf_jail_error TEXT",
+  ];
+  for (const m of wafMigrations) {
+    try { await pool.query(m); } catch (e) { if (e.errno !== 1060) throw e; }
+  }
 
   // Interface + OpenVPN client bandwidth (in/out bps) — pfSense's API only exposes cumulative byte
   // counters, not a rate, so bps is derived from the delta against the previous poll's snapshot,

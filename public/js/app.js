@@ -394,6 +394,7 @@ document.getElementById('btnLogout').onclick = async () => {
 // Navigation
 function navigate(page) {
   if (page !== 'security' && securityRefreshTimer) { clearInterval(securityRefreshTimer); securityRefreshTimer = null; }
+  if (page !== 'waf' && wafRefreshTimer) { clearInterval(wafRefreshTimer); wafRefreshTimer = null; }
   if (page !== 'alerts' && alertsRefreshTimer) { clearInterval(alertsRefreshTimer); alertsRefreshTimer = null; }
   if (page !== 'vcenter' && vcenterRefreshTimer) { clearInterval(vcenterRefreshTimer); vcenterRefreshTimer = null; }
   if (page !== 'pfsense' && pfsenseRefreshTimer) { clearInterval(pfsenseRefreshTimer); pfsenseRefreshTimer = null; }
@@ -420,6 +421,7 @@ document.getElementById('globalSearch').addEventListener('input', (e) => {
     else if (currentPage === 'alerts') renderAlerts(e.target.value);
     else if (currentPage === 'vcenter') renderVcenter(e.target.value);
     else if (currentPage === 'security') renderSecurity(e.target.value);
+    else if (currentPage === 'waf') renderWaf(e.target.value);
   }, 300);
 });
 
@@ -438,7 +440,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -2158,6 +2160,11 @@ function vcPowerBadge(state) {
 
 function escAttr(s) { return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
 
+// Text-content escaping — needed specifically for WAF event fields (path/user-agent), which are
+// raw substrings of an incoming HTTP request an attacker fully controls (unlike VM names/IPs, which
+// come from trusted internal sources) before being interpolated into innerHTML.
+function escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
 const POWER_ACTION_LABEL = { start: 'bật nguồn', stop: 'tắt nguồn', reset: 'khởi động lại', suspend: 'tạm dừng' };
 
 async function vmPowerAction(id, action, name, btn) {
@@ -3207,6 +3214,361 @@ async function saveSecuritySshUser(id, btn) {
     toast(credentialId ? 'Đã bật giám sát SSH' : 'Đã tắt giám sát SSH', 'success');
     renderSecurity();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ─── WAF (Giám sát WAF) ─────────────────────────────────────────────────────
+let wafTab = 'events';
+const wafEventFilter = { vmId: '', eventType: '' };
+const wafState = { vms: [] };
+let wafRefreshMs = 5000;
+let wafRefreshTimer = null;
+
+async function renderWaf(search = '') {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    const [stats, vms] = await Promise.all([api('/waf/stats'), api('/waf/vms')]);
+    wafState.vms = vms;
+    if (search) wafTab = 'events';
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Giám sát WAF</div><div class="page-subtitle">Phát hiện dò quét/DoS/DDoS từ log nginx, kết hợp fail2ban để chặn sớm</div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="filter-select" id="wafRefreshSelect" onchange="onWafRefreshIntervalChange(this.value)">
+          <option value="0">Tự động: Tắt</option>
+          <option value="5000">Auto (5s)</option>
+          <option value="10000">10s</option>
+          <option value="15000">15s</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="renderWaf()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Làm mới
+        </button>
+      </div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></div>
+        <div class="stat-label">Dò quét (24h)</div>
+        <div class="stat-value yellow" id="wafStatScan">${stats.scan}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+        <div class="stat-label">DoS (24h)</div>
+        <div class="stat-value red" id="wafStatDos">${stats.dos}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+        <div class="stat-label">DDoS (24h)</div>
+        <div class="stat-value red" id="wafStatDdos">${stats.ddos}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></div>
+        <div class="stat-label">IP đã chặn (24h)</div>
+        <div class="stat-value green" id="wafStatBlocked">${stats.blocked}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg></div>
+        <div class="stat-label">VM đang giám sát</div>
+        <div class="stat-value blue" id="wafStatMonitored">${stats.monitored}</div>
+      </div>
+    </div>
+    <div class="filter-tabs" id="wafTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${wafTab === 'events' ? 'active' : ''}" data-tab="events" onclick="setWafTab('events')">Sự kiện</div>
+      <div class="filter-tab ${wafTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setWafTab('manage')">Quản lý giám sát</div>
+    </div>
+    <div id="wafTabBody"></div>`;
+    document.getElementById('wafRefreshSelect').value = String(wafRefreshMs);
+    onWafRefreshIntervalChange(wafRefreshMs);
+    renderWafTabBody(search);
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function onWafRefreshIntervalChange(val) {
+  wafRefreshMs = Number(val) || 0;
+  if (wafRefreshTimer) { clearInterval(wafRefreshTimer); wafRefreshTimer = null; }
+  if (wafRefreshMs > 0) wafRefreshTimer = setInterval(refreshWafData, wafRefreshMs);
+}
+
+async function refreshWafData() {
+  if (currentPage !== 'waf') { clearInterval(wafRefreshTimer); wafRefreshTimer = null; return; }
+  try {
+    const stats = await api('/waf/stats');
+    if (currentPage !== 'waf') return;
+    document.getElementById('wafStatScan').textContent = stats.scan;
+    document.getElementById('wafStatDos').textContent = stats.dos;
+    document.getElementById('wafStatDdos').textContent = stats.ddos;
+    document.getElementById('wafStatBlocked').textContent = stats.blocked;
+    document.getElementById('wafStatMonitored').textContent = stats.monitored;
+  } catch { /* transient — next tick retries */ }
+  if (currentPage !== 'waf') return;
+  if (wafTab === 'events') loadWafEvents();
+}
+
+function setWafTab(tab) {
+  wafTab = tab;
+  document.querySelectorAll('#wafTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderWafTabBody();
+}
+
+function renderWafTabBody(search = '') {
+  if (wafTab === 'manage') renderWafManage();
+  else renderWafEvents(search);
+}
+
+const WAF_EVENT_LABEL = { scan: 'Dò quét', dos: 'DoS', ddos: 'DDoS', manual_block: 'Chặn thủ công' };
+const WAF_EVENT_CLASS = { scan: 'warning', dos: 'critical', ddos: 'critical', manual_block: 'unknown' };
+
+function renderWafEvents(search = '') {
+  const monitoredVms = wafState.vms.filter(v => v.waf_enabled);
+  document.getElementById('wafTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="wafEventSearch" placeholder="Tìm theo VM, IP, đường dẫn..." value="${search}">
+        </div>
+        <select class="filter-select" id="wafEventVmFilter" onchange="applyWafEventFilter()">
+          <option value="">Tất cả VM</option>
+          ${monitoredVms.map(v => `<option value="${v.id}">${v.name}</option>`).join('')}
+        </select>
+        <select class="filter-select" id="wafEventTypeFilter" onchange="applyWafEventFilter()">
+          <option value="">Tất cả loại</option>
+          <option value="scan">Dò quét</option>
+          <option value="dos">DoS</option>
+          <option value="ddos">DDoS</option>
+          <option value="manual_block">Chặn thủ công</option>
+        </select>
+      </div>
+      <div id="wafEventsBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  document.getElementById('wafEventSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { wafEventPagination.page = 1; loadWafEvents(); }, 300);
+  });
+  loadWafEvents(search);
+}
+
+function applyWafEventFilter() {
+  wafEventFilter.vmId = document.getElementById('wafEventVmFilter')?.value || '';
+  wafEventFilter.eventType = document.getElementById('wafEventTypeFilter')?.value || '';
+  wafEventPagination.page = 1;
+  loadWafEvents();
+}
+
+let wafEventRows = [];
+let wafEventSortState = { key: null, dir: 'asc' };
+let wafEventPagination = newPagination();
+
+async function loadWafEvents(search) {
+  const s = search || document.getElementById('wafEventSearch')?.value || '';
+  const params = new URLSearchParams({ search: s, vmId: wafEventFilter.vmId, eventType: wafEventFilter.eventType });
+  try {
+    wafEventRows = await api(`/waf/events?${params}`);
+    if (!document.getElementById('wafEventsBody')) return;
+    renderWafEventRows();
+  } catch (e) {
+    const el = document.getElementById('wafEventsBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+function toggleWafEventSort(key) {
+  toggleSortState(wafEventSortState, key);
+  renderWafEventRows();
+}
+
+function renderWafEventRows() {
+  const body = document.getElementById('wafEventsBody');
+  if (!wafEventRows.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Chưa ghi nhận sự kiện WAF nào</h3><p>Bật giám sát cho VM ở tab "Quản lý giám sát"</p></div>`;
+    return;
+  }
+  const sortedEvents = applySort(wafEventRows, wafEventSortState, (row, key) => row[key]);
+  const events = paginateRows(sortedEvents, wafEventPagination);
+  const rowOffset = (wafEventPagination.page - 1) * wafEventPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Hành động</th></tr></thead>
+      <tbody>${events.map((ev, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(ev.occurred_at)}</span></td>
+          <td style="font-weight:600">${ev.vm_name || '—'}</td>
+          <td><span class="severity ${WAF_EVENT_CLASS[ev.event_type] || 'unknown'}"><span class="dot"></span>${WAF_EVENT_LABEL[ev.event_type] || ev.event_type}</span></td>
+          <td>${ev.src_ip ? `<span style="font-family:monospace">${escHtml(ev.src_ip)}</span>` : '<span style="color:var(--fg-dim)">— (phân tán)</span>'}</td>
+          <td>${ev.country || '—'}</td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${ev.path ? escAttr(ev.path) : ''}">${ev.path ? escHtml(ev.path).slice(0, 60) : '—'}</span></td>
+          <td>${ev.hit_count ?? '—'}</td>
+          <td>${ev.blocked ? '<span class="status online"><span class="dot"></span>Đã chặn</span>' : '<span class="status offline"><span class="dot"></span>Chỉ cảnh báo</span>'}</td>
+          <td>${!ev.blocked && ev.src_ip ? `<button class="btn-icon" data-permission="waf.block" title="Chặn IP này ngay" onclick="wafBlockIpFromEvent(${ev.vm_id}, '${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>` : ''}</td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(wafEventPagination, sortedEvents.length, 'wafEventPagination', 'renderWafEventRows')}`;
+  applyPermissionVisibility();
+}
+
+async function wafBlockIpFromEvent(vmId, ip, btn) {
+  if (!confirm(`Chặn IP ${ip} ngay qua fail2ban (jail WAF) trên VM này?`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/waf/vms/${vmId}/block-ip`, 'POST', { ip });
+    if (result.ok) { toast(`Đã chặn IP ${ip}`, 'success'); loadWafEvents(); }
+    else { toast(result.error || 'Không chặn được IP', 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+let wafManageSortState = { key: null, dir: 'asc' };
+function toggleWafManageSort(key) { toggleSortState(wafManageSortState, key); renderWafManageRows(); }
+let wafManagePagination = newPagination();
+let wafManageSearchFilter = '';
+
+const WAF_JAIL_LABEL = {
+  unknown: 'Chưa kiểm tra', not_installed: 'Chưa cài đặt', installed_not_running: 'Đã cài, chưa chạy',
+  installing: 'Đang cài đặt…', running: 'Đang chạy', error: 'Lỗi'
+};
+
+async function renderWafManage() {
+  document.getElementById('wafTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:8px">Chỉ VM đã có "Tài khoản kết nối" SSH (cấu hình ở trang Giám sát bất thường) mới bật giám sát WAF được. Nhập đường dẫn log nginx thật trên VM đó (mặc định /var/log/nginx/access.log), bấm Lưu để bắt đầu giám sát.</p>
+        <p style="margin-bottom:6px">access.log thường chỉ root/group adm đọc được — nếu không đọc được, cần thêm quyền sudo cho user kết nối (thay <code>USER</code> bằng username tài khoản kết nối):</p>
+        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/wc -l *, /usr/bin/tail -n +* *, /usr/bin/test -f *' | sudo tee /etc/sudoers.d/netadmin-waf-monitor</pre>
+        <p style="margin-bottom:6px">Cột <strong>Jail WAF</strong>: bấm "Cài đặt" để tự động cấu hình 1 jail fail2ban riêng dùng để chặn IP (việc PHÁT HIỆN dò quét/DoS/DDoS do hệ thống này tự làm, không phụ thuộc fail2ban). Cần quyền sudo:</p>
+        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client, /usr/bin/tee, /usr/bin/mkdir, /usr/bin/sed' | sudo tee /etc/sudoers.d/netadmin-waf-jail</pre>
+      </div>
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="wafManageSearch" placeholder="Tìm theo tên VM, IP..." value="${wafManageSearchFilter}">
+        </div>
+      </div>
+      <div id="wafManageTableWrap"></div>
+    </div>`;
+  document.getElementById('wafManageSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { wafManageSearchFilter = e.target.value; wafManagePagination.page = 1; renderWafManageRows(); }, 300);
+  });
+  renderWafManageRows();
+}
+
+function wafJailCell(v) {
+  const status = v.waf_jail_status || 'unknown';
+  const label = WAF_JAIL_LABEL[status] || status;
+  const cls = status === 'running' ? 'online' : (status === 'error' ? 'offline' : (status === 'installing' ? 'warning' : 'unknown'));
+  const title = status === 'error' && v.waf_jail_error ? escAttr(v.waf_jail_error) : '';
+  return `<div style="display:flex;flex-direction:column;gap:4px">
+    <span class="status ${cls}" title="${title}"><span class="dot"></span>${label}</span>
+    <div class="actions">
+      <button class="btn-icon" data-permission="waf.jail.check" title="Kiểm tra" onclick="wafJailAction(${v.id}, 'check', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+      ${status === 'running' || status === 'installed_not_running'
+        ? `<button class="btn-icon delete" data-permission="waf.jail.manage" title="Dừng jail" onclick="wafJailAction(${v.id}, 'stop', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg></button>`
+        : `<button class="btn-icon edit" data-permission="waf.jail.manage" title="Cài đặt jail" onclick="wafJailAction(${v.id}, 'install', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>`}
+    </div>
+  </div>`;
+}
+
+function renderWafManageRows() {
+  const wrap = document.getElementById('wafManageTableWrap');
+  if (!wrap) return;
+  const q = wafManageSearchFilter.trim().toLowerCase();
+  const filteredVms = q
+    ? wafState.vms.filter(v => (v.name || '').toLowerCase().includes(q) || (v.ip_address || '').toLowerCase().includes(q))
+    : wafState.vms;
+  if (!filteredVms.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không tìm thấy VM</h3><p>Thử đổi từ khóa tìm kiếm</p></div>`;
+    return;
+  }
+  const sortedVms = applySort(filteredVms, wafManageSortState, (row, key) => row[key]);
+  const vms = paginateRows(sortedVms, wafManagePagination);
+  const rowOffset = (wafManagePagination.page - 1) * wafManagePagination.pageSize;
+  wrap.innerHTML = `<table>
+        <thead><tr>
+          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}<th>Đường dẫn log</th><th>Bật giám sát</th><th>Tự động chặn</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
+        <tbody>${vms.map((v, i) => {
+          const eligible = !!(v.ssh_credential_id && v.ip_address);
+          return `<tr data-vm-id="${v.id}">
+            <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+            <td style="font-weight:600">${v.name}</td>
+            <td>${v.ip_address || '—'}</td>
+            <td><input type="text" class="waf-log-path" data-id="${v.id}" value="${escAttr(v.waf_log_path || '/var/log/nginx/access.log')}" style="min-width:220px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
+            <td><label class="toggle-switch" data-permission="waf.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}"><input type="checkbox" class="waf-enabled" data-id="${v.id}" ${v.waf_enabled ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
+            <td><label class="toggle-switch" data-permission="waf.manage" title="Tự động chặn IP khi phát hiện tấn công"><input type="checkbox" class="waf-auto-block" data-id="${v.id}" ${v.waf_auto_block ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
+            <td>${wafJailCell(v)}</td>
+            <td><div class="actions">
+              <button class="btn ${v.waf_enabled ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.waf_enabled ? 'Đã lưu — đang giám sát WAF' : 'Chưa lưu'}" data-permission="waf.manage" ${eligible ? '' : 'disabled'} onclick="saveWafConfig(${v.id}, this)">Lưu</button>
+              <button class="btn-icon" data-permission="waf.jail.check" title="Xem IP đang bị chặn" ${eligible ? '' : 'disabled'} onclick="openWafBannedIpsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></button>
+            </div></td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>${paginationBar(wafManagePagination, sortedVms.length, 'wafManagePagination', 'renderWafManageRows')}`;
+  applyPermissionVisibility();
+}
+
+async function saveWafConfig(id, btn) {
+  const enabledCb = document.querySelector(`.waf-enabled[data-id="${id}"]`);
+  const autoBlockCb = document.querySelector(`.waf-auto-block[data-id="${id}"]`);
+  const logPathInput = document.querySelector(`.waf-log-path[data-id="${id}"]`);
+  const enabled = !!enabledCb?.checked;
+  const autoBlock = !!autoBlockCb?.checked;
+  const logPath = logPathInput?.value.trim() || '/var/log/nginx/access.log';
+  btn.disabled = true;
+  try {
+    await api(`/waf/vms/${id}`, 'PATCH', { enabled, logPath, autoBlock });
+    toast(enabled ? 'Đã bật giám sát WAF' : 'Đã tắt giám sát WAF', 'success');
+    renderWaf();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function refreshWafManageVms() {
+  try { wafState.vms = await api('/waf/vms'); } catch { /* keep stale data, next manual retry will refetch */ }
+  renderWafManageRows();
+}
+
+async function wafJailAction(id, action, btn) {
+  const vm = wafState.vms.find(v => v.id === id);
+  if (!vm) return;
+  if (action === 'install' && !confirm(`Cài đặt jail WAF trên "${vm.name}"? Sẽ cài fail2ban nếu chưa có và cấu hình jail riêng để chặn IP theo yêu cầu.`)) return;
+  if (action === 'stop' && !confirm(`Dừng jail WAF trên "${vm.name}"? IP đang bị chặn qua jail này sẽ được gỡ khi jail dừng.`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/waf/vms/${id}/jail/${action}`, 'POST');
+    if (result.status === 'running') toast(`Jail WAF đang chạy trên "${vm.name}"`, 'success');
+    else if (result.status === 'installed_not_running') toast(`Đã dừng jail WAF trên "${vm.name}"`, 'success');
+    else if (result.status === 'not_installed') toast(`Jail WAF chưa được cài đặt trên "${vm.name}"`, 'error');
+    else toast(result.error || 'Thao tác thất bại', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { await refreshWafManageVms(); }
+}
+
+async function openWafBannedIpsModal(vmId) {
+  const vm = wafState.vms.find(v => v.id === vmId);
+  if (!vm) return;
+  openModal(`IP đang bị chặn — ${vm.name}`, `<div class="loading"><div class="spinner"></div></div>`);
+  try {
+    const result = await api(`/waf/vms/${vmId}/banned-ips`);
+    const body = document.getElementById('modalBody');
+    if (result.error) { body.innerHTML = `<div class="empty-state"><h3>Không lấy được danh sách</h3><p>${result.error}</p></div>`; return; }
+    if (!result.ips.length) { body.innerHTML = `<div class="empty-state"><h3>Không có IP nào đang bị chặn</h3></div>`; return; }
+    body.innerHTML = `<table>
+      <thead><tr><th>IP</th><th>Hành động</th></tr></thead>
+      <tbody>${result.ips.map(ip => `
+        <tr><td style="font-family:monospace">${escHtml(ip)}</td>
+        <td><button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromModal(${vmId}, '${escAttr(ip)}')">Gỡ chặn</button></td></tr>
+      `).join('')}</tbody>
+    </table>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+async function wafUnblockIpFromModal(vmId, ip) {
+  if (!confirm(`Gỡ chặn IP ${ip}?`)) return;
+  try {
+    const result = await api(`/waf/vms/${vmId}/unblock-ip`, 'POST', { ip });
+    if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); openWafBannedIpsModal(vmId); }
+    else toast(result.error || 'Không gỡ chặn được', 'error');
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 // ─── USERS (Người dùng, cần quyền users.manage) ────────────────────────────────

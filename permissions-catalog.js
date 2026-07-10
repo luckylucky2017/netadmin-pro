@@ -24,6 +24,10 @@ const PERMISSIONS = [
   { key: 'security.ssh_config', label: 'Bật/tắt giám sát SSH cho VM', group: 'Bảo mật' },
   { key: 'security.fail2ban.check', label: 'Kiểm tra trạng thái fail2ban', group: 'Bảo mật' },
   { key: 'security.fail2ban.manage', label: 'Bật/tắt (cài đặt) fail2ban', group: 'Bảo mật' },
+  { key: 'waf.manage', label: 'Bật/tắt giám sát WAF, cấu hình đường dẫn log & tự động chặn', group: 'Bảo mật' },
+  { key: 'waf.jail.check', label: 'Kiểm tra trạng thái jail WAF', group: 'Bảo mật' },
+  { key: 'waf.jail.manage', label: 'Cài đặt/dừng jail WAF', group: 'Bảo mật' },
+  { key: 'waf.block', label: 'Chặn/gỡ chặn IP thủ công (WAF)', group: 'Bảo mật' },
   { key: 'ping.write', label: 'Ping thủ công', group: 'Ping' },
   { key: 'users.manage', label: 'Quản lý người dùng', group: 'Quản trị' },
   { key: 'roles.manage', label: 'Quản lý vai trò', group: 'Quản trị' },
@@ -45,7 +49,7 @@ const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
 // migration, preserved here so the seeded Operator role has zero behavior change.
 const OPERATOR_EXCLUDED = new Set([
   'servers.delete', 'devices.delete', 'vcenter.vm.delete', 'rules.delete', 'alerts.delete',
-  'security.ssh_config', 'security.fail2ban.manage', 'users.manage', 'roles.manage',
+  'security.ssh_config', 'security.fail2ban.manage', 'waf.manage', 'waf.jail.manage', 'waf.block', 'users.manage', 'roles.manage',
   'servers.ipmi_config', 'monitors.delete', 'servers.snmp_config', 'devices.snmp_config',
   'vcenter.cluster.manage', 'ssh_credentials.manage', 'settings.manage',
   'pfsense.manage', 'pfsense.rules.delete', 'pfsense.vpn.manage',
