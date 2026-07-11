@@ -14,11 +14,17 @@
 #
 # maxretry/findtime are set absurdly high/tight on purpose, for the same reason — irrelevant to real
 # bans since this filter never matches.
+#
+# bantime = -1 (fail2ban's own syntax for "never expire") — a ban is permanent until an admin
+# explicitly unbans it or adds the IP to the WAF exceptions list (routes/waf.js's POST /exceptions
+# proactively unbans + fail2ban-collector.js/nginx-waf-collector.js reconcile it away automatically
+# too). Deliberate: fail2ban's own bantime expiry would otherwise silently let a real repeat
+# attacker back in after 1h with no admin action at all.
 [netadmin-waf]
 enabled = true
 filter = netadmin-waf
 logpath = /dev/null
 maxretry = 100000
 findtime = 1
-bantime = 3600
+bantime = -1
 action = %(action_)s

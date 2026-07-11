@@ -7,5 +7,12 @@
 #   sudo fail2ban-client reload --restart
 # (plain "reload" without --restart will NOT pick up a jail that wasn't already running — confirmed
 # on fail2ban 1.0.2.)
+#
+# bantime = -1 (fail2ban's own syntax for "never expire") — a brute-force ban is permanent until an
+# admin explicitly unbans it or adds the IP to the SSH exceptions list on "Giám sát bất thường" (see
+# database.js's ssh_ip_exceptions — a separate list from the WAF one). Without this override, sshd
+# falls back to fail2ban's own stock default bantime (10 minutes), which would silently let a real
+# repeat attacker back in with no admin action at all.
 [sshd]
 enabled = true
+bantime = -1
