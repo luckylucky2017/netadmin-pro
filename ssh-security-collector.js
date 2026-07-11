@@ -89,8 +89,12 @@ const upsertCursor = db.prepare(`
 `);
 
 const INITIAL_LOOKBACK_LINES = 200;
-const BRUTE_FORCE_WINDOW_SEC = 300;
-const BRUTE_FORCE_THRESHOLD = 10;
+// Retuned against real attack data: the original 10-in-300s missed a real distributed slow
+// brute-force (11 different IPs from the same /24, each pacing ~1 attempt/7-15min — always well
+// under any per-IP volume threshold, domestic or not). 5-in-60s now catches a genuinely fast
+// domestic burst; the foreign-IP rule below is what actually neutralizes the slow/distributed case.
+const BRUTE_FORCE_WINDOW_SEC = 60;
+const BRUTE_FORCE_THRESHOLD = 5;
 
 async function raiseForeignLoginAlert(vm, parsed, country) {
   await db.prepare(`
@@ -120,53 +124,62 @@ async function tryImmediateBan(ssh, ip) {
   }
 }
 
+// Two independent triggers, unioned in one query: (a) the usual volume threshold — cnt >=
+// BRUTE_FORCE_THRESHOLD within BRUTE_FORCE_WINDOW_SEC, catches a fast domestic burst; (b) ANY
+// failed attempt at all from a foreign (non-VN) IP — zero tolerance, no threshold, since a
+// legitimate failed login (a typo) is overwhelmingly domestic, and this is what actually catches a
+// slow/distributed attacker that paces each IP under the volume threshold (see constants above).
+// MAX(is_foreign)/MAX(country) is safe per-src_ip: is_foreign is a deterministic function of the IP
+// (classifyIp), never mixed within one GROUP BY src_ip bucket.
 async function checkBruteForce(vm, ssh) {
-  const bursts = await db.prepare(`
-    SELECT src_ip, COUNT(*) as cnt
+  const suspects = await db.prepare(`
+    SELECT src_ip, COUNT(*) as cnt, MAX(is_foreign) as is_foreign, MAX(country) as country
     FROM ssh_login_events
     WHERE source_type = 'vm' AND source_id = ? AND event_type = 'failed'
       AND occurred_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)
     GROUP BY src_ip
-    HAVING cnt >= ?
+    HAVING cnt >= ? OR MAX(is_foreign) = 1
   `).all(vm.id, BRUTE_FORCE_WINDOW_SEC, BRUTE_FORCE_THRESHOLD);
-  if (!bursts.length) return;
+  if (!suspects.length) return;
 
   const exceptions = await fail2banManager.getExceptions();
 
-  for (const b of bursts) {
+  for (const b of suspects) {
     // Excepted (ssh_ip_exceptions — separate from the WAF one, see database.js) — treat as fully
     // trusted, not just "not blocked": no ban attempt, and no standing alert either, since repeated
     // failed logins from a known-good source (e.g. a misconfigured internal service retrying) isn't
     // a real brute-force signal worth surfacing.
     if (fail2banManager.isExceptedIp(b.src_ip, exceptions)) continue;
 
-    const { country } = classifyIp(b.src_ip);
+    const isForeign = !!b.is_foreign;
     const blocked = await tryImmediateBan(ssh, b.src_ip);
 
     // Successfully blocked: don't raise a separate ssh_bruteforce alert — fail2ban-collector.js's
     // own reconciliation already raises (and correctly opens/resolves) a "fail2ban đã chặn IP"
     // alert for this exact IP, which is the more accurate signal ("blocked", with a real lifecycle)
     // than re-announcing the same detection on a timer. This is also what stops the flood: without
-    // it, a multi-hour attack re-alerted every 5 minutes per IP, burying the block alerts under
-    // hundreds of duplicates.
+    // it, a multi-hour attack re-alerted every check, burying the block alerts under hundreds of
+    // duplicates.
     if (blocked) continue;
 
     // Not blocked (fail2ban absent/not permitted here) — this is the one case that still needs a
     // standing alert, since nothing else will surface it. Kept open indefinitely instead of
-    // re-alerting every 5 min; a human acknowledging/resolving it lets it re-fire if attacks resume.
+    // re-alerting every check; a human acknowledging/resolving it lets it re-fire if attacks resume.
     const already = await db.prepare(`
       SELECT id FROM alerts
       WHERE category = 'security' AND metric = 'ssh_bruteforce' AND source_type = 'vcenter_vm' AND source_id = ?
         AND metric_value = ? AND status = 'open'
     `).get(vm.id, b.src_ip);
     if (already) continue;
+    const reason = isForeign
+      ? `Đăng nhập SSH thất bại từ IP nước ngoài${b.country ? ` (${b.country})` : ''} — chặn ngay không cần chờ đủ ngưỡng`
+      : `${b.cnt} lần đăng nhập thất bại trong ${Math.round(BRUTE_FORCE_WINDOW_SEC / 60)} phút qua`;
     await db.prepare(`
       INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
       VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, 'ssh_bruteforce', ?, 'open')
     `).run(
       'Nghi ngờ tấn công brute-force SSH',
-      `${b.cnt} lần đăng nhập thất bại từ ${b.src_ip}${country ? ` (${country})` : ''} trong ${Math.round(BRUTE_FORCE_WINDOW_SEC / 60)} phút qua vào VM "${vm.name}"` +
-        ' — CHƯA chặn được (fail2ban không sẵn có hoặc chưa cấp quyền sudo trên VM này)',
+      `${reason} từ ${b.src_ip} vào VM "${vm.name}" — CHƯA chặn được (fail2ban không sẵn có hoặc chưa cấp quyền sudo trên VM này)`,
       vm.id, vm.name, b.src_ip
     );
   }
