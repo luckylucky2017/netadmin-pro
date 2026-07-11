@@ -119,16 +119,31 @@ if (!process.env.SESSION_SECRET) {
     console.log('Metrics: SSH collector (server có ssh_user) + simulator (server chưa cấu hình SSH) + alert rule engine đang chạy');
   });
 
-  require('./metrics-simulator').start();
-  require('./ssh-collector').start();
-  require('./vcenter-collector').start();
-  require('./ssh-security-collector').start();
-  require('./outbound-connection-collector').start();
-  require('./fail2ban-collector').start();
-  require('./alert-engine').start();
-  require('./ipmi-collector').start();
-  require('./uptime-collector').start();
-  require('./snmp-collector').start();
-  require('./pfsense-collector').start();
-  require('./nginx-waf-collector').start();
+  // DISABLE_BACKGROUND_COLLECTORS: set to 'true' in a machine's own .env (never committed — see
+  // .gitignore) to stop this instance's periodic polling/auto-block loops. Meant for a local dev
+  // instance pointed at the SAME real infrastructure a prod instance also manages — every one of
+  // these collectors opens real SSH connections to real VMs, and 3 of them (ssh-security-collector,
+  // fail2ban-collector, nginx-waf-collector) actively call fail2ban-client banip/unbanip/reload —
+  // running both instances' collectors unattended in parallel means two independent processes
+  // deciding to mutate the same real fail2ban jails, based on two different (local vs prod)
+  // databases' worth of exceptions/state, which can race or disagree. Manually invoking a specific
+  // collector's collectVm()/collectAll() from a one-off script still works regardless of this flag —
+  // it only gates the automatic setInterval loop below, so on-demand testing of a single VM is
+  // unaffected.
+  if (process.env.DISABLE_BACKGROUND_COLLECTORS !== 'true') {
+    require('./metrics-simulator').start();
+    require('./ssh-collector').start();
+    require('./vcenter-collector').start();
+    require('./ssh-security-collector').start();
+    require('./outbound-connection-collector').start();
+    require('./fail2ban-collector').start();
+    require('./alert-engine').start();
+    require('./ipmi-collector').start();
+    require('./uptime-collector').start();
+    require('./snmp-collector').start();
+    require('./pfsense-collector').start();
+    require('./nginx-waf-collector').start();
+  } else {
+    console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');
+  }
 })();
