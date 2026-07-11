@@ -2715,6 +2715,8 @@ async function renderSecurity(search = '') {
     <div class="filter-tabs" id="securityTabs" style="margin-bottom:16px">
       <div class="filter-tab ${securityTab === 'events' ? 'active' : ''}" data-tab="events" onclick="setSecurityTab('events')">Nhật ký đăng nhập SSH</div>
       <div class="filter-tab ${securityTab === 'outbound' ? 'active' : ''}" data-tab="outbound" onclick="setSecurityTab('outbound')">Kết nối ra ngoài</div>
+      <div class="filter-tab ${securityTab === 'banned' ? 'active' : ''}" data-tab="banned" onclick="setSecurityTab('banned')">IP đang bị chặn</div>
+      <div class="filter-tab ${securityTab === 'exceptions' ? 'active' : ''}" data-tab="exceptions" onclick="setSecurityTab('exceptions')">Ngoại lệ IP</div>
       <div class="filter-tab ${securityTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setSecurityTab('manage')">Quản lý VM giám sát</div>
     </div>
     <div id="securityTabBody"></div>`;
@@ -2749,6 +2751,7 @@ async function refreshSecurityData() {
   if (currentPage !== 'security') return;
   if (securityTab === 'events') loadSecurityEvents();
   else if (securityTab === 'outbound') loadOutboundConnections();
+  else if (securityTab === 'banned') loadSecurityBanned();
 }
 
 function setSecurityTab(tab) {
@@ -2760,6 +2763,8 @@ function setSecurityTab(tab) {
 function renderSecurityTabBody(search = '') {
   if (securityTab === 'manage') renderSecurityManage();
   else if (securityTab === 'outbound') renderSecurityOutbound(search);
+  else if (securityTab === 'banned') renderSecurityBanned(search);
+  else if (securityTab === 'exceptions') renderSecurityExceptions();
   else renderSecurityEvents(search);
 }
 
@@ -3173,6 +3178,186 @@ async function handleFail2banToggle(e, id) {
   }
 }
 
+// ── "IP đang bị chặn" tab (sshd jail) — mirrors the WAF page's equivalent (public/js/app.js's
+// loadWafBanned/renderWafBannedRows) but sourced from GET /security/banned-ips (ssh_banned_ips,
+// synced by fail2ban-collector.js) instead of the WAF collector's table.
+let securityBannedRows = [];
+let securityBannedSortState = { key: null, dir: 'asc' };
+let securityBannedPagination = newPagination();
+
+function renderSecurityBanned(search = '') {
+  document.getElementById('securityTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:0">Danh sách IP hiện đang bị jail sshd chặn trên từng VM (chống brute-force SSH) — đồng bộ mỗi lượt quét (~45s). Fail2ban tự động gỡ chặn sau khi hết bantime kể cả không thao tác gì — bảng này phản ánh đúng trạng thái đó, không phải danh sách chặn vĩnh viễn.</p>
+      </div>
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="securityBannedSearch" placeholder="Tìm theo VM, IP..." value="${search}">
+        </div>
+      </div>
+      <div id="securityBannedBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  document.getElementById('securityBannedSearch').addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { securityBannedPagination.page = 1; loadSecurityBanned(); }, 300);
+  });
+  loadSecurityBanned(search);
+}
+
+async function loadSecurityBanned(search) {
+  const s = search ?? document.getElementById('securityBannedSearch')?.value ?? '';
+  try {
+    const [rows, exceptions] = await Promise.all([api('/security/banned-ips'), api('/security/exceptions')]);
+    // Đang bị chặn nhưng đồng thời khớp 1 ngoại lệ SSH — có thể do ngoại lệ dạng CIDR được thêm SAU
+    // khi IP cụ thể đó đã bị chặn (xem fail2ban-collector.js's reconcileSshExceptions, tự gỡ ở lượt
+    // quét kế tiếp). Không tự gỡ ở đây — chỉ cảnh báo để admin chủ động bấm "Gỡ chặn" ngay.
+    rows.forEach(r => { r.exceptionConflict = exceptions.some(e => clientMatchesException(r.ip, e.ip)); });
+    const q = s.trim().toLowerCase();
+    securityBannedRows = q ? rows.filter(r => (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q)) : rows;
+    if (!document.getElementById('securityBannedBody')) return;
+    renderSecurityBannedRows();
+  } catch (e) {
+    const el = document.getElementById('securityBannedBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+function toggleSecurityBannedSort(key) {
+  toggleSortState(securityBannedSortState, key);
+  renderSecurityBannedRows();
+}
+
+function renderSecurityBannedRows() {
+  const body = document.getElementById('securityBannedBody');
+  if (!securityBannedRows.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg><h3>Hiện không có IP nào bị chặn</h3><p>Sẽ hiện tại đây khi fail2ban tự động chặn (hoặc bạn chặn thủ công) 1 IP</p></div>`;
+    return;
+  }
+  const sortedRows = applySort(securityBannedRows, securityBannedSortState, (row, key) => row[key]);
+  const rows = paginateRows(sortedRows, securityBannedPagination);
+  const rowOffset = (securityBannedPagination.page - 1) * securityBannedPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('IP', 'ip', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Quốc gia', 'country', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Số lần thất bại', 'event_count', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Username đã thử</th>${thSort('Lần đầu chặn', 'first_seen', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Còn chặn tới', 'last_seen', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Hành động</th></tr></thead>
+      <tbody>${rows.map((r, i) => {
+        const usernames = r.usernames ? r.usernames.split('|||').filter(Boolean) : [];
+        const usernamesPreview = usernames.length ? escHtml(usernames[0]) + (usernames.length > 1 ? ` (+${usernames.length - 1} khác)` : '') : '—';
+        const usernamesTitle = usernames.length ? usernames.map(escAttr).join('\n') : '';
+        return `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td style="font-weight:600">${r.vm_name || '—'}</td>
+          <td><span style="font-family:monospace">${escHtml(r.ip)}</span>${r.exceptionConflict ? ` <span class="status warning" style="display:inline-flex" title="IP này đang khớp 1 mục trong danh sách Ngoại lệ IP nhưng vẫn còn bị chặn trên VM — bấm &quot;Gỡ chặn&quot; để xử lý thủ công"><span class="dot"></span>Trong ngoại lệ</span>` : ''}</td>
+          <td>${r.country || '—'}</td>
+          <td>${r.event_count != null ? `${r.event_count} lần thất bại` : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${usernamesTitle}">${usernamesPreview}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.first_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần cuối xác nhận vẫn còn bị chặn">${formatTime(r.last_seen)}</span></td>
+          <td><div class="actions">
+            <button class="btn btn-secondary btn-sm" data-permission="security.block" onclick="securityUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
+            <button class="btn btn-secondary btn-sm" data-permission="security.block" title="Gỡ chặn và không bao giờ chặn IP này nữa" onclick="securityAddExceptionFromBanned('${escAttr(r.ip)}', this)">+ Ngoại lệ</button>
+          </div></td>
+        </tr>`;
+      }).join('')}
+      </tbody></table>${paginationBar(securityBannedPagination, sortedRows.length, 'securityBannedPagination', 'renderSecurityBannedRows')}`;
+  applyPermissionVisibility();
+}
+
+async function securityUnblockIpFromBannedTab(vmId, ip, btn) {
+  if (!confirm(`Gỡ chặn IP ${ip}?`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/security/vms/${vmId}/unblock-ip`, 'POST', { ip });
+    if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); loadSecurityBanned(); }
+    else { toast(result.error || 'Không gỡ chặn được', 'error'); btn.disabled = false; }
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// "Mở chặn thủ công + thêm ngoại lệ" — 1 nút thay vì phải gỡ chặn rồi qua tab Ngoại lệ IP thêm lại
+// thủ công, mirrors wafAddExceptionFromBanned. POST /security/exceptions đã tự gỡ chặn trên mọi VM
+// đang chạy fail2ban, nên chỉ cần gọi đúng 1 API này.
+async function securityAddExceptionFromBanned(ip, btn) {
+  if (!confirm(`Thêm ${ip} vào danh sách ngoại lệ SSH? IP sẽ được gỡ chặn ngay và không bao giờ bị chặn brute-force SSH lại (trên mọi VM).`)) return;
+  btn.disabled = true;
+  try {
+    await api('/security/exceptions', 'POST', { ip, note: 'Thêm từ tab IP đang bị chặn' });
+    toast(`Đã thêm ${ip} vào ngoại lệ và gỡ chặn`, 'success');
+    loadSecurityBanned();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ── "Ngoại lệ IP" tab — mirrors the WAF page's equivalent (renderWafExceptions/loadWafExceptions/
+// addWafException/deleteWafException) but against ssh_ip_exceptions, a list SEPARATE from the WAF
+// one by design (see database.js's comment on ssh_ip_exceptions for why).
+async function renderSecurityExceptions() {
+  document.getElementById('securityTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:0">Danh sách IP/dải mạng KHÔNG BAO GIỜ bị chặn bởi jail sshd (chống brute-force SSH) — riêng biệt với danh sách ngoại lệ ở trang Giám sát WAF. Thêm 1 IP đang bị chặn vào đây sẽ tự động gỡ chặn ngay trên các VM đang chạy fail2ban. Dùng dạng <code>203.0.113.5</code> (1 IP) hoặc <code>203.0.113.0/24</code> (dải mạng, chỉ hỗ trợ IPv4).</p>
+      </div>
+      <div class="table-toolbar" style="gap:8px" data-permission="security.block">
+        <input type="text" id="securityExceptionIpInput" placeholder="IP hoặc CIDR, vd 203.0.113.5" style="flex:1;max-width:240px">
+        <input type="text" id="securityExceptionNoteInput" placeholder="Ghi chú (vd: IP văn phòng)" style="flex:1;max-width:280px">
+        <button class="btn btn-primary btn-sm" onclick="addSecurityException()">Thêm ngoại lệ</button>
+      </div>
+      <div id="securityExceptionsTableWrap"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  applyPermissionVisibility();
+  loadSecurityExceptions();
+}
+
+async function loadSecurityExceptions() {
+  const wrap = document.getElementById('securityExceptionsTableWrap');
+  try {
+    const rows = await api('/security/exceptions');
+    if (!wrap) return;
+    if (!rows.length) {
+      wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg><h3>Chưa có ngoại lệ nào</h3><p>Thêm IP/CIDR tin cậy để không bao giờ bị chặn brute-force SSH nhầm</p></div>`;
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr><th>IP / CIDR</th><th>Ghi chú</th><th>Người thêm</th><th>Ngày thêm</th><th>Hành động</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
+          <td>${r.note ? escHtml(r.note) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${r.created_by ? escHtml(r.created_by) : '—'}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+          <td><button class="btn-icon delete" data-permission="security.block" title="Xóa ngoại lệ" onclick="deleteSecurityException(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+async function addSecurityException() {
+  const ipInput = document.getElementById('securityExceptionIpInput');
+  const noteInput = document.getElementById('securityExceptionNoteInput');
+  const ip = ipInput.value.trim();
+  const note = noteInput.value.trim();
+  if (!ip) { toast('Nhập IP hoặc CIDR', 'error'); return; }
+  try {
+    await api('/security/exceptions', 'POST', { ip, note });
+    toast(`Đã thêm ngoại lệ ${ip}`, 'success');
+    ipInput.value = '';
+    noteInput.value = '';
+    loadSecurityExceptions();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function deleteSecurityException(id, ip) {
+  if (!confirm(`Xóa ngoại lệ ${ip}? IP này sẽ có thể bị chặn brute-force SSH lại nếu vượt ngưỡng.`)) return;
+  try {
+    await api(`/security/exceptions/${id}`, 'DELETE');
+    toast(`Đã xóa ngoại lệ ${ip}`, 'success');
+    loadSecurityExceptions();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 let securityCredentialOptions = [];
 
 async function renderSecurityManage() {
@@ -3497,20 +3682,22 @@ function renderWafBanned(search = '') {
   loadWafBanned(search);
 }
 
-// Mirrors waf-manager.js's matchesException (CIDR-aware for IPv4, exact-match otherwise) — kept in
-// sync deliberately since this is a client-side display check, not a security boundary; the real
-// enforcement is server-side in banIp().
-function wafIpv4ToInt(ip) {
+// Mirrors ip-exceptions.js's matchesException (CIDR-aware for IPv4, exact-match otherwise) — kept
+// in sync deliberately since this is a client-side display check, not a security boundary; the real
+// enforcement is server-side in waf-manager.js's/fail2ban-manager.js's own banIp(). Generic — used
+// by both the WAF page's and the Security page's "IP đang bị chặn" tabs, each against its own
+// (separate) exceptions list.
+function clientIpv4ToInt(ip) {
   const parts = (ip || '').split('.').map(Number);
   if (parts.length !== 4 || parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) return null;
   return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
 }
-function wafMatchesException(ip, entryIp) {
+function clientMatchesException(ip, entryIp) {
   if (!ip || !entryIp) return false;
   const cidrM = /^(.+)\/(\d{1,2})$/.exec(entryIp);
   if (cidrM) {
     const prefixLen = Number(cidrM[2]);
-    const a = wafIpv4ToInt(ip), b = wafIpv4ToInt(cidrM[1]);
+    const a = clientIpv4ToInt(ip), b = clientIpv4ToInt(cidrM[1]);
     if (a === null || b === null || prefixLen < 0 || prefixLen > 32) return false;
     const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
     return (a & mask) === (b & mask);
@@ -3526,7 +3713,7 @@ async function loadWafBanned(search) {
     // (CIDR mới thêm không tự động rà lại IP cụ thể đã bị chặn trước đó trong dải đó — proactive
     // unban ở POST /exceptions chỉ gỡ đúng chuỗi IP/CIDR vừa nhập). Không tự gỡ ở đây — chỉ cảnh báo
     // để admin chủ động bấm "Gỡ chặn".
-    rows.forEach(r => { r.exceptionConflict = exceptions.some(e => wafMatchesException(r.ip, e.ip)); });
+    rows.forEach(r => { r.exceptionConflict = exceptions.some(e => clientMatchesException(r.ip, e.ip)); });
     const q = s.trim().toLowerCase();
     wafBannedRows = q ? rows.filter(r => (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q)) : rows;
     if (!document.getElementById('wafBannedBody')) return;

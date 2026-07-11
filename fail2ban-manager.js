@@ -247,4 +247,73 @@ async function stopFail2ban(vm, user = null) {
   }
 }
 
-module.exports = { checkStatus, installFail2ban, stopFail2ban, SUDOERS_HINT };
+// ── Manual ban/unban + exceptions for the sshd jail — mirrors waf-manager.js's equivalents exactly,
+// but against the stock 'sshd' jail instead of a dedicated one, and against ssh_ip_exceptions (a
+// deliberately separate list from waf_ip_exceptions — see database.js's comment on that table).
+const SSHD_JAIL_NAME = 'sshd';
+const { SAFE_IP_RE, matchesException, isExceptedIp } = require('./ip-exceptions');
+
+async function getExceptions() {
+  return db.prepare('SELECT id, ip, note FROM ssh_ip_exceptions').all();
+}
+
+async function banIp(vm, ip) {
+  if (!SAFE_IP_RE.test(ip || '')) return { ok: false, error: `Địa chỉ IP không hợp lệ: "${ip}"` };
+  const exceptions = await getExceptions();
+  if (isExceptedIp(ip, exceptions)) {
+    return { ok: false, excepted: true, error: 'IP nằm trong danh sách ngoại lệ — không bị chặn' };
+  }
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    const status = await ssh.execCommand(`sudo -n fail2ban-client status ${SSHD_JAIL_NAME} 2>&1`);
+    if (!/Status for the jail/i.test(status.stdout)) return { ok: false, error: 'Jail sshd chưa được cài đặt trên VM này' };
+    const result = await ssh.execCommand(`sudo -n fail2ban-client set ${SSHD_JAIL_NAME} banip ${ip} 2>&1`);
+    const ok = result.stdout.trim() === '1' || /already banned/i.test(result.stdout);
+    return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không chặn được IP').slice(0, 300) };
+  } catch (e) {
+    return { ok: false, error: `Không kết nối được SSH: ${e.message}` };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
+}
+
+// Reuses an already-open SSH session — mirrors waf-manager.js's unbanIpViaSsh, used by
+// fail2ban-collector.js's per-poll exception reconciliation.
+async function unbanIpViaSsh(ssh, ip) {
+  if (!SAFE_IP_RE.test(ip || '')) return { ok: false, error: `Địa chỉ IP không hợp lệ: "${ip}"` };
+  const result = await ssh.execCommand(`sudo -n fail2ban-client set ${SSHD_JAIL_NAME} unbanip ${ip} 2>&1`);
+  const ok = result.stdout.trim() === '1';
+  return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không gỡ chặn được IP').slice(0, 300) };
+}
+
+async function unbanIp(vm, ip) {
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    return await unbanIpViaSsh(ssh, ip);
+  } catch (e) {
+    return { ok: false, error: `Không kết nối được SSH: ${e.message}` };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
+}
+
+async function listBannedIps(vm) {
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    const result = await ssh.execCommand(`sudo -n fail2ban-client status ${SSHD_JAIL_NAME} 2>&1`);
+    return wafManager.parseBannedIpsOutput(result.stdout);
+  } catch (e) {
+    return { ips: [], error: `Không kết nối được SSH: ${e.message}` };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
+}
+
+module.exports = {
+  checkStatus, installFail2ban, stopFail2ban, SUDOERS_HINT,
+  SSHD_JAIL_NAME, banIp, unbanIp, unbanIpViaSsh, listBannedIps,
+  matchesException, isExceptedIp, getExceptions,
+};

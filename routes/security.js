@@ -164,4 +164,102 @@ router.post('/vms/:id/fail2ban/stop', requirePermission('security.fail2ban.manag
   res.json(result);
 });
 
+// ── "IP đang bị chặn" (sshd jail) — mirrors routes/waf.js's GET /banned-ips: pure DB read (no live
+// SSH), so ungated beyond requireAuth like every other GET in this file — see database.js's comment
+// on why Viewer gets zero permission rows and relies on GETs staying open.
+// "why blocked" context (event_count, usernames) is aggregated across every ssh_login_events row
+// ever recorded for that (vm, ip) with event_type='failed' — not just the burst that triggered the
+// ban — so the full pattern is visible, not just the latest attempt.
+router.get('/banned-ips', async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
+           agg.country, agg.event_count, agg.usernames
+    FROM ssh_banned_ips b
+    JOIN vcenter_vms v ON v.id = b.vm_id
+    LEFT JOIN (
+      SELECT source_id AS vm_id, src_ip,
+        SUBSTRING_INDEX(GROUP_CONCAT(country ORDER BY occurred_at DESC SEPARATOR ','), ',', 1) AS country,
+        COUNT(*) AS event_count,
+        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT username ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS usernames
+      FROM ssh_login_events
+      WHERE source_type = 'vm' AND event_type = 'failed'
+      GROUP BY source_id, src_ip
+    ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
+    ORDER BY b.last_seen DESC
+  `).all();
+  res.json(rows);
+});
+
+router.post('/vms/:id/block-ip', requirePermission('security.block'), async (req, res) => {
+  const vm = await getMonitoredVm(req, res);
+  if (!vm) return;
+  const ip = String(req.body?.ip || '').trim();
+  if (!ip) return res.status(400).json({ error: 'Thiếu địa chỉ IP' });
+  const result = await fail2banManager.banIp(vm, ip);
+  if (result.ok) await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Chặn thủ công IP ${ip} qua jail sshd`);
+  res.json(result);
+});
+
+router.post('/vms/:id/unblock-ip', requirePermission('security.block'), async (req, res) => {
+  const vm = await getMonitoredVm(req, res);
+  if (!vm) return;
+  const ip = String(req.body?.ip || '').trim();
+  if (!ip) return res.status(400).json({ error: 'Thiếu địa chỉ IP' });
+  const result = await fail2banManager.unbanIp(vm, ip);
+  if (result.ok) await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Gỡ chặn IP ${ip} khỏi jail sshd`);
+  res.json(result);
+});
+
+// ── SSH IP exceptions — a list SEPARATE from waf_ip_exceptions (see database.js's comment on that
+// table for why), checked by fail2ban-manager.js's banIp() before every sshd-jail ban attempt.
+function isValidExceptionIp(value) {
+  const cidrM = /^(.+)\/(\d{1,3})$/.exec(value);
+  const base = cidrM ? cidrM[1] : value;
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(base)) {
+    if (!base.split('.').every(o => Number(o) <= 255)) return false;
+    if (cidrM && (Number(cidrM[2]) < 0 || Number(cidrM[2]) > 32)) return false;
+    return true;
+  }
+  // Bare IPv6 only — no CIDR support for v6 (matchesException treats it as exact-match anyway).
+  if (!cidrM && /^[0-9a-fA-F:]+$/.test(value) && value.includes(':')) return true;
+  return false;
+}
+
+router.get('/exceptions', async (req, res) => {
+  res.json(await db.prepare('SELECT * FROM ssh_ip_exceptions ORDER BY created_at DESC').all());
+});
+
+router.post('/exceptions', requirePermission('security.block'), async (req, res) => {
+  const ip = String(req.body?.ip || '').trim();
+  const note = String(req.body?.note || '').trim().slice(0, 255) || null;
+  if (!isValidExceptionIp(ip)) {
+    return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
+  }
+  try {
+    await db.prepare('INSERT INTO ssh_ip_exceptions (ip, note, created_by) VALUES (?, ?, ?)').run(ip, note, req.user.name || req.user.email);
+  } catch (e) {
+    if (e.errno === 1062) return res.status(400).json({ error: 'IP/CIDR này đã có trong danh sách ngoại lệ' });
+    throw e;
+  }
+  await logActivity(req.user, 'CREATE', 'ssh_ip_exception', null, ip, `Thêm ngoại lệ IP SSH: ${ip}${note ? ' — ' + note : ''}`);
+  // Best-effort immediate unban on every VM whose fail2ban is currently running, mirroring
+  // routes/waf.js's POST /exceptions — the periodic reconcileSshExceptions in fail2ban-collector.js
+  // is the real safety net (catches CIDR ranges added after a specific IP was already banned), this
+  // is just so an already-banned false positive doesn't wait up to ~45s for the next poll.
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE fail2ban_status = 'running' AND ssh_credential_id IS NOT NULL
+  `).all();
+  await Promise.allSettled(vms.map(vm => fail2banManager.unbanIp(vm, ip)));
+  res.json({ message: 'OK' });
+});
+
+router.delete('/exceptions/:id', requirePermission('security.block'), async (req, res) => {
+  const row = await db.prepare('SELECT * FROM ssh_ip_exceptions WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
+  await db.prepare('DELETE FROM ssh_ip_exceptions WHERE id = ?').run(row.id);
+  await logActivity(req.user, 'DELETE', 'ssh_ip_exception', row.id, row.ip, `Xóa ngoại lệ IP SSH: ${row.ip}`);
+  res.json({ message: 'OK' });
+});
+
 module.exports = router;

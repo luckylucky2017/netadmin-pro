@@ -6,6 +6,7 @@ const { NodeSSH } = require('node-ssh');
 const geoip = require('geoip-lite');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
+const fail2banManager = require('./fail2ban-manager');
 
 // Ubuntu/Debian log to auth.log, RHEL/CentOS to secure — try both, first one that exists wins.
 // Both are root-only (0600), so every read goes through `sudo -n` — the target VM needs a scoped
@@ -128,8 +129,17 @@ async function checkBruteForce(vm, ssh) {
     GROUP BY src_ip
     HAVING cnt >= ?
   `).all(vm.id, BRUTE_FORCE_WINDOW_SEC, BRUTE_FORCE_THRESHOLD);
+  if (!bursts.length) return;
+
+  const exceptions = await fail2banManager.getExceptions();
 
   for (const b of bursts) {
+    // Excepted (ssh_ip_exceptions — separate from the WAF one, see database.js) — treat as fully
+    // trusted, not just "not blocked": no ban attempt, and no standing alert either, since repeated
+    // failed logins from a known-good source (e.g. a misconfigured internal service retrying) isn't
+    // a real brute-force signal worth surfacing.
+    if (fail2banManager.isExceptedIp(b.src_ip, exceptions)) continue;
+
     const { country } = classifyIp(b.src_ip);
     const blocked = await tryImmediateBan(ssh, b.src_ip);
 

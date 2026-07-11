@@ -12,6 +12,7 @@
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
+const fail2banManager = require('./fail2ban-manager');
 
 const STATUS_SCRIPT = `
 which fail2ban-client >/dev/null 2>&1 || { echo "FAIL2BAN:none"; exit 0; }
@@ -67,6 +68,49 @@ async function resolveStaleUnbans(vm, stillBannedIps) {
   }
 }
 
+// Reconciles the sshd jail's live banned list against ssh_ip_exceptions (a list separate from the
+// WAF one — see database.js) BEFORE the caller raises any ban alerts, unbanning any match via the
+// already-open SSH session and mutating `banned.sshd` in place so an excepted IP is never alerted
+// on or synced into ssh_banned_ips below. Same self-heal shape as nginx-waf-collector.js's
+// syncBannedIps: catches the case an exception (esp. a CIDR range) was added AFTER that exact IP
+// was already banned, which only proactively unbans at exception-creation time, not existing bans
+// that merely fall within a newly added range.
+async function reconcileSshExceptions(vm, ssh, banned) {
+  const sshdIps = banned.sshd;
+  if (!sshdIps || !sshdIps.length) return;
+  const exceptions = await fail2banManager.getExceptions();
+  const kept = [];
+  for (const ip of sshdIps) {
+    if (fail2banManager.isExceptedIp(ip, exceptions)) {
+      const result = await fail2banManager.unbanIpViaSsh(ssh, ip).catch(e => ({ ok: false, error: e.message }));
+      if (result.ok) {
+        console.warn(`[fail2ban] ${vm.name}: đã tự động gỡ chặn IP ${ip} khỏi jail sshd vì nằm trong danh sách ngoại lệ`);
+        continue;
+      }
+      console.error(`[fail2ban] ${vm.name}: IP ${ip} nằm trong ngoại lệ SSH nhưng gỡ chặn thất bại — ${result.error}`);
+    }
+    kept.push(ip);
+  }
+  banned.sshd = kept;
+}
+
+const upsertSshBannedIp = db.prepare(`
+  INSERT INTO ssh_banned_ips (vm_id, ip, first_seen, last_seen) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON DUPLICATE KEY UPDATE last_seen = CURRENT_TIMESTAMP
+`);
+const deleteSshBannedIp = db.prepare('DELETE FROM ssh_banned_ips WHERE vm_id = ? AND ip = ?');
+
+// Mirrors just the sshd jail's currently-banned list into ssh_banned_ips (ignores other jails on the
+// same VM, e.g. netadmin-waf — that one is nginx-waf-collector.js's own concern) — same
+// staleness-pruning shape as waf_banned_ips: a row disappears the moment it's no longer in the live
+// list (bantime expired, manually unbanned, or fail2ban itself not installed/reachable this poll).
+async function syncSshBannedIps(vm, sshdIps) {
+  const currentSet = new Set(sshdIps);
+  for (const ip of sshdIps) await upsertSshBannedIp.run(vm.id, ip);
+  const known = await db.prepare('SELECT ip FROM ssh_banned_ips WHERE vm_id = ?').all(vm.id);
+  for (const { ip } of known) if (!currentSet.has(ip)) await deleteSshBannedIp.run(vm.id, ip);
+}
+
 async function collectVm(vm) {
   const opts = await sshCredentials.buildConnectOptions(vm);
   if (!opts) return;
@@ -76,8 +120,9 @@ async function collectVm(vm) {
 
     const result = await ssh.execCommand(STATUS_SCRIPT);
     const banned = parseStatus(result.stdout);
-    if (!banned) return; // fail2ban not installed, or sudo not available — skip quietly
+    if (!banned) { await syncSshBannedIps(vm, []); return; } // fail2ban not installed/reachable — clear any stale rows
 
+    await reconcileSshExceptions(vm, ssh, banned);
     const stillBannedIps = new Set();
     for (const [jail, ips] of Object.entries(banned)) {
       for (const ip of ips) {
@@ -86,6 +131,7 @@ async function collectVm(vm) {
       }
     }
     await resolveStaleUnbans(vm, stillBannedIps);
+    await syncSshBannedIps(vm, banned.sshd || []);
   } catch (e) {
     console.error(`[fail2ban] ${vm.name} (${vm.ip_address}): ${e.message}`);
   } finally {
@@ -102,6 +148,13 @@ async function collectAll() {
   `).all();
   if (!vms.length) return;
   await Promise.allSettled(vms.map(collectVm));
+  // A VM that fell out of the query above (powered off, credential removed, etc.) isn't polled, so
+  // any ssh_banned_ips rows left over from before would show stale/unverifiable "still banned"
+  // state — clear them, same reasoning as nginx-waf-collector.js's equivalent cleanup.
+  const monitoredIds = vms.map(v => v.id);
+  await db.prepare(`
+    DELETE FROM ssh_banned_ips WHERE vm_id NOT IN (${monitoredIds.map(() => '?').join(',') || 'NULL'})
+  `).run(...monitoredIds);
 }
 
 function start(intervalMs = 45000) {

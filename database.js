@@ -407,6 +407,31 @@ const SCHEMA_SQL = `
     PRIMARY KEY (vm_id, ip)
   );
 
+  -- SSH-side counterparts of waf_ip_exceptions/waf_banned_ips above, for the sshd jail (brute-force
+  -- protection) on "Giám sát bất thường" — a deliberately SEPARATE exception list from the WAF one
+  -- (an admin may trust an IP for SSH but not WAF, or vice versa), checked by fail2ban-manager.js's
+  -- banIp() before every sshd-jail ban attempt, same as waf_ip_exceptions gates waf-manager.js's.
+  CREATE TABLE IF NOT EXISTS ssh_ip_exceptions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    ip VARCHAR(64) NOT NULL,
+    note VARCHAR(255),
+    created_by VARCHAR(255),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_ssh_ip_exception (ip)
+  );
+
+  -- Mirrors each VM's sshd jail "currently banned" list — synced every fail2ban-collector.js poll
+  -- (that collector already fetches every jail's banned list for the alerts mirror, this extracts
+  -- just the sshd one) so the "IP đang bị chặn" tab on the Security page is a fast DB read, same
+  -- staleness-pruning shape as waf_banned_ips.
+  CREATE TABLE IF NOT EXISTS ssh_banned_ips (
+    vm_id INT NOT NULL,
+    ip VARCHAR(64) NOT NULL,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vm_id, ip)
+  );
+
   -- One row per (VM, access_log file) discovered by parsing that VM's /etc/nginx/**/*.conf files
   -- (server_name + access_log directives per server block) — a VM commonly hosts several domains,
   -- each logging to its own file. Re-synced every collector poll: rows for logs no longer present in
