@@ -2,6 +2,18 @@ const API = '/api';
 let currentPage = 'dashboard';
 const LAST_PAGE_KEY = 'netadmin_lastPage';
 
+// Restores a page's active sub-tab (e.g. wafTab, securityTab) across a hard refresh (F5) — same
+// reasoning as LAST_PAGE_KEY above, but per-page: without this, F5 always snapped back to that
+// page's first tab since these are plain in-memory `let`s that re-init to their default on reload.
+// Each setXTab() calls saveTab(key, tab) on every switch; each `let xTab = ...` declaration below
+// calls loadSavedTab(key, fallback) once at module load (i.e. once per page load/F5).
+function loadSavedTab(key, fallback) {
+  return localStorage.getItem(key) || fallback;
+}
+function saveTab(key, tab) {
+  localStorage.setItem(key, tab);
+}
+
 // Clock — forces Asia/Ho_Chi_Minh display regardless of the viewer's own browser timezone, same
 // reasoning as formatTime()/toVNDate() below (this app's data is all Vietnam-local).
 function updateClock() {
@@ -1772,7 +1784,8 @@ async function saveRule(e, id) {
 }
 
 // ─── VCENTER ──────────────────────────────────────────────────────────────────
-let vcenterTab = 'vms';
+const VCENTER_TAB_KEY = 'netadmin_vcenterTab';
+let vcenterTab = loadSavedTab(VCENTER_TAB_KEY, 'vms');
 let vcenterFilter = { power_state: '', cluster_id: '' };
 let vcenterClustersCache = [];
 
@@ -1833,6 +1846,7 @@ async function renderVcenter(search = '') {
 
 function setVcenterTab(tab) {
   vcenterTab = tab;
+  saveTab(VCENTER_TAB_KEY, tab);
   document.querySelectorAll('#vcenterTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   renderVcenterTabBody();
 }
@@ -2651,7 +2665,8 @@ async function syncVcenter() {
 }
 
 // ─── SECURITY (Giám sát bất thường) ────────────────────────────────────────────
-let securityTab = 'events';
+const SECURITY_TAB_KEY = 'netadmin_securityTab';
+let securityTab = loadSavedTab(SECURITY_TAB_KEY, 'events');
 const securityFilter = { vmId: '', eventType: '', foreignOnly: false };
 const securityState = { vms: [] };
 let securityRefreshMs = 5000;
@@ -2756,6 +2771,7 @@ async function refreshSecurityData() {
 
 function setSecurityTab(tab) {
   securityTab = tab;
+  saveTab(SECURITY_TAB_KEY, tab);
   document.querySelectorAll('#securityTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   renderSecurityTabBody();
 }
@@ -3407,7 +3423,8 @@ async function saveSecuritySshUser(id, btn) {
 }
 
 // ─── WAF (Giám sát WAF) ─────────────────────────────────────────────────────
-let wafTab = 'events';
+const WAF_TAB_KEY = 'netadmin_wafTab';
+let wafTab = loadSavedTab(WAF_TAB_KEY, 'events');
 const wafEventFilter = { vmId: '', eventType: '' };
 const wafState = { vms: [] };
 let wafRefreshMs = 5000;
@@ -3500,6 +3517,7 @@ async function refreshWafData() {
 
 function setWafTab(tab) {
   wafTab = tab;
+  saveTab(WAF_TAB_KEY, tab);
   document.querySelectorAll('#wafTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   renderWafTabBody();
 }
@@ -4508,7 +4526,8 @@ async function saveSettings(e) {
 }
 
 // ─── pfSense (tường lửa) ────────────────────────────────────────────────────
-let pfsenseTab = 'status';
+const PFSENSE_TAB_KEY = 'netadmin_pfsenseTab';
+let pfsenseTab = loadSavedTab(PFSENSE_TAB_KEY, 'status');
 let pfsenseFirewallId = null;
 let pfsenseFirewallsCache = [];
 let pfsenseInterfacesCache = [];
@@ -4569,6 +4588,7 @@ function onPfsenseFirewallChange(id) {
 
 function setPfsenseTab(tab) {
   pfsenseTab = tab;
+  saveTab(PFSENSE_TAB_KEY, tab);
   document.querySelectorAll('#pfsenseTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   renderPfsenseTabBody();
 }
