@@ -271,14 +271,21 @@ async function banIp(vm, ip) {
   }
 }
 
-async function unbanIp(vm, ip) {
+// Reuses an already-open SSH session — mirrors listBannedIpsViaSsh below, used by
+// nginx-waf-collector.js's per-poll exception reconciliation so it doesn't open a 2nd connection
+// per stale IP found.
+async function unbanIpViaSsh(ssh, ip) {
   if (!SAFE_IP_RE.test(ip || '')) return { ok: false, error: `Địa chỉ IP không hợp lệ: "${ip}"` };
+  const result = await ssh.execCommand(`sudo -n fail2ban-client set ${JAIL_NAME} unbanip ${ip} 2>&1`);
+  const ok = result.stdout.trim() === '1';
+  return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không gỡ chặn được IP').slice(0, 300) };
+}
+
+async function unbanIp(vm, ip) {
   let ssh;
   try {
     ssh = await connect(vm);
-    const result = await ssh.execCommand(`sudo -n fail2ban-client set ${JAIL_NAME} unbanip ${ip} 2>&1`);
-    const ok = result.stdout.trim() === '1';
-    return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không gỡ chặn được IP').slice(0, 300) };
+    return await unbanIpViaSsh(ssh, ip);
   } catch (e) {
     return { ok: false, error: `Không kết nối được SSH: ${e.message}` };
   } finally {
@@ -316,5 +323,5 @@ async function listBannedIps(vm) {
 module.exports = {
   JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
   matchesException, isExceptedIp, getExceptions,
-  parseBannedIpsOutput, listBannedIpsViaSsh, buildWafJailFilesScript,
+  parseBannedIpsOutput, listBannedIpsViaSsh, unbanIpViaSsh, buildWafJailFilesScript,
 };

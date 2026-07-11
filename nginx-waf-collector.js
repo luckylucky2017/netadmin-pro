@@ -540,17 +540,38 @@ const upsertBannedIp = db.prepare(`
   ON DUPLICATE KEY UPDATE last_seen = CURRENT_TIMESTAMP
 `);
 
+const deleteBannedIp = db.prepare('DELETE FROM waf_banned_ips WHERE vm_id = ? AND ip = ?');
+
 // Mirrors the jail's live "Banned IP list:" into waf_banned_ips every poll — reuses the SSH session
 // already open for log tailing (see waf-manager.js's listBannedIpsViaSsh). A row disappears the
 // moment it's no longer in the live list (bantime expired, manually unbanned, or the jail itself
 // isn't installed) — same staleness-pruning shape as discoverAndSyncDomainLogs above.
+//
+// Also reconciles against waf_ip_exceptions every poll: an IP can end up banned-but-excepted if the
+// exception (esp. a CIDR range) was added AFTER that specific address was already banned — POST
+// /exceptions only proactively unbans the literal string just inserted, not existing bans that
+// merely fall within a newly added range. Catching it here (not just at exception-creation time)
+// self-heals that gap on the very next poll instead of leaving it stuck — matching the requirement
+// that an excepted IP must not stay blocked, with the unban logged as a warning, not silently.
 async function syncBannedIps(vm, ssh) {
   const { ips } = await wafManager.listBannedIpsViaSsh(ssh).catch(() => ({ ips: [] }));
-  for (const ip of ips) await upsertBannedIp.run(vm.id, ip);
-  const currentSet = new Set(ips);
+  const exceptions = await wafManager.getExceptions();
+  const currentSet = new Set();
+  for (const ip of ips) {
+    if (wafManager.isExceptedIp(ip, exceptions)) {
+      const result = await wafManager.unbanIpViaSsh(ssh, ip).catch(e => ({ ok: false, error: e.message }));
+      if (result.ok) {
+        console.warn(`[nginx-waf] ${vm.name}: đã tự động gỡ chặn IP ${ip} vì nằm trong danh sách ngoại lệ`);
+        await deleteBannedIp.run(vm.id, ip);
+        continue; // excepted + successfully unbanned — not "currently banned" anymore, skip re-adding
+      }
+      console.error(`[nginx-waf] ${vm.name}: IP ${ip} nằm trong ngoại lệ nhưng gỡ chặn thất bại — ${result.error}`);
+    }
+    currentSet.add(ip);
+    await upsertBannedIp.run(vm.id, ip);
+  }
   const known = await db.prepare('SELECT ip FROM waf_banned_ips WHERE vm_id = ?').all(vm.id);
-  const stale = db.prepare('DELETE FROM waf_banned_ips WHERE vm_id = ? AND ip = ?');
-  for (const { ip } of known) if (!currentSet.has(ip)) await stale.run(vm.id, ip);
+  for (const { ip } of known) if (!currentSet.has(ip)) await deleteBannedIp.run(vm.id, ip);
 }
 
 async function collectVm(vm) {
