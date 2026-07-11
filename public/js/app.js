@@ -3497,10 +3497,36 @@ function renderWafBanned(search = '') {
   loadWafBanned(search);
 }
 
+// Mirrors waf-manager.js's matchesException (CIDR-aware for IPv4, exact-match otherwise) — kept in
+// sync deliberately since this is a client-side display check, not a security boundary; the real
+// enforcement is server-side in banIp().
+function wafIpv4ToInt(ip) {
+  const parts = (ip || '').split('.').map(Number);
+  if (parts.length !== 4 || parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) return null;
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+function wafMatchesException(ip, entryIp) {
+  if (!ip || !entryIp) return false;
+  const cidrM = /^(.+)\/(\d{1,2})$/.exec(entryIp);
+  if (cidrM) {
+    const prefixLen = Number(cidrM[2]);
+    const a = wafIpv4ToInt(ip), b = wafIpv4ToInt(cidrM[1]);
+    if (a === null || b === null || prefixLen < 0 || prefixLen > 32) return false;
+    const mask = prefixLen === 0 ? 0 : (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
+    return (a & mask) === (b & mask);
+  }
+  return ip === entryIp;
+}
+
 async function loadWafBanned(search) {
   const s = search ?? document.getElementById('wafBannedSearch')?.value ?? '';
   try {
-    const rows = await api('/waf/banned-ips');
+    const [rows, exceptions] = await Promise.all([api('/waf/banned-ips'), api('/waf/exceptions')]);
+    // Đang bị chặn nhưng đồng thời khớp 1 ngoại lệ = có thể do ngoại lệ được thêm SAU khi đã chặn
+    // (CIDR mới thêm không tự động rà lại IP cụ thể đã bị chặn trước đó trong dải đó — proactive
+    // unban ở POST /exceptions chỉ gỡ đúng chuỗi IP/CIDR vừa nhập). Không tự gỡ ở đây — chỉ cảnh báo
+    // để admin chủ động bấm "Gỡ chặn".
+    rows.forEach(r => { r.exceptionConflict = exceptions.some(e => wafMatchesException(r.ip, e.ip)); });
     const q = s.trim().toLowerCase();
     wafBannedRows = q ? rows.filter(r => (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q)) : rows;
     if (!document.getElementById('wafBannedBody')) return;
@@ -3535,7 +3561,7 @@ function renderWafBannedRows() {
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td style="font-weight:600">${r.vm_name || '—'}</td>
-          <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+          <td><span style="font-family:monospace">${escHtml(r.ip)}</span>${r.exceptionConflict ? ` <span class="status warning" style="display:inline-flex" title="IP này đang khớp 1 mục trong danh sách Ngoại lệ IP nhưng vẫn còn bị chặn trên VM — bấm &quot;Gỡ chặn&quot; để xử lý thủ công"><span class="dot"></span>Trong ngoại lệ</span>` : ''}</td>
           <td>${r.country || '—'}</td>
           <td>${(() => { const v = formatWafViolationType(r); return v ? v : '<span style="color:var(--fg-dim)">—</span>'; })()}</td>
           <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>

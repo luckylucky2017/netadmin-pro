@@ -21,7 +21,10 @@ router.get('/stats', async (req, res) => {
   const scan = (await db.prepare(`SELECT COUNT(*) as cnt FROM waf_events WHERE event_type='scan' AND occurred_at >= ${since}`).get()).cnt;
   const dos = (await db.prepare(`SELECT COUNT(*) as cnt FROM waf_events WHERE event_type='dos' AND occurred_at >= ${since}`).get()).cnt;
   const ddos = (await db.prepare(`SELECT COUNT(*) as cnt FROM waf_events WHERE event_type='ddos' AND occurred_at >= ${since}`).get()).cnt;
-  const blocked = (await db.prepare(`SELECT COUNT(*) as cnt FROM waf_events WHERE blocked=1 AND occurred_at >= ${since}`).get()).cnt;
+  // COUNT(DISTINCT vm_id, src_ip), not COUNT(*) — the same IP can get a fresh blocked=1 event logged
+  // on a later poll (still detected in the log for a beat after the real fail2ban ban lands), which
+  // would otherwise double-count 1 blocked IP as 2+ toward this stat.
+  const blocked = (await db.prepare(`SELECT COUNT(DISTINCT vm_id, src_ip) as cnt FROM waf_events WHERE blocked=1 AND occurred_at >= ${since}`).get()).cnt;
   const monitored = (await db.prepare('SELECT COUNT(*) as cnt FROM vcenter_vms WHERE waf_enabled = 1').get()).cnt;
   res.json({ scan, dos, ddos, blocked, monitored });
 });
