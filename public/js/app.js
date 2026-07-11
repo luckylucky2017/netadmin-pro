@@ -3611,7 +3611,15 @@ async function loadWafEvents(search) {
   const s = search || document.getElementById('wafEventSearch')?.value || '';
   const params = new URLSearchParams({ search: s, vmId: wafEventFilter.vmId, eventType: wafEventFilter.eventType });
   try {
-    wafEventRows = await api(`/waf/events?${params}`);
+    const [rows, exceptions] = await Promise.all([api(`/waf/events?${params}`), api('/waf/exceptions')]);
+    // ev.blocked is a frozen historical fact ("was this specific detection blocked at the time"),
+    // which goes stale the moment an exception is added afterwards for that IP (or a CIDR covering
+    // it) — e.g. a real case: an IP got auto-blocked, then an admin added its /24 as an exception
+    // later, but the old row kept showing "Đã chặn" forever with no indication the IP is now
+    // trusted. exceptedNow re-checks against the CURRENT exceptions list on every load so the
+    // display reflects present reality, not just what happened at insert time.
+    rows.forEach(ev => { ev.exceptedNow = ev.src_ip ? exceptions.some(e => clientMatchesException(ev.src_ip, e.ip)) : false; });
+    wafEventRows = rows;
     if (!document.getElementById('wafEventsBody')) return;
     renderWafEventRows();
   } catch (e) {
@@ -3651,11 +3659,13 @@ function renderWafEventRows() {
           <td>${ev.country || '—'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${ev.path ? escAttr(ev.path) : ''}">${ev.path ? escHtml(ev.path).slice(0, 60) : '—'}</span></td>
           <td>${ev.hit_count ?? '—'}</td>
-          <td>${ev.blocked ? '<span class="status online"><span class="dot"></span>Đã chặn</span>' : '<span class="status offline"><span class="dot"></span>Chỉ cảnh báo</span>'}</td>
-          <td>${blockedForeign ? `<span class="severity critical ${recent ? 'blink' : ''}"><span class="dot"></span>Đã tự động chặn IP từ ${escHtml(ev.country)}</span>` : ''}</td>
-          <td>${!ev.blocked && ev.src_ip
+          <td>${ev.exceptedNow || !ev.blocked ? '<span class="status offline"><span class="dot"></span>Chỉ cảnh báo</span>' : '<span class="status online"><span class="dot"></span>Đã chặn</span>'}</td>
+          <td>${ev.exceptedNow
+            ? '<span class="status warning" style="display:inline-flex" title="IP này khớp 1 mục trong danh sách Ngoại lệ IP — không (còn) bị chặn dù trạng thái lúc phát hiện có thể khác"><span class="dot"></span>IP Ngoại lệ</span>'
+            : (blockedForeign ? `<span class="severity critical ${recent ? 'blink' : ''}"><span class="dot"></span>Đã tự động chặn IP từ ${escHtml(ev.country)}</span>` : '')}</td>
+          <td>${ev.exceptedNow || !ev.src_ip ? '' : (!ev.blocked
             ? `<button class="btn-icon" data-permission="waf.block" title="Chặn IP này ngay" onclick="wafBlockIpFromEvent(${ev.vm_id}, '${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>`
-            : (ev.blocked && ev.src_ip ? `<button class="btn-icon" data-permission="waf.block" title="Mở chặn thủ công — thêm vào ngoại lệ" onclick="wafAddExceptionFromEvent('${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg></button>` : '')}</td>
+            : `<button class="btn-icon" data-permission="waf.block" title="Mở chặn thủ công — thêm vào ngoại lệ" onclick="wafAddExceptionFromEvent('${escAttr(ev.src_ip)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg></button>`)}</td>
         </tr>`;
       }).join('')}
       </tbody></table>${paginationBar(wafEventPagination, sortedEvents.length, 'wafEventPagination', 'renderWafEventRows')}`;
