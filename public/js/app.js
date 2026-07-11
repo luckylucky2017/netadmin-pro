@@ -6002,6 +6002,23 @@ function initChatWidget() {
 }
 initChatWidget();
 
+// Shows the running commit (short SHA + commit date) under the "NetAdmin Pro" logo on both the
+// login screen and the sidebar — GET /api/version is public (no requireAuth) specifically so this
+// works before login too. The point: local dev and prod are separate instances/databases pointed at
+// the same real infrastructure, and "which exact commit is each one running" needs to be visible at
+// a glance rather than inferred from behavior.
+async function loadVersionInfo() {
+  try {
+    const { commit, commitDate } = await api('/version');
+    const text = commit && commit !== 'unknown' ? `${commit}${commitDate ? ` · ${commitDate}` : ''}` : '';
+    const login = document.getElementById('loginVersionInfo');
+    const sidebar = document.getElementById('sidebarVersionInfo');
+    if (login) login.textContent = text;
+    if (sidebar) sidebar.textContent = text;
+  } catch { /* non-critical — leave blank rather than block page load */ }
+}
+
 // Init
 checkAuthAndInit();
+loadVersionInfo();
 updateAlertBadge();

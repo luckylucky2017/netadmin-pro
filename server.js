@@ -21,12 +21,28 @@ const helmet = require('helmet');
 const path = require('path');
 const session = require('express-session');
 const MySQLStore = require('express-mysql-session')(session);
+const { execSync } = require('child_process');
 const db = require('./database');
 const { getSettings } = require('./settings');
 const { requireAuth, requirePermission } = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Computed once at boot (not per-request — git rev-parse is cheap but pointless to re-run on every
+// page load). Deploys here are `git pull && systemctl restart`, so the exact commit HEAD points at
+// IS the deployed version — far more precise than package.json's never-bumped "1.0.0", and exactly
+// what you need to confirm local and prod (two independent instances/databases pointed at the same
+// real infrastructure) are actually running the same code. Falls back gracefully if .git is missing
+// (e.g. a tarball deploy with no git history) rather than crashing boot over a cosmetic feature.
+let APP_VERSION = { commit: 'unknown', commitDate: null };
+try {
+  const commit = execSync('git rev-parse --short HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
+  const commitDate = execSync("git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M'", { cwd: __dirname, encoding: 'utf8' }).trim();
+  APP_VERSION = { commit, commitDate };
+} catch (e) {
+  console.warn('[server] Không đọc được git commit hiện tại (không có .git?):', e.message);
+}
 
 if (!process.env.SESSION_SECRET) {
   console.warn('[auth] SESSION_SECRET chưa đặt trong .env — dùng giá trị mặc định KHÔNG an toàn cho production, chỉ nên dùng khi phát triển local.');
@@ -55,6 +71,10 @@ if (!process.env.SESSION_SECRET) {
     cookie: { httpOnly: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 } // secure:true khi chạy sau HTTPS/reverse proxy
   }));
   app.use(express.static(path.join(__dirname, 'public')));
+
+  // Public (no requireAuth) — shown on both the login screen and the sidebar, so which
+  // commit/deploy is running is visible without needing to log in first.
+  app.get('/api/version', (req, res) => res.json(APP_VERSION));
 
   app.use('/api/auth', require('./routes/auth'));
   app.use('/api/servers', requireAuth, require('./routes/servers'));

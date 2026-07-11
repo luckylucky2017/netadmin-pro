@@ -14,7 +14,10 @@
   <div class="login-card">
     <div class="login-logo">
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
-      <span>NetAdmin Pro</span>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <span>NetAdmin Pro</span>
+        <span id="loginVersionInfo" style="font-size:11px;font-weight:400;color:var(--fg-dim);font-family:'Fira Code',monospace"></span>
+      </div>
     </div>
     <div class="filter-tabs" id="loginTabs" style="margin-bottom:18px">
       <div class="filter-tab active" data-tab="local" onclick="setLoginTab('local')">Email</div>
@@ -46,7 +49,10 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
-      <span>NetAdmin Pro</span>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <span>NetAdmin Pro</span>
+        <span id="sidebarVersionInfo" style="font-size:10px;font-weight:400;color:var(--fg-dim)" title="Commit đang chạy trên server này"></span>
+      </div>
     </div>
     <nav class="sidebar-nav">
       <a href="#" class="nav-item active" data-page="dashboard">
