@@ -77,7 +77,10 @@ fi
 // logpath could cover anyway). vcenter_vms.waf_log_path is a completely separate concern — it's
 // nginx-waf-collector.js's own fallback path for actual log TAILING when no domain could be
 // auto-discovered from /etc/nginx config, unrelated to this jail's config.
-function buildWafJailFilesScript() {
+// ignoreIpLine: the current waf_ip_exceptions baked into fail2ban's own `ignoreip` (see
+// ip-exceptions.js's buildIgnoreIpLine) — appended into the jail section so fail2ban itself refuses
+// to ban an excepted IP, not just this app's own isExceptedIp() check in banIp() below.
+function buildWafJailFilesScript(ignoreIpLine) {
   return `
 sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
@@ -85,13 +88,14 @@ ${WAF_FILTER_TEMPLATE}
 FILTER_EOF
 sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<'JAIL_EOF'
 ${WAF_JAIL_TEMPLATE}
+${ignoreIpLine}
 JAIL_EOF
 `.trim();
 }
 
 // Ensures the fail2ban package itself is present (same apt/dnf/yum detection as
 // fail2ban-manager.js's INSTALL_SCRIPT), then writes the WAF jail's config and reloads.
-function buildInstallScript() {
+function buildInstallScript(ignoreIpLine) {
   return `
 set -e
 if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -107,7 +111,7 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
   esac
   sudo -n systemctl enable --now fail2ban
 fi
-${buildWafJailFilesScript()}
+${buildWafJailFilesScript(ignoreIpLine)}
 sudo -n fail2ban-client reload --restart
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
@@ -164,7 +168,8 @@ async function installJail(vm, user = null) {
   let ssh;
   try {
     ssh = await connect(vm);
-    const result = await ssh.execCommand(buildInstallScript());
+    const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const result = await ssh.execCommand(buildInstallScript(ignoreIpLine));
     const finalStatus = /^FINAL_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (finalStatus === 'running') {
       await setStatus.run('running', null, vm.id);
@@ -215,10 +220,38 @@ async function stopJail(vm, user = null) {
 // ip normally comes from nginx's own $remote_addr (the real TCP peer address, not
 // attacker-controlled request content), but SAFE_IP_RE is checked anyway as defense-in-depth since
 // it gets interpolated straight into a remote shell command below.
-const { SAFE_IP_RE, matchesException, isExceptedIp } = require('./ip-exceptions');
+const { SAFE_IP_RE, matchesException, isExceptedIp, buildIgnoreIpLine } = require('./ip-exceptions');
 
 async function getExceptions() {
   return db.prepare('SELECT id, ip, note FROM waf_ip_exceptions').all();
+}
+
+// Re-writes the WAF jail's config with the CURRENT waf_ip_exceptions baked into `ignoreip` and
+// reloads just this jail (not the whole daemon, not the other jails on the VM) — called by
+// routes/waf.js on every waf_jail_status='running' VM whenever the exceptions list changes, so an
+// exception is enforced by fail2ban itself going forward, not just reactively unbanned after the
+// fact by nginx-waf-collector.js's own reconciliation. `reload --restart <jail>` (not bare reload)
+// is the same pattern proven elsewhere in this file/fail2ban-manager.js to reliably apply jail
+// config changes on fail2ban 1.0.2; fail2ban persists ban state in its own sqlite DB and re-applies
+// still-valid bans on a jail restart, so this does not drop real active bans.
+async function pushIgnoreIp(vm) {
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const script = `
+${buildWafJailFilesScript(ignoreIpLine)}
+sudo -n fail2ban-client reload --restart ${JAIL_NAME} 2>&1
+sleep 1
+sudo -n fail2ban-client get ${JAIL_NAME} ignoreip 2>&1
+`.trim();
+    const result = await ssh.execCommand(script);
+    return { ok: !result.stderr, output: result.stdout };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
 }
 
 async function banIp(vm, ip) {
@@ -293,6 +326,6 @@ async function listBannedIps(vm) {
 
 module.exports = {
   JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
-  matchesException, isExceptedIp, getExceptions,
+  matchesException, isExceptedIp, getExceptions, pushIgnoreIp,
   parseBannedIpsOutput, listBannedIpsViaSsh, unbanIpViaSsh, buildWafJailFilesScript,
 };

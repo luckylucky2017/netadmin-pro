@@ -201,12 +201,17 @@ router.post('/exceptions', requirePermission('waf.block'), async (req, res) => {
   await logActivity(req.user, 'CREATE', 'waf_ip_exception', null, ip, `Thêm ngoại lệ IP WAF: ${ip}${note ? ' — ' + note : ''}`);
   // Best-effort: proactively unban this IP on every VM whose jail is currently running, so adding
   // an exception for an already-banned false positive takes effect immediately rather than only
-  // preventing future bans. One VM's SSH failure must never block the others.
+  // preventing future bans. One VM's SSH failure must never block the others. Also pushes the
+  // updated exceptions list into fail2ban's own `ignoreip` on each VM (see waf-manager.js's
+  // pushIgnoreIp) — real defense-in-depth value is limited for this particular jail (its filter
+  // never matches anything, so every ban is this app's own explicit banip call, which bypasses
+  // ignoreip — confirmed live), kept for consistency with the sshd jail where it does matter.
   const vms = await db.prepare(`
     SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
     WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
   `).all();
   await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
+  await Promise.allSettled(vms.map(vm => wafManager.pushIgnoreIp(vm)));
   res.json({ message: 'OK' });
 });
 
@@ -215,6 +220,13 @@ router.delete('/exceptions/:id', requirePermission('waf.block'), async (req, res
   if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
   await db.prepare('DELETE FROM waf_ip_exceptions WHERE id = ?').run(row.id);
   await logActivity(req.user, 'DELETE', 'waf_ip_exception', row.id, row.ip, `Xóa ngoại lệ IP WAF: ${row.ip}`);
+  // Push the updated (now-shorter) exceptions list to every running WAF jail so the removed IP
+  // stops being ignored — see the POST handler's comment above.
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
+  `).all();
+  await Promise.allSettled(vms.map(vm => wafManager.pushIgnoreIp(vm)));
   res.json({ message: 'OK' });
 });
 

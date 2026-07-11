@@ -245,12 +245,17 @@ router.post('/exceptions', requirePermission('security.block'), async (req, res)
   // Best-effort immediate unban on every VM whose fail2ban is currently running, mirroring
   // routes/waf.js's POST /exceptions — the periodic reconcileSshExceptions in fail2ban-collector.js
   // is the real safety net (catches CIDR ranges added after a specific IP was already banned), this
-  // is just so an already-banned false positive doesn't wait up to ~45s for the next poll.
+  // is just so an already-banned false positive doesn't wait up to ~45s for the next poll. Also
+  // pushes the updated exceptions list into fail2ban's own `ignoreip` on the sshd jail (see
+  // fail2ban-manager.js's pushIgnoreIp) — unlike the WAF jail, this has real additional value here:
+  // it stops fail2ban's OWN native auth.log filter from auto-banning an excepted IP on a real failed
+  // SSH login, a path this app's own tryImmediateBan/isExceptedIp check never sees.
   const vms = await db.prepare(`
     SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
     WHERE fail2ban_status = 'running' AND ssh_credential_id IS NOT NULL
   `).all();
   await Promise.allSettled(vms.map(vm => fail2banManager.unbanIp(vm, ip)));
+  await Promise.allSettled(vms.map(vm => fail2banManager.pushIgnoreIp(vm)));
   res.json({ message: 'OK' });
 });
 
@@ -259,6 +264,13 @@ router.delete('/exceptions/:id', requirePermission('security.block'), async (req
   if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
   await db.prepare('DELETE FROM ssh_ip_exceptions WHERE id = ?').run(row.id);
   await logActivity(req.user, 'DELETE', 'ssh_ip_exception', row.id, row.ip, `Xóa ngoại lệ IP SSH: ${row.ip}`);
+  // Push the updated (now-shorter) exceptions list to every running sshd jail so the removed IP
+  // stops being ignored — see the POST handler's comment above.
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE fail2ban_status = 'running' AND ssh_credential_id IS NOT NULL
+  `).all();
+  await Promise.allSettled(vms.map(vm => fail2banManager.pushIgnoreIp(vm)));
   res.json({ message: 'OK' });
 });
 

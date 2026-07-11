@@ -37,4 +37,14 @@ function isExceptedIp(ip, exceptions) {
   return exceptions.some(e => matchesException(ip, e.ip));
 }
 
-module.exports = { SAFE_IP_RE, isIpv4, ipv4ToInt, matchesException, isExceptedIp };
+// fail2ban's own `ignoreip` directive — an IP listed here is NEVER banned by fail2ban itself,
+// enforced at the jail level independent of this app's own isExceptedIp() check before every
+// banIp() call. Defense in depth: even a ban issued completely outside this app (a raw
+// `fail2ban-client banip` run by hand on the VM) is still refused. Always keeps the localhost
+// defaults — a per-jail `ignoreip` REPLACES fail2ban's own [DEFAULT] value entirely rather than
+// merging with it, so omitting them here would silently stop protecting localhost from itself.
+function buildIgnoreIpLine(exceptions) {
+  return ['ignoreip = 127.0.0.1/8 ::1', ...exceptions.map(e => e.ip)].join(' ');
+}
+
+module.exports = { SAFE_IP_RE, isIpv4, ipv4ToInt, matchesException, isExceptedIp, buildIgnoreIpLine };

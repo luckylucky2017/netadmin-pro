@@ -62,11 +62,17 @@ fi` : ''}
 `.trim();
 }
 
+// sshdIgnoreIpLine: current ssh_ip_exceptions baked into the sshd jail's own `ignoreip` (see
+// ip-exceptions.js's buildIgnoreIpLine) — same reasoning as waf-manager.js's equivalent: fail2ban
+// itself refuses to ban an excepted IP, not just this app's own isExceptedIp() check in banIp()
+// below. wafIgnoreIpLine is only used when includeWaf (waf-manager.js's own waf_ip_exceptions,
+// a SEPARATE list — see database.js).
+//
 // Explicitly enables the sshd jail via jail.d (never rely on distro defaults — see buildCheckScript's
 // comment above) and, when includeWaf, splices in waf-manager.js's own jail-config-writing step so
 // both jails get configured in one combined install + single reload, rather than two separate SSH
 // round-trips that could disagree if one half fails.
-function buildInstallScript(includeWaf) {
+function buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine) {
   return `
 set -e
 if command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt
@@ -91,8 +97,9 @@ esac
 sudo -n mkdir -p /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
 ${SSHD_JAIL_TEMPLATE}
+${sshdIgnoreIpLine}
 SSHD_EOF
-${includeWaf ? wafManager.buildWafJailFilesScript() : ''}
+${includeWaf ? wafManager.buildWafJailFilesScript(wafIgnoreIpLine) : ''}
 sudo -n systemctl enable --now fail2ban
 sleep 2
 sudo -n fail2ban-client reload --restart 2>/dev/null || true
@@ -193,7 +200,9 @@ async function installFail2ban(vm, user = null) {
   try {
     ssh = await connect(vm);
     const includeWaf = !!vm.waf_enabled;
-    const result = await ssh.execCommand(buildInstallScript(includeWaf));
+    const sshdIgnoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const wafIgnoreIpLine = includeWaf ? buildIgnoreIpLine(await wafManager.getExceptions()) : '';
+    const result = await ssh.execCommand(buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine));
     const sshdStatus = /^SSHD_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (sshdStatus === 'running') {
       await setStatus.run('running', null, vm.id);
@@ -251,10 +260,37 @@ async function stopFail2ban(vm, user = null) {
 // but against the stock 'sshd' jail instead of a dedicated one, and against ssh_ip_exceptions (a
 // deliberately separate list from waf_ip_exceptions — see database.js's comment on that table).
 const SSHD_JAIL_NAME = 'sshd';
-const { SAFE_IP_RE, matchesException, isExceptedIp } = require('./ip-exceptions');
+const { SAFE_IP_RE, matchesException, isExceptedIp, buildIgnoreIpLine } = require('./ip-exceptions');
 
 async function getExceptions() {
   return db.prepare('SELECT id, ip, note FROM ssh_ip_exceptions').all();
+}
+
+// Re-writes the sshd jail's config with the CURRENT ssh_ip_exceptions baked into `ignoreip` and
+// reloads just this jail — mirrors waf-manager.js's pushIgnoreIp exactly, see its comment for why
+// `reload --restart <jail>` is the right/proven tool here and why it doesn't drop real active bans.
+async function pushIgnoreIp(vm) {
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const script = `
+sudo -n mkdir -p /etc/fail2ban/jail.d
+sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
+${SSHD_JAIL_TEMPLATE}
+${ignoreIpLine}
+SSHD_EOF
+sudo -n fail2ban-client reload --restart ${SSHD_JAIL_NAME} 2>&1
+sleep 1
+sudo -n fail2ban-client get ${SSHD_JAIL_NAME} ignoreip 2>&1
+`.trim();
+    const result = await ssh.execCommand(script);
+    return { ok: !result.stderr, output: result.stdout };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
 }
 
 async function banIp(vm, ip) {
@@ -315,5 +351,5 @@ async function listBannedIps(vm) {
 module.exports = {
   checkStatus, installFail2ban, stopFail2ban, SUDOERS_HINT,
   SSHD_JAIL_NAME, banIp, unbanIp, unbanIpViaSsh, listBannedIps,
-  matchesException, isExceptedIp, getExceptions,
+  matchesException, isExceptedIp, getExceptions, pushIgnoreIp,
 };
