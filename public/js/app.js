@@ -452,7 +452,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -6016,6 +6016,252 @@ async function loadVersionInfo() {
     if (login) login.textContent = text;
     if (sidebar) sidebar.textContent = text;
   } catch { /* non-critical — leave blank rather than block page load */ }
+}
+
+// ─── Báo cáo (kết nối nước ngoài) ───────────────────────────────────────────
+// Read-only rollup of 3 signals already tracked elsewhere (SSH/sshd-jail bans, WAF/netadmin-waf-jail
+// bans, outbound connections to foreign IPs) — see routes/reports.js. No new permission: same
+// Viewer-can-read convention as every other GET in this app.
+let reportsDays = 7;
+let reportsData = null;
+let reportsTab = 'overview';
+
+async function renderReports() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    reportsData = await api(`/reports/foreign-security?days=${reportsDays}`);
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Báo cáo kết nối nước ngoài</div><div class="page-subtitle">Tổng hợp kết nối SSH bị chặn, tấn công WAF bị chặn, và kết nối ra nước ngoài — theo khoảng thời gian</div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="filter-select" id="reportsDaysSelect" onchange="onReportsDaysChange(this.value)">
+          <option value="7">7 ngày qua</option>
+          <option value="14">14 ngày qua</option>
+          <option value="30">30 ngày qua</option>
+          <option value="90">90 ngày qua</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="exportReportsCsv()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất CSV
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="renderReports()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Làm mới
+        </button>
+      </div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg></div>
+        <div class="stat-label">SSH bị chặn (sshd)</div>
+        <div class="stat-value blue">${reportsData.summary.sshBlocked}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+        <div class="stat-label">Tấn công WAF bị chặn</div>
+        <div class="stat-value red">${reportsData.summary.wafBlocked}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="stat-label">Kết nối ra nước ngoài</div>
+        <div class="stat-value yellow">${reportsData.summary.outboundForeign}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/></svg></div>
+        <div class="stat-label">Số quốc gia liên quan</div>
+        <div class="stat-value green">${reportsData.summary.countriesInvolved}</div>
+      </div>
+    </div>
+    <div class="filter-tabs" id="reportsTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${reportsTab === 'overview' ? 'active' : ''}" data-tab="overview" onclick="setReportsTab('overview')">Tổng quan</div>
+      <div class="filter-tab ${reportsTab === 'ssh' ? 'active' : ''}" data-tab="ssh" onclick="setReportsTab('ssh')">SSH bị chặn (${reportsData.sshDetails.length})</div>
+      <div class="filter-tab ${reportsTab === 'waf' ? 'active' : ''}" data-tab="waf" onclick="setReportsTab('waf')">WAF bị chặn (${reportsData.wafDetails.length})</div>
+      <div class="filter-tab ${reportsTab === 'outbound' ? 'active' : ''}" data-tab="outbound" onclick="setReportsTab('outbound')">Kết nối ra ngoài (${reportsData.outboundDetails.length})</div>
+    </div>
+    <div id="reportsTabBody"></div>`;
+    document.getElementById('reportsDaysSelect').value = String(reportsDays);
+    renderReportsTabBody();
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function onReportsDaysChange(val) {
+  reportsDays = Number(val) || 7;
+  renderReports();
+}
+
+function setReportsTab(tab) {
+  reportsTab = tab;
+  document.querySelectorAll('#reportsTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderReportsTabBody();
+}
+
+function renderReportsTabBody() {
+  if (reportsTab === 'ssh') return renderReportsSshTab();
+  if (reportsTab === 'waf') return renderReportsWafTab();
+  if (reportsTab === 'outbound') return renderReportsOutboundTab();
+  return renderReportsOverviewTab();
+}
+
+// Hand-rolled multi-series SVG line chart — mirrors renderTimeSeriesChart's approach (this app has
+// no charting dependency by deliberate choice), extended to draw >1 named series with a legend.
+function renderMultiLineChart(dates, series) {
+  if (!dates || !dates.length) return `<div style="padding:40px 0;text-align:center;color:var(--fg-dim);font-size:13px">Chưa có dữ liệu trong khoảng này</div>`;
+  const W = 760, H = 220, padL = 40, padR = 10, padT = 10, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const n = dates.length;
+  const maxVal = Math.max(1, ...series.flatMap(s => s.values)) * 1.15;
+  const x = i => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const y = v => padT + plotH - (Math.min(v, maxVal) / maxVal) * plotH;
+
+  const lines = series.map(s => {
+    const points = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    return `<polyline points="${points}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join('');
+
+  const yTicks = [0, maxVal / 2, maxVal];
+  const yLabels = yTicks.map(v => `<text x="${(padL - 6).toFixed(1)}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--fg-dim)">${Math.round(v)}</text>`).join('');
+  const yGrid = yTicks.map(v => `<line x1="${padL}" y1="${y(v).toFixed(1)}" x2="${W - padR}" y2="${y(v).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`).join('');
+
+  const tickIdxs = n <= 1 ? [0] : [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
+  const xLabels = tickIdxs.map(i => `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="var(--fg-dim)">${dates[i].slice(5)}</text>`).join('');
+
+  const legend = series.map(s => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;font-size:12px;color:var(--fg-muted)"><span style="width:10px;height:10px;border-radius:2px;background:${s.color};display:inline-block"></span>${escHtml(s.name)}</span>`).join('');
+
+  return `<div style="margin-bottom:8px">${legend}</div>
+    <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;overflow:visible">
+      ${yGrid}${lines}${yLabels}${xLabels}
+    </svg>`;
+}
+
+// Horizontal bar list for "top countries" (comparison → bar, per this app's own chart-type
+// convention) — text label + number always shown alongside the bar's length/color, not
+// color/length alone, so it stays readable without relying on color perception.
+function renderCountryBarList(rows, color) {
+  if (!rows.length) return `<div class="empty-state" style="padding:24px 0"><p>Không có dữ liệu</p></div>`;
+  const max = Math.max(...rows.map(r => r.cnt));
+  return rows.map(r => `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="width:32px;font-family:monospace;font-weight:600;font-size:13px">${escHtml(r.country)}</span>
+      <div style="flex:1;background:var(--surface2);border-radius:4px;height:18px;overflow:hidden">
+        <div style="width:${(r.cnt / max * 100).toFixed(1)}%;background:${color};height:100%;border-radius:4px"></div>
+      </div>
+      <span style="width:36px;text-align:right;font-weight:600;font-size:13px">${r.cnt}</span>
+    </div>`).join('');
+}
+
+function renderReportsOverviewTab() {
+  const d = reportsData;
+  document.getElementById('reportsTabBody').innerHTML = `
+    <div class="table-wrap" style="padding:20px;margin-bottom:16px">
+      <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Xu hướng theo ngày</h3>
+      ${renderMultiLineChart(d.timeline.dates, [
+        { name: 'SSH bị chặn', color: 'var(--accent)', values: d.timeline.sshBlocked },
+        { name: 'WAF bị chặn', color: 'var(--red)', values: d.timeline.wafBlocked },
+        { name: 'Kết nối ra ngoài', color: 'var(--yellow)', values: d.timeline.outbound },
+      ])}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="table-wrap" style="padding:20px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top quốc gia tấn công vào (SSH + WAF)</h3>
+        ${renderCountryBarList(d.topCountriesInbound, 'var(--red)')}
+      </div>
+      <div class="table-wrap" style="padding:20px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top quốc gia có kết nối ra</h3>
+        ${renderCountryBarList(d.topCountriesOutbound, 'var(--yellow)')}
+      </div>
+    </div>`;
+}
+
+function renderReportsSshTab() {
+  const rows = reportsData.sshDetails;
+  document.getElementById('reportsTabBody').innerHTML = `
+    <div class="table-wrap">
+      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg><h3>Không có IP nước ngoài nào bị chặn SSH trong khoảng này</h3></div>` : `
+      <table>
+        <thead><tr><th>#</th><th>Thời gian</th><th>VM</th><th>IP</th><th>Quốc gia</th></tr></thead>
+        <tbody>${rows.map((r, i) => `
+          <tr>
+            <td style="color:var(--fg-dim)">${i + 1}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+            <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+            <td>${escHtml(r.country || '—')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+    </div>`;
+}
+
+function renderReportsWafTab() {
+  const rows = reportsData.wafDetails;
+  document.getElementById('reportsTabBody').innerHTML = `
+    <div class="table-wrap">
+      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><h3>Không có IP nước ngoài nào bị chặn WAF trong khoảng này</h3></div>` : `
+      <table>
+        <thead><tr><th>#</th><th>Thời gian</th><th>VM</th><th>IP</th><th>Quốc gia</th><th>Dạng tấn công</th></tr></thead>
+        <tbody>${rows.map((r, i) => `
+          <tr>
+            <td style="color:var(--fg-dim)">${i + 1}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+            <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+            <td>${escHtml(r.country || '—')}</td>
+            <td>${wafAttackCategoryBadge(r.attackCategory) || '<span style="color:var(--fg-dim)">—</span>'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+    </div>`;
+}
+
+function renderReportsOutboundTab() {
+  const rows = reportsData.outboundDetails;
+  document.getElementById('reportsTabBody').innerHTML = `
+    <div class="table-wrap">
+      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg><h3>Không có kết nối ra nước ngoài nào trong khoảng này</h3></div>` : `
+      <table>
+        <thead><tr><th>#</th><th>Lần cuối thấy</th><th>VM</th><th>IP đích</th><th>Cổng</th><th>Quốc gia</th><th>Tiến trình</th></tr></thead>
+        <tbody>${rows.map((r, i) => `
+          <tr>
+            <td style="color:var(--fg-dim)">${i + 1}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.last_seen)}</span></td>
+            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+            <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span></td>
+            <td>${r.remote_port ?? '—'}</td>
+            <td>${escHtml(r.country || '—')}</td>
+            <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}</span></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`}
+    </div>`;
+}
+
+// Exports whichever tab is currently active — the overview tab has no row-level table, so it falls
+// back to exporting the SSH detail (most commonly what "the report" means for this dataset).
+function exportReportsCsv() {
+  if (!reportsData) return;
+  let rows, headers, filenamePart;
+  if (reportsTab === 'waf') {
+    headers = ['Thời gian', 'VM', 'IP', 'Quốc gia', 'Dạng tấn công'];
+    rows = reportsData.wafDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country, r.attackCategory || '']);
+    filenamePart = 'waf-blocked';
+  } else if (reportsTab === 'outbound') {
+    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Cổng', 'Quốc gia', 'Tiến trình'];
+    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_port, r.country, r.process_name || '']);
+    filenamePart = 'outbound';
+  } else {
+    headers = ['Thời gian', 'VM', 'IP', 'Quốc gia'];
+    rows = reportsData.sshDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country]);
+    filenamePart = 'ssh-blocked';
+  }
+  const csv = [headers, ...rows].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `bao-cao-${filenamePart}-${reportsDays}ngay.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // Init
