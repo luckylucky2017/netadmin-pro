@@ -1,10 +1,12 @@
 // Admin page backing "Cấu hình Fail2ban" — read/write the global default detection thresholds +
-// bantime (fail2ban_config, id=1) and per-VM overrides (fail2ban_config_overrides), then push the
-// result into the actual jail.d files on affected servers (fail2ban-manager.js's/waf-manager.js's
+// bantime (fail2ban_config, id=1), named reusable profiles (fail2ban_config_profiles) assignable to
+// any server, and per-VM field-level overrides (fail2ban_config_overrides) — then push the result
+// into the actual jail.d files on affected servers (fail2ban-manager.js's/waf-manager.js's
 // pushIgnoreIp — despite the name, it now also re-applies the VM's current effective bantime, see
 // its own comment). Previously these values were hardcoded module-level constants in
 // ssh-security-collector.js/nginx-waf-collector.js — see fail2ban-config.js for how a per-VM
-// "effective" value is now resolved (global default, overridden per-field if a row exists here).
+// "effective" value is now resolved (global default, overridden by an assigned profile, overridden
+// again by a per-VM field-level override — in that precedence).
 const express = require('express');
 const router = express.Router();
 const db = require('../database');
@@ -66,6 +68,12 @@ async function pushToVm(vm) {
   return results;
 }
 
+async function pushToVms(vms) {
+  const results = await Promise.allSettled(vms.map(pushToVm));
+  const ok = results.filter(r => r.status === 'fulfilled' && (r.value.ssh?.ok || r.value.waf?.ok)).length;
+  return { ok, total: vms.length };
+}
+
 router.get('/global', async (req, res) => {
   res.json(await fail2banConfig.getGlobalConfig());
 });
@@ -91,9 +99,82 @@ router.patch('/global', requirePermission('fail2ban.config.manage'), async (req,
     WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL AND fail2ban_status != 'running'
   `).all();
   const allVms = [...sshVms, ...wafOnlyVms];
-  const results = await Promise.allSettled(allVms.map(pushToVm));
-  const okCount = results.filter(r => r.status === 'fulfilled' && (r.value.ssh?.ok || r.value.waf?.ok)).length;
-  res.json({ config: await fail2banConfig.getGlobalConfig(), pushed: { ok: okCount, total: allVms.length } });
+  res.json({ config: await fail2banConfig.getGlobalConfig(), pushed: await pushToVms(allVms) });
+});
+
+// ── Profiles: named, reusable presets assignable to any server (vcenter_vms.fail2ban_profile_id) ──
+function validateProfileBody(body) {
+  const errors = [];
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name) errors.push('name: bắt buộc nhập tên hồ sơ');
+  if (name.length > 100) errors.push('name: tối đa 100 ký tự');
+  const description = typeof body.description === 'string' ? body.description.trim().slice(0, 255) : '';
+  const { clean, errors: fieldErrors } = validateBody(body, false);
+  errors.push(...fieldErrors);
+  // A profile must define every field (it's a complete bundle, not a partial override) — reject if
+  // any of the 10 required fields is missing from the request entirely.
+  const missing = fail2banConfig.FIELDS.filter(k => !(k in clean));
+  if (missing.length) errors.push(`Thiếu trường bắt buộc: ${missing.join(', ')}`);
+  return { name, description, clean, errors };
+}
+
+router.get('/profiles', async (req, res) => {
+  res.json(await fail2banConfig.getAllProfiles());
+});
+
+router.post('/profiles', requirePermission('fail2ban.config.manage'), async (req, res) => {
+  const { name, description, clean, errors } = validateProfileBody(req.body);
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+  const cols = Object.keys(clean);
+  try {
+    const result = await db.prepare(`
+      INSERT INTO fail2ban_config_profiles (name, description, ${cols.join(', ')})
+      VALUES (?, ?, ${cols.map(() => '?').join(', ')})
+    `).run(name, description || null, ...cols.map(c => clean[c]));
+    await logActivity(req.user, 'CREATE', 'fail2ban_config_profile', result.lastInsertRowid, name, `Tạo hồ sơ cấu hình fail2ban: ${name}`);
+    res.json(await fail2banConfig.getProfile(result.lastInsertRowid));
+  } catch (e) {
+    if (e.errno === 1062) return res.status(400).json({ error: `Đã tồn tại hồ sơ tên "${name}"` });
+    throw e;
+  }
+});
+
+router.patch('/profiles/:id', requirePermission('fail2ban.config.manage'), async (req, res) => {
+  const profileId = Number(req.params.id);
+  const profile = await fail2banConfig.getProfile(profileId);
+  if (!profile) return res.status(404).json({ error: 'Không tìm thấy hồ sơ' });
+
+  const { name, description, clean, errors } = validateProfileBody(req.body);
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+  const cols = Object.keys(clean);
+  try {
+    await db.prepare(`
+      UPDATE fail2ban_config_profiles SET name = ?, description = ?, ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?
+    `).run(name, description || null, ...cols.map(c => clean[c]), profileId);
+  } catch (e) {
+    if (e.errno === 1062) return res.status(400).json({ error: `Đã tồn tại hồ sơ tên "${name}"` });
+    throw e;
+  }
+  await logActivity(req.user, 'UPDATE', 'fail2ban_config_profile', profileId, name, `Cập nhật hồ sơ cấu hình fail2ban: ${name}`);
+
+  // Live reference — every server currently assigned to this profile needs the new values re-pushed.
+  const vms = await fail2banConfig.getVmsUsingProfile(profileId);
+  res.json({ profile: await fail2banConfig.getProfile(profileId), pushed: await pushToVms(vms) });
+});
+
+router.delete('/profiles/:id', requirePermission('fail2ban.config.manage'), async (req, res) => {
+  const profileId = Number(req.params.id);
+  const profile = await fail2banConfig.getProfile(profileId);
+  if (!profile) return res.status(404).json({ error: 'Không tìm thấy hồ sơ' });
+
+  // Every VM using this profile falls back to the global default (or its own override, if any) —
+  // unassign first, then delete, then re-push so those servers' real jail.d files reflect the loss
+  // of the profile immediately instead of silently drifting until their next unrelated push.
+  const vms = await fail2banConfig.getVmsUsingProfile(profileId);
+  await db.prepare('UPDATE vcenter_vms SET fail2ban_profile_id = NULL WHERE fail2ban_profile_id = ?').run(profileId);
+  await db.prepare('DELETE FROM fail2ban_config_profiles WHERE id = ?').run(profileId);
+  await logActivity(req.user, 'DELETE', 'fail2ban_config_profile', profileId, profile.name, `Xóa hồ sơ cấu hình fail2ban: ${profile.name} (${vms.length} server quay lại cấu hình mặc định)`);
+  res.json({ pushed: await pushToVms(vms) });
 });
 
 // Every VM that's a candidate for an override — SSH-monitored (fail2ban ever checked/installed) or
@@ -101,13 +182,18 @@ router.patch('/global', requirePermission('fail2ban.config.manage'), async (req,
 // the jail is even installed; the push simply no-ops for a VM with no running jail yet (pushToVm).
 router.get('/overrides', async (req, res) => {
   const vms = await db.prepare(`
-    SELECT id, name FROM vcenter_vms
-    WHERE ssh_credential_id IS NOT NULL AND (fail2ban_status IS NOT NULL OR waf_enabled = 1)
-    ORDER BY name ASC
+    SELECT v.id, v.name, v.fail2ban_profile_id, p.name as profileName FROM vcenter_vms v
+    LEFT JOIN fail2ban_config_profiles p ON p.id = v.fail2ban_profile_id
+    WHERE v.ssh_credential_id IS NOT NULL AND (v.fail2ban_status IS NOT NULL OR v.waf_enabled = 1)
+    ORDER BY v.name ASC
   `).all();
   const overrides = await fail2banConfig.getAllOverrides();
   const byVm = new Map(overrides.map(o => [o.vm_id, o]));
-  res.json(vms.map(vm => ({ vmId: vm.id, vmName: vm.name, override: byVm.get(vm.id) || null })));
+  res.json(vms.map(vm => ({
+    vmId: vm.id, vmName: vm.name,
+    profileId: vm.fail2ban_profile_id, profileName: vm.profileName || null,
+    override: byVm.get(vm.id) || null,
+  })));
 });
 
 router.get('/effective/:vmId', async (req, res) => {
@@ -119,17 +205,37 @@ router.patch('/overrides/:vmId', requirePermission('fail2ban.config.manage'), as
   const vm = await db.prepare('SELECT id, name, ip_address, ssh_credential_id, ssh_port, fail2ban_status, waf_jail_status FROM vcenter_vms WHERE id = ?').get(vmId);
   if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
 
+  // profileId is optional and independent of the per-field overrides below: undefined = leave the
+  // VM's current profile assignment untouched, null = explicitly unassign, a number = assign (must
+  // reference a real profile).
+  let profileTouched = false;
+  if ('profileId' in req.body) {
+    const raw = req.body.profileId;
+    if (raw === null) {
+      await db.prepare('UPDATE vcenter_vms SET fail2ban_profile_id = NULL WHERE id = ?').run(vmId);
+      profileTouched = true;
+    } else {
+      const profile = await fail2banConfig.getProfile(Number(raw));
+      if (!profile) return res.status(400).json({ error: 'Hồ sơ cấu hình không tồn tại' });
+      await db.prepare('UPDATE vcenter_vms SET fail2ban_profile_id = ? WHERE id = ?').run(profile.id, vmId);
+      profileTouched = true;
+    }
+  }
+
   const { clean, errors } = validateBody(req.body, true);
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
   const cols = Object.keys(clean);
-  if (!cols.length) return res.status(400).json({ error: 'Không có trường nào để cập nhật' });
+  if (!cols.length && !profileTouched) return res.status(400).json({ error: 'Không có trường nào để cập nhật' });
 
-  await db.prepare(`
-    INSERT INTO fail2ban_config_overrides (vm_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})
-    ON DUPLICATE KEY UPDATE ${cols.map(c => `${c} = VALUES(${c})`).join(', ')}
-  `).run(vmId, ...cols.map(c => clean[c]));
+  if (cols.length) {
+    await db.prepare(`
+      INSERT INTO fail2ban_config_overrides (vm_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})
+      ON DUPLICATE KEY UPDATE ${cols.map(c => `${c} = VALUES(${c})`).join(', ')}
+    `).run(vmId, ...cols.map(c => clean[c]));
+  }
 
-  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Ghi đè cấu hình fail2ban riêng cho VM: ${cols.join(', ')}`);
+  const changeNote = [profileTouched ? 'hồ sơ' : null, cols.length ? cols.join(', ') : null].filter(Boolean).join('; ');
+  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Cập nhật cấu hình fail2ban riêng cho VM: ${changeNote}`);
   res.json({ effective: await fail2banConfig.getEffectiveConfig(vmId), pushed: await pushToVm(vm) });
 });
 

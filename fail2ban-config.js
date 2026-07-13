@@ -1,6 +1,7 @@
-// Resolves the "effective" fail2ban detection thresholds + bantime for a given VM by merging the
-// single global default row (fail2ban_config, id=1) with that VM's optional per-field override
-// (fail2ban_config_overrides) — see database.js for both tables' shape. Used by:
+// Resolves the "effective" fail2ban detection thresholds + bantime for a given VM. Precedence,
+// highest wins: per-VM override (fail2ban_config_overrides) > assigned profile
+// (fail2ban_config_profiles, via vcenter_vms.fail2ban_profile_id) > global default (fail2ban_config,
+// id=1) — see database.js for all 3 tables' shape and the reasoning behind that ordering. Used by:
 //   - ssh-security-collector.js's checkBruteForce (ssh_* fields)
 //   - nginx-waf-collector.js's detectPerIpEvents/detectDdos (waf_* fields)
 //   - fail2ban-manager.js/waf-manager.js when pushing bantime into the actual jail.d files on a VM
@@ -40,6 +41,23 @@ async function getAllOverrides() {
   return db.prepare('SELECT * FROM fail2ban_config_overrides').all();
 }
 
+async function getProfile(profileId) {
+  return db.prepare('SELECT * FROM fail2ban_config_profiles WHERE id = ?').get(profileId) || null;
+}
+
+async function getAllProfiles() {
+  return db.prepare('SELECT * FROM fail2ban_config_profiles ORDER BY name ASC').all();
+}
+
+// VMs currently assigned to a given profile — used by routes/fail2ban-config.js to know which
+// servers need a re-push whenever that profile's own values change or it gets deleted.
+async function getVmsUsingProfile(profileId) {
+  return db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port, fail2ban_status, waf_jail_status
+    FROM vcenter_vms WHERE fail2ban_profile_id = ?
+  `).all(profileId);
+}
+
 // Pure, testable: per-field, a non-null override value wins over the global default. Builds the
 // result from FIELDS only (not a spread of `global`) — global is often the raw fail2ban_config DB
 // row, which also carries id/updated_at; those have no meaning on a per-VM effective config and
@@ -56,8 +74,20 @@ function mergeConfig(global, override) {
 }
 
 async function getEffectiveConfig(vmId) {
-  const [global, override] = await Promise.all([getGlobalConfig(), vmId ? getOverride(vmId) : null]);
-  return mergeConfig(global, override);
+  const [global, override, vm] = await Promise.all([
+    getGlobalConfig(),
+    vmId ? getOverride(vmId) : null,
+    vmId ? db.prepare('SELECT fail2ban_profile_id FROM vcenter_vms WHERE id = ?').get(vmId) : null,
+  ]);
+  const profile = vm?.fail2ban_profile_id ? await getProfile(vm.fail2ban_profile_id) : null;
+  // A profile is a complete bundle (every field NOT NULL), so mergeConfig(global, profile) always
+  // takes every field from the profile when one is assigned — this is just reusing the same
+  // "non-null value wins" merge logic one level up, not a separate code path.
+  const base = profile ? mergeConfig(global, profile) : global;
+  return mergeConfig(base, override);
 }
 
-module.exports = { DEFAULTS, FIELDS, getGlobalConfig, getOverride, getAllOverrides, mergeConfig, getEffectiveConfig };
+module.exports = {
+  DEFAULTS, FIELDS, getGlobalConfig, getOverride, getAllOverrides, mergeConfig, getEffectiveConfig,
+  getProfile, getAllProfiles, getVmsUsingProfile,
+};

@@ -542,6 +542,35 @@ const SCHEMA_SQL = `
     waf_bantime_sec INT
   );
 
+  -- Named, reusable presets ("profiles") of the same 10 fields — unlike fail2ban_config_overrides
+  -- above, every column here is NOT NULL: a profile is a complete, self-contained bundle an admin
+  -- defines once (e.g. "High traffic", "Strict") and then assigns to any number of servers via
+  -- vcenter_vms.fail2ban_profile_id, rather than re-entering the same 10 values as a one-off override
+  -- on every server that needs them. A profile is a live reference, not a one-time copy — editing it
+  -- re-pushes the new values to every VM currently assigned to it (see routes/fail2ban-config.js's
+  -- PATCH /profiles/:id). Effective-config precedence (fail2ban-config.js's getEffectiveConfig):
+  -- per-VM override > assigned profile > global default — a profile replaces every field it defines
+  -- (all of them, since NOT NULL), an override on top of that is still an escape hatch for a single
+  -- field that needs to differ from the profile without forking a whole new profile for it.
+  CREATE TABLE IF NOT EXISTS fail2ban_config_profiles (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(100) NOT NULL,
+    description VARCHAR(255),
+    ssh_brute_force_window_sec INT NOT NULL DEFAULT 60,
+    ssh_brute_force_threshold INT NOT NULL DEFAULT 5,
+    ssh_block_foreign_immediately TINYINT NOT NULL DEFAULT 1,
+    ssh_bantime_sec INT NOT NULL DEFAULT -1,
+    waf_scan_error_threshold INT NOT NULL DEFAULT 20,
+    waf_dos_request_threshold INT NOT NULL DEFAULT 50,
+    waf_dos_window_sec INT NOT NULL DEFAULT 10,
+    waf_ddos_multiplier INT NOT NULL DEFAULT 5,
+    waf_ddos_min_total INT NOT NULL DEFAULT 200,
+    waf_bantime_sec INT NOT NULL DEFAULT -1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_fail2ban_profile_name (name)
+  );
+
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
   -- per unique (vm, remote ip, remote port) currently open — not an ever-growing event log — with
   -- first_seen/last_seen tracking so stale (closed) connections can be pruned.
@@ -855,6 +884,11 @@ async function ensureSchemaAndMigrations() {
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.
   await pool.query('INSERT IGNORE INTO fail2ban_config (id) VALUES (1)');
+
+  // Which fail2ban_config_profiles row (if any) this VM is assigned to — NULL means "no profile,
+  // governed by the global default (or a per-VM override)". See fail2ban_config_profiles' own
+  // comment above for the full effective-config precedence.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN fail2ban_profile_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
