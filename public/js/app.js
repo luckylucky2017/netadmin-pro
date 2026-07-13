@@ -6025,6 +6025,15 @@ async function loadVersionInfo() {
 let reportsDays = 7;
 let reportsData = null;
 let reportsTab = 'overview';
+let reportsSshSortState = { key: null, dir: 'asc' };
+let reportsSshPagination = newPagination();
+let reportsSshSearch = '';
+let reportsWafSortState = { key: null, dir: 'asc' };
+let reportsWafPagination = newPagination();
+let reportsWafSearch = '';
+let reportsOutboundSortState = { key: null, dir: 'asc' };
+let reportsOutboundPagination = newPagination();
+let reportsOutboundSearch = '';
 
 async function renderReports() {
   const c = document.getElementById('pageContent');
@@ -6055,22 +6064,26 @@ async function renderReports() {
       <div class="stat-card">
         <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg></div>
         <div class="stat-label">SSH bị chặn (sshd)</div>
-        <div class="stat-value blue">${reportsData.summary.sshBlocked}</div>
+        <div class="stat-value blue">${reportsData.summary.sshBlocked.value}</div>
+        ${reportsChangeBadge(reportsData.summary.sshBlocked)}
       </div>
       <div class="stat-card">
         <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
         <div class="stat-label">Tấn công WAF bị chặn</div>
-        <div class="stat-value red">${reportsData.summary.wafBlocked}</div>
+        <div class="stat-value red">${reportsData.summary.wafBlocked.value}</div>
+        ${reportsChangeBadge(reportsData.summary.wafBlocked)}
       </div>
       <div class="stat-card">
         <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
         <div class="stat-label">Kết nối ra nước ngoài</div>
-        <div class="stat-value yellow">${reportsData.summary.outboundForeign}</div>
+        <div class="stat-value yellow">${reportsData.summary.outboundForeign.value}</div>
+        ${reportsChangeBadge(reportsData.summary.outboundForeign)}
       </div>
       <div class="stat-card">
         <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 010 20 15.3 15.3 0 010-20z"/></svg></div>
         <div class="stat-label">Số quốc gia liên quan</div>
-        <div class="stat-value green">${reportsData.summary.countriesInvolved}</div>
+        <div class="stat-value green">${reportsData.summary.countriesInvolved.value}</div>
+        ${reportsChangeBadge(reportsData.summary.countriesInvolved)}
       </div>
     </div>
     <div class="filter-tabs" id="reportsTabs" style="margin-bottom:16px">
@@ -6087,7 +6100,22 @@ async function renderReports() {
 
 function onReportsDaysChange(val) {
   reportsDays = Number(val) || 7;
+  // A new range invalidates any in-progress search/sort/page position from the previous range —
+  // silently keeping page 5 selected on a now-much-shorter dataset would just show an empty table.
+  reportsSshPagination.page = 1; reportsWafPagination.page = 1; reportsOutboundPagination.page = 1;
   renderReports();
+}
+
+// KPI card period-over-period indicator — ▲ red / ▼ green (fewer attacks is the "good" direction
+// for every metric here, unlike a typical revenue KPI) or a flat dash when unchanged/no baseline.
+// Text + arrow together, not color alone (color-not-only) — colorblind-safe and screen-reader sane.
+function reportsChangeBadge(metric) {
+  const { changePct, previousValue } = metric;
+  if (changePct === null) return `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">Không có kỳ trước để so sánh</div>`;
+  if (changePct === 0) return `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">— không đổi so với kỳ trước (${previousValue})</div>`;
+  const up = changePct > 0;
+  const color = up ? 'var(--red)' : 'var(--accent)';
+  return `<div style="font-size:11px;color:${color};margin-top:2px;font-weight:600">${up ? '▲' : '▼'} ${Math.abs(changePct)}% so với kỳ trước (${previousValue})</div>`;
 }
 
 function setReportsTab(tab) {
@@ -6134,20 +6162,25 @@ function renderMultiLineChart(dates, series) {
     </svg>`;
 }
 
-// Horizontal bar list for "top countries" (comparison → bar, per this app's own chart-type
-// convention) — text label + number always shown alongside the bar's length/color, not
-// color/length alone, so it stays readable without relying on color perception.
-function renderCountryBarList(rows, color) {
+// Horizontal bar list — comparison → bar, per this app's own chart-type convention (avoided pie/
+// donut deliberately: WAF has ~9 attack categories, well past the "don't use pie for >5 categories"
+// threshold). Generic over what's being compared (country / attack category / VM name) via
+// labelFn; text label + number always shown alongside the bar's length/color, not color/length
+// alone, so it stays readable without relying on color perception.
+function renderBarList(rows, color, labelFn) {
   if (!rows.length) return `<div class="empty-state" style="padding:24px 0"><p>Không có dữ liệu</p></div>`;
   const max = Math.max(...rows.map(r => r.cnt));
-  return rows.map(r => `
+  return rows.map(r => {
+    const label = labelFn ? labelFn(r.key) : r.key;
+    return `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-      <span style="width:32px;font-family:monospace;font-weight:600;font-size:13px">${escHtml(r.country)}</span>
+      <span style="width:100px;flex-shrink:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(label)}">${escHtml(label)}</span>
       <div style="flex:1;background:var(--surface2);border-radius:4px;height:18px;overflow:hidden">
         <div style="width:${(r.cnt / max * 100).toFixed(1)}%;background:${color};height:100%;border-radius:4px"></div>
       </div>
       <span style="width:36px;text-align:right;font-weight:600;font-size:13px">${r.cnt}</span>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function renderReportsOverviewTab() {
@@ -6161,79 +6194,158 @@ function renderReportsOverviewTab() {
         { name: 'Kết nối ra ngoài', color: 'var(--yellow)', values: d.timeline.outbound },
       ])}
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
       <div class="table-wrap" style="padding:20px">
         <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top quốc gia tấn công vào (SSH + WAF)</h3>
-        ${renderCountryBarList(d.topCountriesInbound, 'var(--red)')}
+        ${renderBarList(d.topCountriesInbound, 'var(--red)')}
       </div>
       <div class="table-wrap" style="padding:20px">
         <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top quốc gia có kết nối ra</h3>
-        ${renderCountryBarList(d.topCountriesOutbound, 'var(--yellow)')}
+        ${renderBarList(d.topCountriesOutbound, 'var(--yellow)')}
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="table-wrap" style="padding:20px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Phân loại tấn công WAF</h3>
+        ${renderBarList(d.topAttackCategories, 'var(--accent)', k => ATTACK_CATEGORY_LABEL[k] || k)}
+      </div>
+      <div class="table-wrap" style="padding:20px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">VM bị tấn công nhiều nhất (SSH + WAF)</h3>
+        ${renderBarList(d.topVmsTargeted, 'var(--blue)')}
+      </div>
+    </div>`;
+}
+
+function reportsSearchBox(id, placeholder, value) {
+  return `<div class="table-toolbar">
+      <div class="search-box">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="${id}" placeholder="${placeholder}" value="${escAttr(value)}">
       </div>
     </div>`;
 }
 
 function renderReportsSshTab() {
-  const rows = reportsData.sshDetails;
   document.getElementById('reportsTabBody').innerHTML = `
     <div class="table-wrap">
-      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg><h3>Không có IP nước ngoài nào bị chặn SSH trong khoảng này</h3></div>` : `
-      <table>
-        <thead><tr><th>#</th><th>Thời gian</th><th>VM</th><th>IP</th><th>Quốc gia</th></tr></thead>
-        <tbody>${rows.map((r, i) => `
-          <tr>
-            <td style="color:var(--fg-dim)">${i + 1}</td>
-            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
-            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
-            <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
-            <td>${escHtml(r.country || '—')}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>`}
+      ${reportsSearchBox('reportsSshSearch', 'Tìm theo VM, IP, quốc gia...', reportsSshSearch)}
+      <div id="reportsSshBody"></div>
     </div>`;
+  document.getElementById('reportsSshSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { reportsSshSearch = e.target.value; reportsSshPagination.page = 1; renderReportsSshRows(); }, 300);
+  });
+  renderReportsSshRows();
+}
+function toggleReportsSshSort(key) { toggleSortState(reportsSshSortState, key); renderReportsSshRows(); }
+function renderReportsSshRows() {
+  const body = document.getElementById('reportsSshBody');
+  if (!body) return;
+  const q = reportsSshSearch.trim().toLowerCase();
+  const filtered = q ? reportsData.sshDetails.filter(r =>
+    (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q) || (r.country || '').toLowerCase().includes(q)
+  ) : reportsData.sshDetails;
+  if (!filtered.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg><h3>Không có IP nước ngoài nào bị chặn SSH trong khoảng này</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, reportsSshSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, reportsSshPagination);
+  const rowOffset = (reportsSshPagination.page - 1) * reportsSshPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'created_at', reportsSshSortState, 'toggleReportsSshSort')}${thSort('VM', 'vm_name', reportsSshSortState, 'toggleReportsSshSort')}${thSort('IP', 'ip', reportsSshSortState, 'toggleReportsSshSort')}${thSort('Quốc gia', 'country', reportsSshSortState, 'toggleReportsSshSort')}</tr></thead>
+      <tbody>${rows.map((r, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+          <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+          <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+          <td>${escHtml(r.country || '—')}</td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(reportsSshPagination, sorted.length, 'reportsSshPagination', 'renderReportsSshRows')}`;
 }
 
 function renderReportsWafTab() {
-  const rows = reportsData.wafDetails;
   document.getElementById('reportsTabBody').innerHTML = `
     <div class="table-wrap">
-      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><h3>Không có IP nước ngoài nào bị chặn WAF trong khoảng này</h3></div>` : `
-      <table>
-        <thead><tr><th>#</th><th>Thời gian</th><th>VM</th><th>IP</th><th>Quốc gia</th><th>Dạng tấn công</th></tr></thead>
-        <tbody>${rows.map((r, i) => `
-          <tr>
-            <td style="color:var(--fg-dim)">${i + 1}</td>
-            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
-            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
-            <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
-            <td>${escHtml(r.country || '—')}</td>
-            <td>${wafAttackCategoryBadge(r.attackCategory) || '<span style="color:var(--fg-dim)">—</span>'}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>`}
+      ${reportsSearchBox('reportsWafSearch', 'Tìm theo VM, IP, quốc gia...', reportsWafSearch)}
+      <div id="reportsWafBody"></div>
     </div>`;
+  document.getElementById('reportsWafSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { reportsWafSearch = e.target.value; reportsWafPagination.page = 1; renderReportsWafRows(); }, 300);
+  });
+  renderReportsWafRows();
+}
+function toggleReportsWafSort(key) { toggleSortState(reportsWafSortState, key); renderReportsWafRows(); }
+function renderReportsWafRows() {
+  const body = document.getElementById('reportsWafBody');
+  if (!body) return;
+  const q = reportsWafSearch.trim().toLowerCase();
+  const filtered = q ? reportsData.wafDetails.filter(r =>
+    (r.vm_name || '').toLowerCase().includes(q) || (r.ip || '').toLowerCase().includes(q) || (r.country || '').toLowerCase().includes(q)
+  ) : reportsData.wafDetails;
+  if (!filtered.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg><h3>Không có IP nước ngoài nào bị chặn WAF trong khoảng này</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, reportsWafSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, reportsWafPagination);
+  const rowOffset = (reportsWafPagination.page - 1) * reportsWafPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'created_at', reportsWafSortState, 'toggleReportsWafSort')}${thSort('VM', 'vm_name', reportsWafSortState, 'toggleReportsWafSort')}${thSort('IP', 'ip', reportsWafSortState, 'toggleReportsWafSort')}${thSort('Quốc gia', 'country', reportsWafSortState, 'toggleReportsWafSort')}<th>Dạng tấn công</th></tr></thead>
+      <tbody>${rows.map((r, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+          <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+          <td><span style="font-family:monospace">${escHtml(r.ip)}</span></td>
+          <td>${escHtml(r.country || '—')}</td>
+          <td>${wafAttackCategoryBadge(r.attackCategory) || '<span style="color:var(--fg-dim)">—</span>'}</td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(reportsWafPagination, sorted.length, 'reportsWafPagination', 'renderReportsWafRows')}`;
 }
 
 function renderReportsOutboundTab() {
-  const rows = reportsData.outboundDetails;
   document.getElementById('reportsTabBody').innerHTML = `
     <div class="table-wrap">
-      ${!rows.length ? `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg><h3>Không có kết nối ra nước ngoài nào trong khoảng này</h3></div>` : `
-      <table>
-        <thead><tr><th>#</th><th>Lần cuối thấy</th><th>VM</th><th>IP đích</th><th>Cổng</th><th>Quốc gia</th><th>Tiến trình</th></tr></thead>
-        <tbody>${rows.map((r, i) => `
-          <tr>
-            <td style="color:var(--fg-dim)">${i + 1}</td>
-            <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.last_seen)}</span></td>
-            <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
-            <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span></td>
-            <td>${r.remote_port ?? '—'}</td>
-            <td>${escHtml(r.country || '—')}</td>
-            <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}</span></td>
-          </tr>`).join('')}
-        </tbody>
-      </table>`}
+      ${reportsSearchBox('reportsOutboundSearch', 'Tìm theo VM, IP, quốc gia...', reportsOutboundSearch)}
+      <div id="reportsOutboundBody"></div>
     </div>`;
+  document.getElementById('reportsOutboundSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { reportsOutboundSearch = e.target.value; reportsOutboundPagination.page = 1; renderReportsOutboundRows(); }, 300);
+  });
+  renderReportsOutboundRows();
+}
+function toggleReportsOutboundSort(key) { toggleSortState(reportsOutboundSortState, key); renderReportsOutboundRows(); }
+function renderReportsOutboundRows() {
+  const body = document.getElementById('reportsOutboundBody');
+  if (!body) return;
+  const q = reportsOutboundSearch.trim().toLowerCase();
+  const filtered = q ? reportsData.outboundDetails.filter(r =>
+    (r.vm_name || '').toLowerCase().includes(q) || (r.remote_ip || '').toLowerCase().includes(q) || (r.country || '').toLowerCase().includes(q)
+  ) : reportsData.outboundDetails;
+  if (!filtered.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg><h3>Không có kết nối ra nước ngoài nào trong khoảng này</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, reportsOutboundSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, reportsOutboundPagination);
+  const rowOffset = (reportsOutboundPagination.page - 1) * reportsOutboundPagination.pageSize;
+  body.innerHTML = `<table>
+      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình</th></tr></thead>
+      <tbody>${rows.map((r, i) => `
+        <tr>
+          <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.last_seen)}</span></td>
+          <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
+          <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span></td>
+          <td>${r.remote_port ?? '—'}</td>
+          <td>${escHtml(r.country || '—')}</td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}</span></td>
+        </tr>`).join('')}
+      </tbody></table>${paginationBar(reportsOutboundPagination, sorted.length, 'reportsOutboundPagination', 'renderReportsOutboundRows')}`;
 }
 
 // Exports whichever tab is currently active — the overview tab has no row-level table, so it falls
