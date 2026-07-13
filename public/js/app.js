@@ -4345,16 +4345,16 @@ function openFail2banOverrideForm(o) {
   const profileOptions = fail2banProfilesData.map(p =>
     `<option value="${p.id}" ${o.profileId === p.id ? 'selected' : ''}>${escHtml(p.name)}</option>`
   ).join('');
-  // baseValues for the "kế thừa" hints below reflects the profile assigned WHEN THE MODAL OPENED —
-  // if the admin changes the profile dropdown without saving, the per-field placeholders don't
-  // live-update to the new profile's values (reopening the modal after saving shows fresh ones).
+  // baseValues for the "kế thừa" hints below starts as whatever profile is assigned when the modal
+  // opens — updateFail2banBaseValues (wired to the profile <select>'s onchange) keeps these in sync
+  // if the admin switches the dropdown before saving, so the hints never show a stale profile.
   const assignedProfile = o.profileId ? fail2banProfilesData.find(p => p.id === o.profileId) : null;
   const baseValues = assignedProfile || fail2banGlobalData;
   openModal(`Cấu hình riêng cho "${o.vmName}"`, `
     <form id="fail2banOverrideForm" onsubmit="saveFail2banOverride(event, ${o.vmId})">
       <div class="form-group full" style="margin-bottom:16px">
         <label>Hồ sơ cấu hình (tùy chọn)</label>
-        <select name="profileId" class="form-select">
+        <select name="profileId" class="form-select" onchange="updateFail2banBaseValues(this)">
           <option value="">Không dùng hồ sơ — theo cấu hình mặc định chung</option>
           ${profileOptions}
         </select>
@@ -4368,6 +4368,29 @@ function openFail2banOverrideForm(o) {
         <button type="submit" class="btn btn-primary">Lưu & áp dụng</button>
       </div>
     </form>`);
+}
+
+// Wired to the profile <select>'s onchange in openFail2banOverrideForm — when the admin switches
+// the assigned profile before saving, the "Kế thừa: X" placeholder/option text on every field below
+// must update to reflect the NEWLY selected profile (or global default when unassigning), not stay
+// stuck showing whichever profile was assigned when the modal opened. Only touches placeholder text
+// and the inherit-option's label — never an actual field value — so anything the admin already
+// typed into an override field is preserved untouched.
+function updateFail2banBaseValues(selectEl) {
+  const form = selectEl.form;
+  const profileId = selectEl.value ? Number(selectEl.value) : null;
+  const profile = profileId ? fail2banProfilesData.find(p => p.id === profileId) : null;
+  const base = profile || fail2banGlobalData;
+  for (const f of FAIL2BAN_FIELD_META) {
+    const el = form.elements[f.key];
+    if (!el) continue;
+    if (f.type === 'bool') {
+      const inheritOption = el.querySelector('option[value=""]');
+      if (inheritOption) inheritOption.textContent = `Kế thừa (${base[f.key] ? 'Bật' : 'Tắt'})`;
+    } else {
+      el.placeholder = `Kế thừa: ${base[f.key]}`;
+    }
+  }
 }
 
 async function saveFail2banOverride(e, vmId) {
