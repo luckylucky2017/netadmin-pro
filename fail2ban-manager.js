@@ -17,12 +17,20 @@ const db = require('./database');
 const { logActivity } = require('./auth');
 const sshCredentials = require('./ssh-credentials');
 const wafManager = require('./waf-manager');
+const fail2banConfig = require('./fail2ban-config');
 
 // Real, on-disk file (fail2ban-templates/netadmin-sshd.local) is the source of truth — same reason
 // as waf-manager.js's WAF templates: an admin can `sudo cp` it manually on a machine set up outside
-// this app instead of only being able to get this content via the "Bật fail2ban" button.
-const SSHD_JAIL_TEMPLATE = fs.readFileSync(path.join(__dirname, 'fail2ban-templates', 'netadmin-sshd.local'), 'utf8')
+// this app instead of only being able to get this content via the "Bật fail2ban" button. The file's
+// own bantime (-1) is just its sane default for that manual-copy path — buildSshdJailTemplate below
+// substitutes the VM's actual effective bantime (fail2ban-config.js, editable from the "Cấu hình
+// Fail2ban" admin page) whenever this app itself pushes the file.
+const SSHD_JAIL_TEMPLATE_RAW = fs.readFileSync(path.join(__dirname, 'fail2ban-templates', 'netadmin-sshd.local'), 'utf8')
   .split('\n').filter(line => !line.trim().startsWith('#')).join('\n').trim();
+
+function buildSshdJailTemplate(bantimeSec) {
+  return SSHD_JAIL_TEMPLATE_RAW.replace(/^bantime\s*=.*/m, `bantime = ${bantimeSec}`);
+}
 
 // "systemctl is-active" only proves the DAEMON is running — it says nothing about whether the sshd
 // JAIL is actually enabled inside it. Confirmed on real hosts: Ubuntu 24.04's fail2ban package does
@@ -72,7 +80,7 @@ fi` : ''}
 // comment above) and, when includeWaf, splices in waf-manager.js's own jail-config-writing step so
 // both jails get configured in one combined install + single reload, rather than two separate SSH
 // round-trips that could disagree if one half fails.
-function buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine) {
+function buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine, sshBantimeSec, wafBantimeSec) {
   return `
 set -e
 if command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt
@@ -96,10 +104,10 @@ case "$PKG_MGR" in
 esac
 sudo -n mkdir -p /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
-${SSHD_JAIL_TEMPLATE}
+${buildSshdJailTemplate(sshBantimeSec)}
 ${sshdIgnoreIpLine}
 SSHD_EOF
-${includeWaf ? wafManager.buildWafJailFilesScript(wafIgnoreIpLine) : ''}
+${includeWaf ? wafManager.buildWafJailFilesScript(wafIgnoreIpLine, wafBantimeSec) : ''}
 sudo -n systemctl enable --now fail2ban
 sleep 2
 sudo -n fail2ban-client reload --restart 2>/dev/null || true
@@ -202,7 +210,8 @@ async function installFail2ban(vm, user = null) {
     const includeWaf = !!vm.waf_enabled;
     const sshdIgnoreIpLine = buildIgnoreIpLine(await getExceptions());
     const wafIgnoreIpLine = includeWaf ? buildIgnoreIpLine(await wafManager.getExceptions()) : '';
-    const result = await ssh.execCommand(buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine));
+    const config = await fail2banConfig.getEffectiveConfig(vm.id);
+    const result = await ssh.execCommand(buildInstallScript(includeWaf, sshdIgnoreIpLine, wafIgnoreIpLine, config.ssh_bantime_sec, config.waf_bantime_sec));
     const sshdStatus = /^SSHD_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (sshdStatus === 'running') {
       await setStatus.run('running', null, vm.id);
@@ -266,18 +275,23 @@ async function getExceptions() {
   return db.prepare('SELECT id, ip, note FROM ssh_ip_exceptions').all();
 }
 
-// Re-writes the sshd jail's config with the CURRENT ssh_ip_exceptions baked into `ignoreip` and
-// reloads just this jail — mirrors waf-manager.js's pushIgnoreIp exactly, see its comment for why
-// `reload --restart <jail>` is the right/proven tool here and why it doesn't drop real active bans.
+// Re-writes the sshd jail's config with the CURRENT ssh_ip_exceptions baked into `ignoreip` AND the
+// VM's current effective bantime (fail2ban-config.js) and reloads just this jail — mirrors
+// waf-manager.js's pushIgnoreIp exactly, see its comment for why `reload --restart <jail>` is the
+// right/proven tool here and why it doesn't drop real active bans. Re-applying bantime here too
+// (not just ignoreip) means every existing caller of this function (routes/security.js, whenever
+// exceptions change) also keeps the jail's bantime in sync for free — the "Cấu hình Fail2ban" admin
+// page reuses this exact same function after saving, rather than needing a second push path.
 async function pushIgnoreIp(vm) {
   let ssh;
   try {
     ssh = await connect(vm);
     const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const config = await fail2banConfig.getEffectiveConfig(vm.id);
     const script = `
 sudo -n mkdir -p /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/jail.d/netadmin-sshd.local >/dev/null <<'SSHD_EOF'
-${SSHD_JAIL_TEMPLATE}
+${buildSshdJailTemplate(config.ssh_bantime_sec)}
 ${ignoreIpLine}
 SSHD_EOF
 sudo -n fail2ban-client reload --restart ${SSHD_JAIL_NAME} 2>&1

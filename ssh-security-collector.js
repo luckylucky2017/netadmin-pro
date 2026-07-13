@@ -89,12 +89,14 @@ const upsertCursor = db.prepare(`
 `);
 
 const INITIAL_LOOKBACK_LINES = 200;
-// Retuned against real attack data: the original 10-in-300s missed a real distributed slow
-// brute-force (11 different IPs from the same /24, each pacing ~1 attempt/7-15min — always well
-// under any per-IP volume threshold, domestic or not). 5-in-60s now catches a genuinely fast
-// domestic burst; the foreign-IP rule below is what actually neutralizes the slow/distributed case.
-const BRUTE_FORCE_WINDOW_SEC = 60;
-const BRUTE_FORCE_THRESHOLD = 5;
+// ssh_brute_force_window_sec/ssh_brute_force_threshold/ssh_block_foreign_immediately used to be
+// hardcoded here (60s/5/always-on) — now resolved per-VM via fail2ban-config.js's
+// getEffectiveConfig, editable from the "Cấu hình Fail2ban" admin page. Retuned once already against
+// real attack data: the original 10-in-300s default missed a real distributed slow brute-force (11
+// different IPs from the same /24, each pacing ~1 attempt/7-15min — always well under any per-IP
+// volume threshold, domestic or not); 5-in-60s catches a genuinely fast domestic burst, and the
+// foreign-IP rule is what actually neutralizes the slow/distributed case.
+const fail2banConfig = require('./fail2ban-config');
 
 async function raiseForeignLoginAlert(vm, parsed, country) {
   await db.prepare(`
@@ -125,21 +127,21 @@ async function tryImmediateBan(ssh, ip) {
 }
 
 // Two independent triggers, unioned in one query: (a) the usual volume threshold — cnt >=
-// BRUTE_FORCE_THRESHOLD within BRUTE_FORCE_WINDOW_SEC, catches a fast domestic burst; (b) ANY
-// failed attempt at all from a foreign (non-VN) IP — zero tolerance, no threshold, since a
-// legitimate failed login (a typo) is overwhelmingly domestic, and this is what actually catches a
-// slow/distributed attacker that paces each IP under the volume threshold (see constants above).
-// MAX(is_foreign)/MAX(country) is safe per-src_ip: is_foreign is a deterministic function of the IP
-// (classifyIp), never mixed within one GROUP BY src_ip bucket.
-async function checkBruteForce(vm, ssh) {
+// config.ssh_brute_force_threshold within config.ssh_brute_force_window_sec, catches a fast domestic
+// burst; (b) when config.ssh_block_foreign_immediately is on, ANY failed attempt at all from a
+// foreign (non-VN) IP — zero tolerance, no threshold, since a legitimate failed login (a typo) is
+// overwhelmingly domestic, and this is what actually catches a slow/distributed attacker that paces
+// each IP under the volume threshold. MAX(is_foreign)/MAX(country) is safe per-src_ip: is_foreign is
+// a deterministic function of the IP (classifyIp), never mixed within one GROUP BY src_ip bucket.
+async function checkBruteForce(vm, ssh, config) {
   const suspects = await db.prepare(`
     SELECT src_ip, COUNT(*) as cnt, MAX(is_foreign) as is_foreign, MAX(country) as country
     FROM ssh_login_events
     WHERE source_type = 'vm' AND source_id = ? AND event_type = 'failed'
       AND occurred_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)
     GROUP BY src_ip
-    HAVING cnt >= ? OR MAX(is_foreign) = 1
-  `).all(vm.id, BRUTE_FORCE_WINDOW_SEC, BRUTE_FORCE_THRESHOLD);
+    HAVING cnt >= ? ${config.ssh_block_foreign_immediately ? 'OR MAX(is_foreign) = 1' : ''}
+  `).all(vm.id, config.ssh_brute_force_window_sec, config.ssh_brute_force_threshold);
   if (!suspects.length) return;
 
   const exceptions = await fail2banManager.getExceptions();
@@ -151,7 +153,10 @@ async function checkBruteForce(vm, ssh) {
     // a real brute-force signal worth surfacing.
     if (fail2banManager.isExceptedIp(b.src_ip, exceptions)) continue;
 
-    const isForeign = !!b.is_foreign;
+    // Only genuinely triggered by the zero-tolerance foreign rule (not incidentally also over the
+    // volume threshold) gets the "blocked immediately, no threshold" message below — otherwise the
+    // volume-based wording applies even for a foreign IP that happened to also cross the count.
+    const triggeredByForeignRule = !!b.is_foreign && config.ssh_block_foreign_immediately && b.cnt < config.ssh_brute_force_threshold;
     const blocked = await tryImmediateBan(ssh, b.src_ip);
 
     // Successfully blocked: don't raise a separate ssh_bruteforce alert — fail2ban-collector.js's
@@ -171,9 +176,9 @@ async function checkBruteForce(vm, ssh) {
         AND metric_value = ? AND status = 'open'
     `).get(vm.id, b.src_ip);
     if (already) continue;
-    const reason = isForeign
+    const reason = triggeredByForeignRule
       ? `Đăng nhập SSH thất bại từ IP nước ngoài${b.country ? ` (${b.country})` : ''} — chặn ngay không cần chờ đủ ngưỡng`
-      : `${b.cnt} lần đăng nhập thất bại trong ${Math.round(BRUTE_FORCE_WINDOW_SEC / 60)} phút qua`;
+      : `${b.cnt} lần đăng nhập thất bại trong ${Math.round(config.ssh_brute_force_window_sec / 60)} phút qua`;
     await db.prepare(`
       INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
       VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, 'ssh_bruteforce', ?, 'open')
@@ -227,7 +232,7 @@ async function collectVm(vm) {
         await insertEvent.run(vm.id, vm.name, parsed.eventType, parsed.username, parsed.ip, country, isForeign, toSqlDatetime(parseSyslogTimestamp(line)));
         if (parsed.eventType === 'accepted' && isForeign) await raiseForeignLoginAlert(vm, parsed, country);
       }
-      await checkBruteForce(vm, ssh);
+      await checkBruteForce(vm, ssh, await fail2banConfig.getEffectiveConfig(vm.id));
     }
     await upsertCursor.run('vm', vm.id, totalLines);
   } catch (e) {
@@ -256,4 +261,4 @@ function start(intervalMs = 45000) {
   return setInterval(tick, intervalMs);
 }
 
-module.exports = { start, collectAll, collectVm, parseLine, classifyIp };
+module.exports = { start, collectAll, collectVm, parseLine, classifyIp, checkBruteForce };

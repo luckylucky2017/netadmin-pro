@@ -15,6 +15,7 @@ const path = require('path');
 const db = require('./database');
 const { logActivity } = require('./auth');
 const sshCredentials = require('./ssh-credentials');
+const fail2banConfig = require('./fail2ban-config');
 
 const JAIL_NAME = 'netadmin-waf';
 
@@ -29,7 +30,13 @@ function loadTemplate(filename) {
   return raw.split('\n').filter(line => !line.trim().startsWith('#')).join('\n').trim();
 }
 const WAF_FILTER_TEMPLATE = loadTemplate('netadmin-waf-filter.local');
-const WAF_JAIL_TEMPLATE = loadTemplate('netadmin-waf-jail.local');
+// The file's own bantime (-1) is just its sane default for the manual-copy path documented in its
+// header comment — buildWafJailTemplate substitutes the VM's actual effective bantime (
+// fail2ban-config.js, editable from the "Cấu hình Fail2ban" admin page) whenever this app pushes it.
+const WAF_JAIL_TEMPLATE_RAW = loadTemplate('netadmin-waf-jail.local');
+function buildWafJailTemplate(bantimeSec) {
+  return WAF_JAIL_TEMPLATE_RAW.replace(/^bantime\s*=.*/m, `bantime = ${bantimeSec}`);
+}
 
 // Absolute path, safe charset only (letters/digits/_-./) — this value comes from an admin-editable
 // text field (routes/waf.js's PATCH /waf/vms/:id) and gets interpolated into a remote shell command
@@ -80,14 +87,14 @@ fi
 // ignoreIpLine: the current waf_ip_exceptions baked into fail2ban's own `ignoreip` (see
 // ip-exceptions.js's buildIgnoreIpLine) — appended into the jail section so fail2ban itself refuses
 // to ban an excepted IP, not just this app's own isExceptedIp() check in banIp() below.
-function buildWafJailFilesScript(ignoreIpLine) {
+function buildWafJailFilesScript(ignoreIpLine, bantimeSec) {
   return `
 sudo -n mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
 sudo -n tee /etc/fail2ban/filter.d/${JAIL_NAME}.local >/dev/null <<'FILTER_EOF'
 ${WAF_FILTER_TEMPLATE}
 FILTER_EOF
 sudo -n tee /etc/fail2ban/jail.d/${JAIL_NAME}.local >/dev/null <<'JAIL_EOF'
-${WAF_JAIL_TEMPLATE}
+${buildWafJailTemplate(bantimeSec)}
 ${ignoreIpLine}
 JAIL_EOF
 `.trim();
@@ -95,7 +102,7 @@ JAIL_EOF
 
 // Ensures the fail2ban package itself is present (same apt/dnf/yum detection as
 // fail2ban-manager.js's INSTALL_SCRIPT), then writes the WAF jail's config and reloads.
-function buildInstallScript(ignoreIpLine) {
+function buildInstallScript(ignoreIpLine, bantimeSec) {
   return `
 set -e
 if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -111,7 +118,7 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
   esac
   sudo -n systemctl enable --now fail2ban
 fi
-${buildWafJailFilesScript(ignoreIpLine)}
+${buildWafJailFilesScript(ignoreIpLine, bantimeSec)}
 sudo -n fail2ban-client reload --restart
 sleep 1
 OUT=$(sudo -n fail2ban-client status ${JAIL_NAME} 2>&1)
@@ -169,7 +176,8 @@ async function installJail(vm, user = null) {
   try {
     ssh = await connect(vm);
     const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
-    const result = await ssh.execCommand(buildInstallScript(ignoreIpLine));
+    const config = await fail2banConfig.getEffectiveConfig(vm.id);
+    const result = await ssh.execCommand(buildInstallScript(ignoreIpLine, config.waf_bantime_sec));
     const finalStatus = /^FINAL_STATUS:(\S+)/m.exec(result.stdout)?.[1];
     if (finalStatus === 'running') {
       await setStatus.run('running', null, vm.id);
@@ -226,21 +234,24 @@ async function getExceptions() {
   return db.prepare('SELECT id, ip, note FROM waf_ip_exceptions').all();
 }
 
-// Re-writes the WAF jail's config with the CURRENT waf_ip_exceptions baked into `ignoreip` and
-// reloads just this jail (not the whole daemon, not the other jails on the VM) — called by
-// routes/waf.js on every waf_jail_status='running' VM whenever the exceptions list changes, so an
-// exception is enforced by fail2ban itself going forward, not just reactively unbanned after the
-// fact by nginx-waf-collector.js's own reconciliation. `reload --restart <jail>` (not bare reload)
-// is the same pattern proven elsewhere in this file/fail2ban-manager.js to reliably apply jail
-// config changes on fail2ban 1.0.2; fail2ban persists ban state in its own sqlite DB and re-applies
-// still-valid bans on a jail restart, so this does not drop real active bans.
+// Re-writes the WAF jail's config with the CURRENT waf_ip_exceptions baked into `ignoreip` AND the
+// VM's current effective bantime (fail2ban-config.js) and reloads just this jail (not the whole
+// daemon, not the other jails on the VM) — called by routes/waf.js on every waf_jail_status='running'
+// VM whenever the exceptions list changes, so an exception is enforced by fail2ban itself going
+// forward, not just reactively unbanned after the fact by nginx-waf-collector.js's own
+// reconciliation. `reload --restart <jail>` (not bare reload) is the same pattern proven elsewhere in
+// this file/fail2ban-manager.js to reliably apply jail config changes on fail2ban 1.0.2; fail2ban
+// persists ban state in its own sqlite DB and re-applies still-valid bans on a jail restart, so this
+// does not drop real active bans. Re-applying bantime here too means every existing caller keeps the
+// jail's bantime in sync for free — the "Cấu hình Fail2ban" admin page reuses this exact function.
 async function pushIgnoreIp(vm) {
   let ssh;
   try {
     ssh = await connect(vm);
     const ignoreIpLine = buildIgnoreIpLine(await getExceptions());
+    const config = await fail2banConfig.getEffectiveConfig(vm.id);
     const script = `
-${buildWafJailFilesScript(ignoreIpLine)}
+${buildWafJailFilesScript(ignoreIpLine, config.waf_bantime_sec)}
 sudo -n fail2ban-client reload --restart ${JAIL_NAME} 2>&1
 sleep 1
 sudo -n fail2ban-client get ${JAIL_NAME} ignoreip 2>&1

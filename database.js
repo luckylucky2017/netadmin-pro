@@ -503,6 +503,45 @@ const SCHEMA_SQL = `
     INDEX idx_waf_traffic_top_lookup (vm_id, day, stat_type)
   );
 
+  -- Single global row (id fixed at 1) holding the site-wide default detection thresholds + bantime
+  -- for both the sshd jail and the netadmin-waf jail — see fail2ban-config.js for how this is merged
+  -- with a per-VM override (fail2ban_config_overrides below) into one "effective config", and
+  -- ssh-security-collector.js/nginx-waf-collector.js for where these used to be hardcoded module-
+  -- level constants before this table existed. Previously changing any of these values required a
+  -- code edit + redeploy — this table is what the "Cấu hình Fail2ban" admin page reads/writes.
+  CREATE TABLE IF NOT EXISTS fail2ban_config (
+    id INT PRIMARY KEY,
+    ssh_brute_force_window_sec INT NOT NULL DEFAULT 60,
+    ssh_brute_force_threshold INT NOT NULL DEFAULT 5,
+    ssh_block_foreign_immediately TINYINT NOT NULL DEFAULT 1,
+    ssh_bantime_sec INT NOT NULL DEFAULT -1,
+    waf_scan_error_threshold INT NOT NULL DEFAULT 20,
+    waf_dos_request_threshold INT NOT NULL DEFAULT 50,
+    waf_dos_window_sec INT NOT NULL DEFAULT 10,
+    waf_ddos_multiplier INT NOT NULL DEFAULT 5,
+    waf_ddos_min_total INT NOT NULL DEFAULT 200,
+    waf_bantime_sec INT NOT NULL DEFAULT -1,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  );
+
+  -- Per-VM override of the same fields — every column is NULLABLE, and NULL means "inherit the
+  -- global fail2ban_config value" (not "use 0"). A VM only gets a row here once an admin has
+  -- overridden at least one of its fields — a VM with no row here is 100% governed by the global
+  -- config. See fail2ban-config.js's mergeConfig for the exact per-field fallback logic.
+  CREATE TABLE IF NOT EXISTS fail2ban_config_overrides (
+    vm_id INT PRIMARY KEY,
+    ssh_brute_force_window_sec INT,
+    ssh_brute_force_threshold INT,
+    ssh_block_foreign_immediately TINYINT,
+    ssh_bantime_sec INT,
+    waf_scan_error_threshold INT,
+    waf_dos_request_threshold INT,
+    waf_dos_window_sec INT,
+    waf_ddos_multiplier INT,
+    waf_ddos_min_total INT,
+    waf_bantime_sec INT
+  );
+
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
   -- per unique (vm, remote ip, remote port) currently open — not an ever-growing event log — with
   -- first_seen/last_seen tracking so stale (closed) connections can be pruned.
@@ -811,6 +850,11 @@ async function ensureSchemaAndMigrations() {
   // parseDownloadDetail() for how these are captured/parsed.
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cmdline TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cwd TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
+  // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
+  // IGNORE so this is a no-op on every restart after the first.
+  await pool.query('INSERT IGNORE INTO fail2ban_config (id) VALUES (1)');
 }
 
 async function seedIfEmpty() {

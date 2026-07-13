@@ -93,6 +93,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/pfsense', requireAuth, require('./routes/pfsense'));
   app.use('/api/waf', requireAuth, require('./routes/waf'));
   app.use('/api/reports', requireAuth, require('./routes/reports'));
+  app.use('/api/fail2ban-config', requireAuth, require('./routes/fail2ban-config'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([

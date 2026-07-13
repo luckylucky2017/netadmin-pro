@@ -452,7 +452,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -4180,6 +4180,166 @@ async function renderWafTraffic() {
         </div>
       </div>`;
   } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+// ─── FAIL2BAN CONFIG (Cấu hình Fail2ban, cần quyền fail2ban.config.manage — cả trang gated ở nav) ──
+// Field metadata drives both the global-config form and the per-VM override modal generically —
+// group 'ssh' fields configure the sshd jail (ssh-security-collector.js), 'waf' fields configure the
+// netadmin-waf jail (nginx-waf-collector.js). bantime fields accept -1 (never expire) as a special
+// value, everything else is a plain positive count/window.
+const FAIL2BAN_FIELD_META = [
+  { key: 'ssh_brute_force_window_sec', group: 'ssh', label: 'Cửa sổ thời gian tính brute-force (giây)', help: 'Đếm số lần đăng nhập thất bại trong bao nhiêu giây gần nhất' },
+  { key: 'ssh_brute_force_threshold', group: 'ssh', label: 'Ngưỡng số lần thất bại', help: 'Đạt/vượt số lần này trong cửa sổ trên → coi là brute-force' },
+  { key: 'ssh_block_foreign_immediately', group: 'ssh', label: 'Chặn ngay IP nước ngoài', type: 'bool', help: 'Bất kỳ lần đăng nhập thất bại nào từ IP không phải Việt Nam sẽ bị chặn ngay, không cần chờ đủ ngưỡng' },
+  { key: 'ssh_bantime_sec', group: 'ssh', label: 'Thời gian chặn SSH (giây)', help: 'Nhập -1 để chặn vĩnh viễn, hoặc số giây cụ thể (tối thiểu 60)' },
+  { key: 'waf_scan_error_threshold', group: 'waf', label: 'Ngưỡng dò quét (số request lỗi/khả nghi)', help: 'Số request lỗi 4xx/khớp mẫu tấn công từ 1 IP trong 1 đợt quét log' },
+  { key: 'waf_dos_request_threshold', group: 'waf', label: 'Ngưỡng DoS (số request)', help: 'Số request từ 1 IP trong cửa sổ DoS bên dưới' },
+  { key: 'waf_dos_window_sec', group: 'waf', label: 'Cửa sổ thời gian DoS (giây)', help: '' },
+  { key: 'waf_ddos_multiplier', group: 'waf', label: 'Hệ số tăng đột biến DDoS', help: 'Tổng request toàn VM tăng gấp bao nhiêu lần mức trung bình gần đây thì coi là DDoS' },
+  { key: 'waf_ddos_min_total', group: 'waf', label: 'Ngưỡng tối thiểu DDoS (tổng request)', help: 'Tránh báo nhầm khi site có traffic thấp' },
+  { key: 'waf_bantime_sec', group: 'waf', label: 'Thời gian chặn WAF (giây)', help: 'Nhập -1 để chặn vĩnh viễn, hoặc số giây cụ thể (tối thiểu 60)' },
+];
+let fail2banGlobalData = null;
+
+function fail2banFieldInput(f, currentValue, isOverride) {
+  const help = f.help ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">${f.help}</div>` : '';
+  if (f.type === 'bool') {
+    if (isOverride) {
+      const sel = currentValue === null || currentValue === undefined ? '' : (currentValue ? '1' : '0');
+      return `<div class="form-group full"><label>${f.label}</label>
+        <select name="${f.key}" class="form-select">
+          <option value="" ${sel === '' ? 'selected' : ''}>Kế thừa mặc định (${fail2banGlobalData[f.key] ? 'Bật' : 'Tắt'})</option>
+          <option value="1" ${sel === '1' ? 'selected' : ''}>Bật</option>
+          <option value="0" ${sel === '0' ? 'selected' : ''}>Tắt</option>
+        </select>${help}</div>`;
+    }
+    return `<div class="form-group full" style="flex-direction:row;align-items:center;gap:10px">
+        <label class="toggle-switch"><input type="checkbox" name="${f.key}" ${currentValue ? 'checked' : ''}><span class="toggle-slider"></span></label>
+        <div><div>${f.label}</div>${help}</div>
+      </div>`;
+  }
+  const placeholder = isOverride ? `Kế thừa: ${fail2banGlobalData[f.key]}` : '';
+  return `<div class="form-group"><label>${f.label}</label>
+    <input type="number" name="${f.key}" value="${currentValue === null || currentValue === undefined ? '' : currentValue}" placeholder="${placeholder}" ${isOverride ? '' : 'required'}>
+    ${help}</div>`;
+}
+
+function fail2banFieldGroup(group, title, values, isOverride) {
+  const fields = FAIL2BAN_FIELD_META.filter(f => f.group === group);
+  return `<div style="margin-bottom:18px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:10px;color:var(--fg-muted)">${title}</div>
+    <div class="form-grid">${fields.map(f => fail2banFieldInput(f, values ? values[f.key] : null, isOverride)).join('')}</div>
+  </div>`;
+}
+
+async function renderFail2banConfig() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    const [global, overrides] = await Promise.all([api('/fail2ban-config/global'), api('/fail2ban-config/overrides')]);
+    fail2banGlobalData = global;
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Cấu hình Fail2ban</div><div class="page-subtitle">Tùy chỉnh ngưỡng phát hiện tấn công & thời gian chặn IP cho jail sshd và netadmin-waf, áp dụng cho các server</div></div>
+      <button class="btn btn-secondary btn-sm" onclick="renderFail2banConfig()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Làm mới
+      </button>
+    </div>
+    <div class="table-wrap" style="padding:20px;margin-bottom:16px">
+      <h3 style="font-size:14px;font-weight:600;margin-bottom:4px">Cấu hình mặc định (áp dụng cho mọi server)</h3>
+      <p style="font-size:12px;color:var(--fg-dim);margin-bottom:16px">Server chưa có ghi đè riêng bên dưới sẽ dùng đúng các giá trị này. Lưu sẽ tự động ghi lại file cấu hình và reload fail2ban trên mọi server đang chạy jail.</p>
+      <form id="fail2banGlobalForm" onsubmit="saveFail2banGlobal(event)">
+        ${fail2banFieldGroup('ssh', 'SSH (jail sshd)', global, false)}
+        ${fail2banFieldGroup('waf', 'WAF (jail netadmin-waf)', global, false)}
+        <div class="form-actions"><button type="submit" class="btn btn-primary">Lưu & áp dụng xuống server</button></div>
+      </form>
+    </div>
+    <div class="table-wrap">
+      <h3 style="font-size:14px;font-weight:600;padding:20px 20px 0">Ghi đè riêng theo server</h3>
+      <table>
+        <thead><tr><th>Server</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
+        <tbody id="fail2banOverridesBody">${renderFail2banOverrideRows(overrides)}</tbody>
+      </table>
+    </div>`;
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function renderFail2banOverrideRows(overrides) {
+  if (!overrides.length) return `<tr><td colspan="3" style="text-align:center;color:var(--fg-dim);padding:24px">Chưa có server nào đang giám sát SSH hoặc WAF</td></tr>`;
+  return overrides.map(o => {
+    const overriddenCount = o.override ? FAIL2BAN_FIELD_META.filter(f => o.override[f.key] !== null && o.override[f.key] !== undefined).length : 0;
+    const status = overriddenCount > 0
+      ? `<span class="status warning">Ghi đè ${overriddenCount}/${FAIL2BAN_FIELD_META.length} trường</span>`
+      : `<span class="status unknown">Dùng mặc định</span>`;
+    return `<tr>
+      <td style="font-weight:600">${escHtml(o.vmName)}</td>
+      <td>${status}</td>
+      <td style="text-align:right">
+        <button class="btn btn-secondary btn-sm" onclick='openFail2banOverrideForm(${JSON.stringify(o).replace(/'/g, "&#39;")})'>Sửa</button>
+        ${overriddenCount > 0 ? `<button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="deleteFail2banOverride(${o.vmId}, '${escAttr(o.vmName)}')">Xóa ghi đè</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function saveFail2banGlobal(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const body = {};
+  for (const f of FAIL2BAN_FIELD_META) {
+    body[f.key] = f.type === 'bool' ? (fd.has(f.key) ? 1 : 0) : Number(fd.get(f.key));
+  }
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const result = await api('/fail2ban-config/global', 'PATCH', body);
+    toast(`Đã lưu cấu hình mặc định — áp dụng thành công cho ${result.pushed.ok}/${result.pushed.total} server`, 'success');
+    renderFail2banConfig();
+  } catch (err) { toast(err.message, 'error'); btn.disabled = false; }
+}
+
+function openFail2banOverrideForm(o) {
+  openModal(`Ghi đè cấu hình cho "${o.vmName}"`, `
+    <form id="fail2banOverrideForm" onsubmit="saveFail2banOverride(event, ${o.vmId})">
+      <p style="font-size:12px;color:var(--fg-dim);margin-bottom:14px">Để trống (chọn "Kế thừa mặc định") ở trường nào thì trường đó dùng theo cấu hình mặc định chung — chỉ điền những trường thực sự cần khác biệt cho server này.</p>
+      ${fail2banFieldGroup('ssh', 'SSH (jail sshd)', o.override, true)}
+      ${fail2banFieldGroup('waf', 'WAF (jail netadmin-waf)', o.override, true)}
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">Lưu & áp dụng</button>
+      </div>
+    </form>`);
+}
+
+async function saveFail2banOverride(e, vmId) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const body = {};
+  for (const f of FAIL2BAN_FIELD_META) {
+    if (f.type === 'bool') {
+      const v = fd.get(f.key);
+      body[f.key] = v === '' ? null : Number(v);
+    } else {
+      const v = fd.get(f.key);
+      body[f.key] = v === '' ? null : Number(v);
+    }
+  }
+  try {
+    await api(`/fail2ban-config/overrides/${vmId}`, 'PATCH', body);
+    toast('Đã lưu ghi đè cấu hình', 'success');
+    closeModal();
+    renderFail2banConfig();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteFail2banOverride(vmId, vmName) {
+  if (!confirm(`Xóa toàn bộ ghi đè riêng cho "${vmName}"? Server này sẽ quay lại dùng cấu hình mặc định chung.`)) return;
+  try {
+    await api(`/fail2ban-config/overrides/${vmId}`, 'DELETE');
+    toast('Đã xóa ghi đè — quay lại cấu hình mặc định', 'success');
+    renderFail2banConfig();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 // ─── USERS (Người dùng, cần quyền users.manage) ────────────────────────────────

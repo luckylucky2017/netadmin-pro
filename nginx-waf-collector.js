@@ -28,14 +28,14 @@ const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
 const wafManager = require('./waf-manager');
 const { classifyIp } = require('./ssh-security-collector');
+const fail2banConfig = require('./fail2ban-config');
 
 const INITIAL_LOOKBACK_BYTES = 500000; // ~500KB bounded first-ever read — avoids scanning a huge historical log
-const SCAN_ERROR_THRESHOLD = 20;     // >= this many 4xx/suspicious-path hits from 1 IP in a batch
-const DOS_REQUEST_THRESHOLD = 50;    // >= this many requests from 1 IP within DOS_WINDOW_SEC
-const DOS_WINDOW_SEC = 10;
-const DDOS_MULTIPLIER = 5;           // batch total > this many times the recent baseline average
-const DDOS_MIN_TOTAL = 200;          // ...and > this absolute floor, to avoid low-traffic false positives
-const DDOS_BASELINE_SAMPLES = 20;
+// waf_scan_error_threshold/waf_dos_request_threshold/waf_dos_window_sec/waf_ddos_multiplier/
+// waf_ddos_min_total used to be hardcoded module-level constants here — now resolved per-VM via
+// fail2ban-config.js's getEffectiveConfig, editable from the "Cấu hình Fail2ban" admin page (see
+// detectPerIpEvents/detectDdos/raiseWafAlert below for where they're actually used).
+const DDOS_BASELINE_SAMPLES = 20;    // how many recent samples make up detectDdos' own baseline — not a threshold, not configurable
 const STALE_ALERT_SEC = 900;         // auto-resolve an open waf_scan/waf_dos/waf_ddos alert after 15min quiet
 const TOP_STAT_CAP = 300;            // max distinct keys tracked per (vm,domain,day,stat_type) — bounds row growth from scanner noise
 const TRAFFIC_RETENTION_DAYS = 90;
@@ -142,7 +142,13 @@ const HIGH_SEVERITY_THRESHOLD = 3;
 
 // Pure, testable: groups a batch of parsed hits by IP (h.ip — set by the caller to remoteAddr or
 // xffIp depending on the VM's waf_trust_xff setting) and flags scan/DoS per IP. No DB/SSH access.
-function detectPerIpEvents(hits) {
+// config.waf_scan_error_threshold/waf_dos_request_threshold/waf_dos_window_sec used to be hardcoded
+// module-level constants (SCAN_ERROR_THRESHOLD/DOS_REQUEST_THRESHOLD/DOS_WINDOW_SEC) — now resolved
+// per-VM via fail2ban-config.js, editable from the "Cấu hình Fail2ban" admin page; defaults to
+// fail2banConfig.DEFAULTS so existing callers/tests that don't pass a config keep working unchanged.
+// HIGH_SEVERITY_THRESHOLD is deliberately NOT configurable — a much lower, fixed bar specifically for
+// confirmed attack-payload categories (sqli/xss/rce/lfi), not a general scanning-noise threshold.
+function detectPerIpEvents(hits, config = fail2banConfig.DEFAULTS) {
   const byIp = new Map();
   for (const h of hits) {
     if (!h.ip) continue;
@@ -155,7 +161,7 @@ function detectPerIpEvents(hits) {
       .map(h => ({ ...h, attackCategory: classifyAttackPattern(h.path) }))
       .filter(h => h.status >= 400 || h.attackCategory);
     const highSevHits = flagged.filter(h => HIGH_SEVERITY_CATEGORIES.has(h.attackCategory));
-    if (flagged.length >= SCAN_ERROR_THRESHOLD || highSevHits.length >= HIGH_SEVERITY_THRESHOLD) {
+    if (flagged.length >= config.waf_scan_error_threshold || highSevHits.length >= HIGH_SEVERITY_THRESHOLD) {
       const categoryCounts = {};
       for (const h of flagged) if (h.attackCategory) categoryCounts[h.attackCategory] = (categoryCounts[h.attackCategory] || 0) + 1;
       const dominantCategory = Object.keys(categoryCounts).sort((a, b) => categoryCounts[b] - categoryCounts[a])[0] || null;
@@ -168,10 +174,10 @@ function detectPerIpEvents(hits) {
     const sorted = [...ipHits].sort((a, b) => a.timestamp - b.timestamp);
     let maxInWindow = 0, windowStart = 0;
     for (let i = 0; i < sorted.length; i++) {
-      while (sorted[i].timestamp - sorted[windowStart].timestamp > DOS_WINDOW_SEC * 1000) windowStart++;
+      while (sorted[i].timestamp - sorted[windowStart].timestamp > config.waf_dos_window_sec * 1000) windowStart++;
       maxInWindow = Math.max(maxInWindow, i - windowStart + 1);
     }
-    if (maxInWindow >= DOS_REQUEST_THRESHOLD) {
+    if (maxInWindow >= config.waf_dos_request_threshold) {
       events.push({ type: 'dos', ip, hitCount: maxInWindow, attackCategory: null, sample: sorted[sorted.length - 1] });
     }
   }
@@ -179,10 +185,13 @@ function detectPerIpEvents(hits) {
 }
 
 // Pure, testable: compares this batch's total request count against a rolling baseline.
-function detectDdos(totalCount, recentSampleCounts) {
+// config.waf_ddos_multiplier/waf_ddos_min_total — same per-VM-configurable pattern as
+// detectPerIpEvents above; DDOS_BASELINE_SAMPLES (how many recent samples make up the baseline
+// itself, not a detection threshold) stays a fixed internal constant, not exposed on the admin page.
+function detectDdos(totalCount, recentSampleCounts, config = fail2banConfig.DEFAULTS) {
   if (!recentSampleCounts.length) return false;
   const avg = recentSampleCounts.reduce((s, n) => s + n, 0) / recentSampleCounts.length;
-  return totalCount > DDOS_MIN_TOTAL && totalCount > avg * DDOS_MULTIPLIER;
+  return totalCount > config.waf_ddos_min_total && totalCount > avg * config.waf_ddos_multiplier;
 }
 
 // ── Traffic report aggregation ─────────────────────────────────────────────────────────────────
@@ -462,7 +471,7 @@ async function recordTrafficAggregates(vm, domain, hits) {
   }
 }
 
-async function raiseWafAlert(vm, domain, ev, country, blockResult) {
+async function raiseWafAlert(vm, domain, ev, country, blockResult, config) {
   const metric = ev.type === 'scan' ? 'waf_scan' : 'waf_dos';
   const already = await db.prepare(`
     SELECT id FROM alerts WHERE metric = ? AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
@@ -480,7 +489,7 @@ async function raiseWafAlert(vm, domain, ev, country, blockResult) {
   const site = domainLabel(domain, vm.name);
   const message = ev.type === 'scan'
     ? `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request${categoryLabel ? ` nghi ${categoryLabel}` : ' lỗi/đường dẫn khả nghi'} tới "${site}" trên VM "${vm.name}"${action}`
-    : `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request trong ${DOS_WINDOW_SEC}s tới "${site}" trên VM "${vm.name}"${action}`;
+    : `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request trong ${config.waf_dos_window_sec}s tới "${site}" trên VM "${vm.name}"${action}`;
   await db.prepare(`
     INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
     VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, ?, ?, 'open')
@@ -532,7 +541,8 @@ async function resolveStaleWafAlerts(vm) {
 }
 
 async function processHits(vm, domain, domainLogId, hits) {
-  const perIpEvents = detectPerIpEvents(hits);
+  const config = await fail2banConfig.getEffectiveConfig(vm.id);
+  const perIpEvents = detectPerIpEvents(hits, config);
   for (const ev of perIpEvents) {
     const { country, isForeign } = classifyIp(ev.ip);
     let blockResult = null;
@@ -542,13 +552,13 @@ async function processHits(vm, domain, domainLogId, hits) {
       ev.sample.method, ev.sample.path, ev.sample.status, ev.sample.userAgent,
       ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp), ev.attackCategory || null
     );
-    await raiseWafAlert(vm, domain, ev, country, blockResult);
+    await raiseWafAlert(vm, domain, ev, country, blockResult, config);
   }
 
   const lastTs = hits[hits.length - 1].timestamp;
   const totalCount = hits.length;
   const recentSamples = await getRecentTraffic.all(domainLogId, DDOS_BASELINE_SAMPLES);
-  if (detectDdos(totalCount, recentSamples.map(r => r.request_count))) {
+  if (detectDdos(totalCount, recentSamples.map(r => r.request_count), config)) {
     await insertEvent.run(vm.id, vm.name, domain, 'ddos', null, null, 0, null, null, null, null, totalCount, 0, toSqlDatetime(lastTs), null);
     await raiseDdosAlert(vm, domain, totalCount);
   }
