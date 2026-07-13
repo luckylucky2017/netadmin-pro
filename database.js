@@ -478,6 +478,8 @@ const SCHEMA_SQL = `
     is_foreign INT NOT NULL DEFAULT 0,
     process_name TEXT,
     pid INT,
+    cmdline TEXT,
+    cwd TEXT,
     first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_outbound (vm_id, remote_ip, remote_port),
@@ -763,6 +765,14 @@ async function ensureSchemaAndMigrations() {
   // (status/openvpn/servers' conns[].virtual_addr) — distinct from pfsense_vpn_status.remote_info,
   // which is the client's real-world source IP:port, not its address inside the VPN.
   try { await pool.query("ALTER TABLE pfsense_vpn_status ADD COLUMN tunnel_ip VARCHAR(64)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Full command line + working directory for an outbound connection's owning process — lets the
+  // "Báo cáo kết nối nước ngoài" report show exactly what a curl/wget download's URL and destination
+  // path were, not just the bare process name. See outbound-connection-collector.js's SCAN_SCRIPT
+  // (ps -eo pid=,args= + readlink /proc/<pid>/cwd for curl/wget PIDs specifically) and
+  // parseDownloadDetail() for how these are captured/parsed.
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cmdline TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cwd TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

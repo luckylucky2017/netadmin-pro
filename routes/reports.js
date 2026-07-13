@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../database');
 const { classifyIp } = require('../ssh-security-collector');
+const { parseDownloadDetail } = require('../outbound-connection-collector');
 
 const MAX_DAYS = 90;
 
@@ -95,13 +96,21 @@ async function fetchPeriod(sinceStr, untilStr) {
   wafForeign.forEach(r => { r.attackCategory = categoryByKey.get(`${r.vm_id}:${r.ip}`)?.attack_category || null; });
 
   // Outbound already stores country/is_foreign per row (outbound-connection-collector.js) — no
-  // classifyIp() re-derivation needed here.
+  // classifyIp() re-derivation needed here. cmdline/cwd are the raw data the collector captured;
+  // parseDownloadDetail() (shared with the collector's own module, kept in one place so the parsing
+  // rules can't drift) turns a curl/wget cmdline into an actual {url, destination} — the specific
+  // "what got downloaded and where did it land" detail the report needs, not just a bare process name.
   const outboundForeign = await db.prepare(`
-    SELECT vm_id, vm_name, remote_ip, remote_port, country, process_name, first_seen, last_seen
+    SELECT vm_id, vm_name, remote_ip, remote_port, country, process_name, cmdline, cwd, first_seen, last_seen
     FROM outbound_connections
     WHERE is_foreign = 1 AND last_seen >= ? AND last_seen < ?
     ORDER BY last_seen DESC
   `).all(sinceStr, untilStr);
+  outboundForeign.forEach(r => {
+    const detail = parseDownloadDetail(r.process_name, r.cmdline, r.cwd);
+    r.downloadUrl = detail?.url || null;
+    r.downloadDest = detail?.destination || null;
+  });
 
   return { sshForeign, wafForeign, outboundForeign };
 }

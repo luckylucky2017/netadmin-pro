@@ -6306,6 +6306,23 @@ function renderReportsWafRows() {
       </tbody></table>${paginationBar(reportsWafPagination, sorted.length, 'reportsWafPagination', 'renderReportsWafRows')}`;
 }
 
+// Process name always shown first (full raw cmdline as a hover tooltip, for anyone who wants the
+// exact invocation rather than the parsed interpretation). When outbound-connection-collector.js's
+// parseDownloadDetail() found a curl/wget URL, adds a 2nd line with the download URL and — when
+// available — the resolved destination path; falls back to "(tên file mặc định theo URL)" when no
+// explicit -o/-O/-P was used, since the exact filename curl/wget would choose isn't re-derived here
+// (e.g. a server's Content-Disposition header can override it).
+function reportsProcessDetail(r) {
+  const procLine = `<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${r.cmdline ? escAttr(r.cmdline) : ''}">${r.process_name ? escHtml(r.process_name) : '—'}</div>`;
+  if (!r.downloadUrl) return procLine;
+  const destLine = r.downloadDest
+    ? `<span style="color:var(--fg-dim)">→ ${escHtml(r.downloadDest)}</span>`
+    : `<span style="color:var(--fg-dim);font-style:italic">→ (tên file mặc định theo URL, trong thư mục làm việc${r.cwd ? ` ${escHtml(r.cwd)}` : ''})</span>`;
+  return `${procLine}<div style="font-size:11px;margin-top:3px;max-width:320px;word-break:break-all" title="${escAttr(r.downloadUrl)}">
+      <span style="color:var(--yellow);font-weight:600">⭳</span> ${escHtml(r.downloadUrl)}<br>${destLine}
+    </div>`;
+}
+
 function renderReportsOutboundTab() {
   document.getElementById('reportsTabBody').innerHTML = `
     <div class="table-wrap">
@@ -6334,7 +6351,7 @@ function renderReportsOutboundRows() {
   const rows = paginateRows(sorted, reportsOutboundPagination);
   const rowOffset = (reportsOutboundPagination.page - 1) * reportsOutboundPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình / chi tiết tải file</th></tr></thead>
       <tbody>${rows.map((r, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -6343,7 +6360,7 @@ function renderReportsOutboundRows() {
           <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span></td>
           <td>${r.remote_port ?? '—'}</td>
           <td>${escHtml(r.country || '—')}</td>
-          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}</span></td>
+          <td>${reportsProcessDetail(r)}</td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(reportsOutboundPagination, sorted.length, 'reportsOutboundPagination', 'renderReportsOutboundRows')}`;
 }
@@ -6358,8 +6375,8 @@ function exportReportsCsv() {
     rows = reportsData.wafDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country, r.attackCategory || '']);
     filenamePart = 'waf-blocked';
   } else if (reportsTab === 'outbound') {
-    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Cổng', 'Quốc gia', 'Tiến trình'];
-    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_port, r.country, r.process_name || '']);
+    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Cổng', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
+    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_port, r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
     filenamePart = 'outbound';
   } else {
     headers = ['Thời gian', 'VM', 'IP', 'Quốc gia'];
