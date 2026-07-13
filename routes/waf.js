@@ -51,6 +51,79 @@ router.get('/vms/:id/domains', async (req, res) => {
   res.json(rows);
 });
 
+// Same MySQL time_zone=SYSTEM=Asia/Ho_Chi_Minh reasoning as routes/reports.js — the `day` column in
+// waf_traffic_daily/waf_traffic_top is stamped by nginx-waf-collector.js from each batch's own
+// VN-local wall-clock date (toSqlDatetime().slice(0,10)), so the report's own date-range boundary
+// must use the same VN-local "today", not UTC (Date.prototype.toISOString() would land on the wrong
+// calendar day for anyone querying before 07:00 local time).
+function toVnDate(date) { return date.toLocaleString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }).slice(0, 10); }
+
+const TRAFFIC_MAX_DAYS = 90;
+const TRAFFIC_TOP_LIMIT = 15;
+
+// Read-only rollup over waf_traffic_daily/waf_traffic_top (see database.js/nginx-waf-collector.js
+// for how these are populated) — a lightweight, Webalizer-style traffic report scoped to what's
+// actionable for infra/security admins: request/bandwidth trend, top pages/IPs/countries, grouped
+// browser/OS breakdown, error rate. Not a full analytics clone (no session/path-through-site
+// tracking, no per-browser-version breakdown) — see the plan discussion for why that scope was
+// deliberately dropped.
+router.get('/traffic', async (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 7, 1), TRAFFIC_MAX_DAYS);
+  const vmId = req.query.vmId ? Number(req.query.vmId) : null;
+  const domain = req.query.domain != null ? req.query.domain : null; // '' is a valid value (the no-domain-discovered fallback)
+  const now = new Date();
+  const untilDate = toVnDate(now);
+  const sinceDate = toVnDate(new Date(now.getTime() - (days - 1) * 86400000));
+
+  const scope = ['day >= ?', 'day <= ?'];
+  const scopeParams = [sinceDate, untilDate];
+  if (vmId) { scope.push('vm_id = ?'); scopeParams.push(vmId); }
+  if (domain !== null) { scope.push('domain = ?'); scopeParams.push(domain); }
+  const whereClause = scope.join(' AND ');
+
+  const dailyRows = await db.prepare(`
+    SELECT day, SUM(request_count) as request_count, SUM(bytes_sum) as bytes_sum,
+           SUM(status_2xx) as status_2xx, SUM(status_3xx) as status_3xx, SUM(status_4xx) as status_4xx, SUM(status_5xx) as status_5xx
+    FROM waf_traffic_daily WHERE ${whereClause} GROUP BY day ORDER BY day ASC
+  `).all(...scopeParams);
+
+  const dateRange = [];
+  for (let i = 0; i < days; i++) dateRange.push(toVnDate(new Date(new Date(sinceDate).getTime() + i * 86400000)));
+  const byDay = new Map(dailyRows.map(r => [String(r.day).slice(0, 10), r]));
+  const timeline = {
+    dates: dateRange,
+    requests: dateRange.map(d => Number(byDay.get(d)?.request_count) || 0),
+    bytes: dateRange.map(d => Number(byDay.get(d)?.bytes_sum) || 0),
+    errors4xx: dateRange.map(d => Number(byDay.get(d)?.status_4xx) || 0),
+    errors5xx: dateRange.map(d => Number(byDay.get(d)?.status_5xx) || 0),
+  };
+
+  const summary = dailyRows.reduce((acc, r) => ({
+    requests: acc.requests + Number(r.request_count),
+    bytes: acc.bytes + Number(r.bytes_sum),
+    status2xx: acc.status2xx + Number(r.status_2xx),
+    status3xx: acc.status3xx + Number(r.status_3xx),
+    status4xx: acc.status4xx + Number(r.status_4xx),
+    status5xx: acc.status5xx + Number(r.status_5xx),
+  }), { requests: 0, bytes: 0, status2xx: 0, status3xx: 0, status4xx: 0, status5xx: 0 });
+
+  const topFor = async (statType) => (await db.prepare(`
+    SELECT stat_key as \`key\`, SUM(hit_count) as hits, SUM(bytes_sum) as bytes
+    FROM waf_traffic_top WHERE ${whereClause} AND stat_type = ?
+    GROUP BY stat_key ORDER BY hits DESC LIMIT ${TRAFFIC_TOP_LIMIT}
+  `).all(...scopeParams, statType)).map(r => ({ key: r.key, hits: Number(r.hits), bytes: Number(r.bytes) }));
+
+  const [topPaths, topIps, topCountries, topBrowsers, topOs] = await Promise.all(
+    ['path', 'ip', 'country', 'browser', 'os'].map(topFor)
+  );
+
+  res.json({
+    range: { days, since: sinceDate, until: untilDate },
+    summary, timeline,
+    topPaths, topIps, topCountries, topBrowsers, topOs,
+  });
+});
+
 const SAFE_LOG_PATH_RE = wafManager.SAFE_LOG_PATH_RE;
 
 router.patch('/vms/:id', requirePermission('waf.manage'), async (req, res) => {

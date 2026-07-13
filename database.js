@@ -465,6 +465,44 @@ const SCHEMA_SQL = `
     PRIMARY KEY (domain_log_id, sample_ts)
   );
 
+  -- Long-lived daily rollup per (VM, domain) for the "Báo cáo lưu lượng" traffic report page —
+  -- unlike waf_traffic_stats above (short DDoS-baseline window, ~20 samples), this accumulates across
+  -- the retention period (pruned at 90 days by nginx-waf-collector.js). One row per (vm,domain,day)
+  -- regardless of how many requests that domain actually saw that day — a busy proxy can see hundreds
+  -- of thousands of requests/day across potentially hundreds of real hosted domains, so this is
+  -- intentionally NOT one row per request — every poll's batch just increments these counters.
+  CREATE TABLE IF NOT EXISTS waf_traffic_daily (
+    vm_id INT NOT NULL,
+    domain VARCHAR(255) NOT NULL DEFAULT '',
+    day DATE NOT NULL,
+    request_count INT NOT NULL DEFAULT 0,
+    bytes_sum BIGINT NOT NULL DEFAULT 0,
+    status_2xx INT NOT NULL DEFAULT 0,
+    status_3xx INT NOT NULL DEFAULT 0,
+    status_4xx INT NOT NULL DEFAULT 0,
+    status_5xx INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (vm_id, domain, day)
+  );
+
+  -- Top-N breakdowns (page/IP/country/browser/OS) backing the traffic report, rolled up per day so
+  -- any date-range query is a cheap SUM+GROUP BY+ORDER BY+LIMIT over this table instead of ever
+  -- touching raw per-request data. stat_type separates the 5 dimensions sharing this one table rather
+  -- than 5 near-identical ones. New distinct stat_key values are capped per (vm,domain,day,stat_type)
+  -- by the collector (see TOP_STAT_CAP in nginx-waf-collector.js) — without that, scanner noise
+  -- hitting thousands of distinct one-off paths would blow up row count — already-tracked keys keep
+  -- incrementing past the cap, only brand-new long-tail keys get dropped once it's reached.
+  CREATE TABLE IF NOT EXISTS waf_traffic_top (
+    vm_id INT NOT NULL,
+    domain VARCHAR(255) NOT NULL DEFAULT '',
+    day DATE NOT NULL,
+    stat_type VARCHAR(16) NOT NULL,
+    stat_key VARCHAR(255) NOT NULL,
+    hit_count INT NOT NULL DEFAULT 0,
+    bytes_sum BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (vm_id, domain, day, stat_type, stat_key),
+    INDEX idx_waf_traffic_top_lookup (vm_id, day, stat_type)
+  );
+
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
   -- per unique (vm, remote ip, remote port) currently open — not an ever-growing event log — with
   -- first_seen/last_seen tracking so stale (closed) connections can be pruned.

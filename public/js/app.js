@@ -3485,6 +3485,7 @@ async function renderWaf(search = '') {
       <div class="filter-tab ${wafTab === 'banned' ? 'active' : ''}" data-tab="banned" onclick="setWafTab('banned')">IP đang bị chặn</div>
       <div class="filter-tab ${wafTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setWafTab('manage')">Quản lý giám sát</div>
       <div class="filter-tab ${wafTab === 'exceptions' ? 'active' : ''}" data-tab="exceptions" onclick="setWafTab('exceptions')">Ngoại lệ IP</div>
+      <div class="filter-tab ${wafTab === 'traffic' ? 'active' : ''}" data-tab="traffic" onclick="setWafTab('traffic')">Lưu lượng</div>
     </div>
     <div id="wafTabBody"></div>`;
     document.getElementById('wafRefreshSelect').value = String(wafRefreshMs);
@@ -3526,6 +3527,7 @@ function renderWafTabBody(search = '') {
   if (wafTab === 'manage') renderWafManage();
   else if (wafTab === 'exceptions') renderWafExceptions();
   else if (wafTab === 'banned') renderWafBanned(search);
+  else if (wafTab === 'traffic') renderWafTraffic();
   else renderWafEvents(search);
 }
 
@@ -4081,6 +4083,103 @@ async function deleteWafException(id, ip) {
     toast(`Đã xóa ngoại lệ ${ip}`, 'success');
     loadWafExceptions();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── WAF: Lưu lượng (traffic report — GET /waf/traffic, backed by waf_traffic_daily/waf_traffic_top) ──
+let wafTrafficDays = 7;
+let wafTrafficVmId = '';
+let wafTrafficDomain = '';
+let wafTrafficData = null;
+
+function formatBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
+}
+
+async function renderWafTraffic() {
+  const body = document.getElementById('wafTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    const domains = wafTrafficVmId ? await api(`/waf/vms/${wafTrafficVmId}/domains`) : [];
+    const params = new URLSearchParams({ days: wafTrafficDays });
+    if (wafTrafficVmId) params.set('vmId', wafTrafficVmId);
+    if (wafTrafficVmId && wafTrafficDomain) params.set('domain', wafTrafficDomain);
+    wafTrafficData = await api(`/waf/traffic?${params}`);
+    const d = wafTrafficData;
+    const errRate = d.summary.requests ? (((d.summary.status4xx + d.summary.status5xx) / d.summary.requests) * 100).toFixed(1) : '0.0';
+
+    const vmOptions = wafState.vms.filter(v => v.waf_enabled).map(v => `<option value="${v.id}" ${String(v.id) === String(wafTrafficVmId) ? 'selected' : ''}>${escHtml(v.name)}</option>`).join('');
+    const domainOptions = domains.map(dm => `<option value="${escAttr(dm.domain || '')}" ${dm.domain === wafTrafficDomain ? 'selected' : ''}>${escHtml(dm.domain || '(mặc định)')}</option>`).join('');
+
+    body.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+        <select class="filter-select" onchange="wafTrafficDays=Number(this.value);renderWafTraffic()">
+          ${[7, 14, 30, 90].map(n => `<option value="${n}" ${n === wafTrafficDays ? 'selected' : ''}>${n} ngày gần nhất</option>`).join('')}
+        </select>
+        <select class="filter-select" onchange="wafTrafficVmId=this.value;wafTrafficDomain='';renderWafTraffic()">
+          <option value="">Tất cả VM đang giám sát</option>
+          ${vmOptions}
+        </select>
+        ${wafTrafficVmId ? `<select class="filter-select" onchange="wafTrafficDomain=this.value;renderWafTraffic()">
+          <option value="">Tất cả domain</option>
+          ${domainOptions}
+        </select>` : ''}
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Tổng lượt truy cập</div>
+          <div class="stat-value blue">${d.summary.requests.toLocaleString('vi-VN')}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Tổng băng thông</div>
+          <div class="stat-value blue">${formatBytes(d.summary.bytes)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Tỉ lệ lỗi (4xx/5xx)</div>
+          <div class="stat-value ${errRate > 5 ? 'red' : 'green'}">${errRate}%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Lỗi 5xx (server)</div>
+          <div class="stat-value red">${d.summary.status5xx.toLocaleString('vi-VN')}</div>
+        </div>
+      </div>
+      <div class="table-wrap" style="padding:20px;margin-bottom:16px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Xu hướng lưu lượng theo ngày</h3>
+        ${renderMultiLineChart(d.timeline.dates, [
+          { name: 'Lượt truy cập', color: 'var(--blue)', values: d.timeline.requests },
+          { name: 'Lỗi 4xx', color: 'var(--yellow)', values: d.timeline.errors4xx },
+          { name: 'Lỗi 5xx', color: 'var(--red)', values: d.timeline.errors5xx },
+        ])}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div class="table-wrap" style="padding:20px">
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top trang truy cập nhiều nhất</h3>
+          ${renderBarList(d.topPaths.map(r => ({ key: r.key, cnt: r.hits })), 'var(--blue)')}
+        </div>
+        <div class="table-wrap" style="padding:20px">
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top IP truy cập nhiều nhất</h3>
+          ${renderBarList(d.topIps.map(r => ({ key: r.key, cnt: r.hits })), 'var(--purple)')}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+        <div class="table-wrap" style="padding:20px">
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Top quốc gia</h3>
+          ${renderBarList(d.topCountries.map(r => ({ key: r.key, cnt: r.hits })), 'var(--yellow)')}
+        </div>
+        <div class="table-wrap" style="padding:20px">
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Trình duyệt</h3>
+          ${renderBarList(d.topBrowsers.map(r => ({ key: r.key, cnt: r.hits })), 'var(--accent)')}
+        </div>
+        <div class="table-wrap" style="padding:20px">
+          <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Hệ điều hành</h3>
+          ${renderBarList(d.topOs.map(r => ({ key: r.key, cnt: r.hits })), 'var(--cyan)')}
+        </div>
+      </div>`;
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
 // ─── USERS (Người dùng, cần quyền users.manage) ────────────────────────────────

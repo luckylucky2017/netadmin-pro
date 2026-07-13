@@ -37,6 +37,8 @@ const DDOS_MULTIPLIER = 5;           // batch total > this many times the recent
 const DDOS_MIN_TOTAL = 200;          // ...and > this absolute floor, to avoid low-traffic false positives
 const DDOS_BASELINE_SAMPLES = 20;
 const STALE_ALERT_SEC = 900;         // auto-resolve an open waf_scan/waf_dos/waf_ddos alert after 15min quiet
+const TOP_STAT_CAP = 300;            // max distinct keys tracked per (vm,domain,day,stat_type) — bounds row growth from scanner noise
+const TRAFFIC_RETENTION_DAYS = 90;
 
 // Matches nginx's `combined` format plus an optional trailing 4th quoted field — covers the very
 // common `main` format some distros ship instead, which just appends "$http_x_forwarded_for" after
@@ -76,7 +78,7 @@ function firstXffIp(xff) {
 function parseNginxLine(line) {
   const m = NGINX_LINE_RE.exec(line);
   if (!m) return null;
-  const [, remoteAddr, , timeLocal, request, statusStr, , referer, userAgent, xff] = m;
+  const [, remoteAddr, , timeLocal, request, statusStr, bytesStr, referer, userAgent, xff] = m;
   const reqM = /^(\S+)\s+(\S+)/.exec(request);
   return {
     remoteAddr,
@@ -89,6 +91,9 @@ function parseNginxLine(line) {
     method: reqM ? reqM[1].slice(0, 10) : null,
     path: reqM ? reqM[2] : (request || null),
     status: Number(statusStr),
+    // $body_bytes_sent is "-" when nginx has nothing to report (rare) — for the traffic report's
+    // bandwidth totals a missing value should contribute 0, not NaN.
+    bytesSent: bytesStr === '-' ? 0 : (Number(bytesStr) || 0),
     referer,
     userAgent,
   };
@@ -178,6 +183,81 @@ function detectDdos(totalCount, recentSampleCounts) {
   if (!recentSampleCounts.length) return false;
   const avg = recentSampleCounts.reduce((s, n) => s + n, 0) / recentSampleCounts.length;
   return totalCount > DDOS_MIN_TOTAL && totalCount > avg * DDOS_MULTIPLIER;
+}
+
+// ── Traffic report aggregation ─────────────────────────────────────────────────────────────────
+// Grouped (not per-version) browser/OS classification for the traffic report's summary breakdown —
+// deliberately coarse (no UA-parsing dependency) since the report shows "Chrome" / "Windows" style
+// buckets, not exact version numbers. Order matters: Edge and Opera both include "Chrome" in their
+// UA string (Chromium-based), so they're checked before the bare Chrome pattern.
+function classifyBrowser(ua) {
+  if (!ua) return 'Không xác định';
+  if (/bot|spider|crawl|curl\/|wget\/|python-requests|go-http-client|facebookexternalhit/i.test(ua)) return 'Bot/Script';
+  if (/edg\//i.test(ua)) return 'Edge';
+  if (/opr\/|opera/i.test(ua)) return 'Opera';
+  if (/chrome\//i.test(ua)) return 'Chrome';
+  if (/firefox\//i.test(ua)) return 'Firefox';
+  if (/version\/.*safari/i.test(ua)) return 'Safari';
+  if (/msie|trident/i.test(ua)) return 'Internet Explorer';
+  return 'Khác';
+}
+
+function classifyOs(ua) {
+  if (!ua) return 'Không xác định';
+  // iOS/Android checked before Windows/macOS/Linux: a real iPhone/iPad UA always embeds the literal
+  // substring "like Mac OS X" (e.g. "iPhone; CPU iPhone OS 17_0 like Mac OS X"), and an Android UA's
+  // WebView component can embed "Linux" — checking the desktop OSes first would misclassify both.
+  if (/android/i.test(ua)) return 'Android';
+  if (/iphone|ipad|ipod/i.test(ua)) return 'iOS';
+  if (/windows/i.test(ua)) return 'Windows';
+  if (/mac os x|macintosh/i.test(ua)) return 'macOS';
+  if (/linux/i.test(ua)) return 'Linux';
+  return 'Khác';
+}
+
+// Pure, testable: which status-class bucket (waf_traffic_daily's 4 columns) a status code falls
+// into — null for anything outside 2xx-5xx (malformed/unparseable status).
+function statusClass(status) {
+  if (status >= 200 && status < 300) return '2xx';
+  if (status >= 300 && status < 400) return '3xx';
+  if (status >= 400 && status < 500) return '4xx';
+  if (status >= 500 && status < 600) return '5xx';
+  return null;
+}
+
+// Pure, testable: reduces one poll's parsed hits (already carrying .ip, see processLogFileResult)
+// down to what recordTrafficAggregates needs to persist — the daily totals plus 5 dimensions' worth
+// of per-key {hits, bytes} counts for that single batch. Takes a countryFn injection (rather than
+// calling classifyIp directly) so this stays testable without geoip-lite/DB access.
+function aggregateHitsForTraffic(hits, countryFn) {
+  const daily = { requestCount: hits.length, bytesSum: 0, s2xx: 0, s3xx: 0, s4xx: 0, s5xx: 0 };
+  const dims = { path: new Map(), ip: new Map(), country: new Map(), browser: new Map(), os: new Map() };
+  const bump = (map, key, bytes) => {
+    if (!key) return;
+    const cur = map.get(key) || { hits: 0, bytes: 0 };
+    cur.hits += 1; cur.bytes += bytes;
+    map.set(key, cur);
+  };
+  const countryCache = new Map();
+  for (const h of hits) {
+    daily.bytesSum += h.bytesSent || 0;
+    const cls = statusClass(h.status);
+    if (cls === '2xx') daily.s2xx++;
+    else if (cls === '3xx') daily.s3xx++;
+    else if (cls === '4xx') daily.s4xx++;
+    else if (cls === '5xx') daily.s5xx++;
+
+    const pathKey = ((h.path || '').split('?')[0] || '/').slice(0, 255);
+    bump(dims.path, pathKey, h.bytesSent || 0);
+    bump(dims.ip, h.ip, h.bytesSent || 0);
+
+    let country = countryCache.get(h.ip);
+    if (country === undefined) { country = countryFn(h.ip) || 'XX'; countryCache.set(h.ip, country); }
+    bump(dims.country, country, h.bytesSent || 0);
+    bump(dims.browser, classifyBrowser(h.userAgent), h.bytesSent || 0);
+    bump(dims.os, classifyOs(h.userAgent), h.bytesSent || 0);
+  }
+  return { daily, dims };
 }
 
 // ── nginx config parsing: discover per-domain access_log files ────────────────────────────────
@@ -346,6 +426,42 @@ function domainLabel(domain, vmName) {
   return domain || vmName;
 }
 
+const upsertTrafficDaily = db.prepare(`
+  INSERT INTO waf_traffic_daily (vm_id, domain, day, request_count, bytes_sum, status_2xx, status_3xx, status_4xx, status_5xx)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count), bytes_sum = bytes_sum + VALUES(bytes_sum),
+    status_2xx = status_2xx + VALUES(status_2xx), status_3xx = status_3xx + VALUES(status_3xx),
+    status_4xx = status_4xx + VALUES(status_4xx), status_5xx = status_5xx + VALUES(status_5xx)
+`);
+const selectExistingTopKeys = db.prepare('SELECT stat_key FROM waf_traffic_top WHERE vm_id = ? AND domain = ? AND day = ? AND stat_type = ?');
+const upsertTrafficTop = db.prepare(`
+  INSERT INTO waf_traffic_top (vm_id, domain, day, stat_type, stat_key, hit_count, bytes_sum)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON DUPLICATE KEY UPDATE hit_count = hit_count + VALUES(hit_count), bytes_sum = bytes_sum + VALUES(bytes_sum)
+`);
+const pruneTrafficDaily = db.prepare(`DELETE FROM waf_traffic_daily WHERE day < DATE_SUB(CURDATE(), INTERVAL ${TRAFFIC_RETENTION_DAYS} DAY)`);
+const pruneTrafficTop = db.prepare(`DELETE FROM waf_traffic_top WHERE day < DATE_SUB(CURDATE(), INTERVAL ${TRAFFIC_RETENTION_DAYS} DAY)`);
+
+// Persists one poll batch's traffic aggregates (see aggregateHitsForTraffic above) into the daily
+// rollup + per-dimension top-N tables backing the "Báo cáo lưu lượng" tab. day is derived from the
+// batch's own last timestamp rather than "now" so a poll processing an old/backlogged chunk of log
+// still lands on the correct calendar day.
+async function recordTrafficAggregates(vm, domain, hits) {
+  const day = toSqlDatetime(hits[hits.length - 1].timestamp).slice(0, 10);
+  const domainKey = domain || '';
+  const { daily, dims } = aggregateHitsForTraffic(hits, (ip) => classifyIp(ip).country);
+  await upsertTrafficDaily.run(vm.id, domainKey, day, daily.requestCount, daily.bytesSum, daily.s2xx, daily.s3xx, daily.s4xx, daily.s5xx);
+  for (const [statType, counts] of Object.entries(dims)) {
+    if (!counts.size) continue;
+    const existing = new Set((await selectExistingTopKeys.all(vm.id, domainKey, day, statType)).map(r => r.stat_key));
+    for (const [key, v] of counts) {
+      if (!existing.has(key) && existing.size >= TOP_STAT_CAP) continue;
+      await upsertTrafficTop.run(vm.id, domainKey, day, statType, key, v.hits, v.bytes);
+      existing.add(key);
+    }
+  }
+}
+
 async function raiseWafAlert(vm, domain, ev, country, blockResult) {
   const metric = ev.type === 'scan' ? 'waf_scan' : 'waf_dos';
   const already = await db.prepare(`
@@ -438,6 +554,7 @@ async function processHits(vm, domain, domainLogId, hits) {
   }
   await recordTraffic.run(domainLogId, toSqlDatetime(lastTs), totalCount);
   await pruneTraffic.run(domainLogId, domainLogId, DDOS_BASELINE_SAMPLES);
+  await recordTrafficAggregates(vm, domain, hits);
 }
 
 // Re-parses /etc/nginx config on every poll (cheap: a handful of small text files) and upserts
@@ -616,6 +733,8 @@ async function collectAll() {
   if (!vms.length) return;
   await Promise.allSettled(vms.map(collectVm));
   await db.prepare("DELETE FROM waf_events WHERE occurred_at < DATE_SUB(NOW(), INTERVAL 30 DAY)").run();
+  await pruneTrafficDaily.run();
+  await pruneTrafficTop.run();
   // A VM that's no longer monitored (waf_enabled=0) isn't polled above, so any waf_banned_ips rows
   // left over from before it was turned off would show stale/unverifiable "still banned" state —
   // clear them rather than let the page imply live info we no longer actually have.
@@ -637,4 +756,5 @@ module.exports = {
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
   classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,
   buildBatchTailScript, parseBatchTailOutput, stripPartialFirstLine,
+  classifyBrowser, classifyOs, statusClass, aggregateHitsForTraffic,
 };
