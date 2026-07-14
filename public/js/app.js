@@ -6044,6 +6044,13 @@ function monitorTargetLabel(m) {
 }
 const MONITOR_TYPE_LABEL = { http: 'HTTP(S)', tcp: 'TCP Port', ping: 'Ping (ICMP)' };
 
+// Only meaningful for type='http' with expected_status_code set — the default (unset) behavior
+// accepts any 2xx/3xx and isn't worth calling out on every card.
+function expectedStatusBadge(m) {
+  if (m.type !== 'http' || m.expected_status_code == null) return '';
+  return `<span class="status unknown" title="Chỉ coi đúng mã ${m.expected_status_code} là up">Mong đợi: ${m.expected_status_code}</span>`;
+}
+
 function certBadge(m) {
   if (m.cert_days_remaining == null) return '';
   const d = m.cert_days_remaining;
@@ -6069,6 +6076,7 @@ function renderMonitorList() {
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <span class="status ${m.current_status === 'up' ? 'online' : m.current_status === 'down' ? 'offline' : 'unknown'}"><span class="dot"></span>${m.current_status === 'up' ? 'Up' : m.current_status === 'down' ? 'Down' : 'Chưa kiểm tra'}</span>
           ${certBadge(m)}
+          ${expectedStatusBadge(m)}
           <span style="font-size:12px;color:var(--fg-muted)">${m.last_response_ms != null ? m.last_response_ms + 'ms' : ''}</span>
         </div>
       </div>
@@ -6118,6 +6126,7 @@ async function openMonitorDetail(id) {
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
           <span class="status ${m.current_status === 'up' ? 'online' : m.current_status === 'down' ? 'offline' : 'unknown'}"><span class="dot"></span>${m.current_status === 'up' ? 'Up' : m.current_status === 'down' ? 'Down' : 'Chưa kiểm tra'}</span>
           ${certBadge(m)}
+          ${expectedStatusBadge(m)}
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px" id="monitorRangeButtons">
@@ -6234,6 +6243,9 @@ function openMonitorForm(monitor) {
         <div class="form-group full" data-monitor-type="http"><label>URL *</label><input type="text" name="url" value="${m?.url || ''}" placeholder="https://example.com hoặc http://1.2.3.4:8080"></div>
         <div class="form-group" data-monitor-type="tcp,ping"><label>Host / IP *</label><input type="text" name="host" value="${m?.host || ''}" placeholder="vd: 192.168.1.10 hoặc db.example.com"></div>
         <div class="form-group" data-monitor-type="tcp"><label>Cổng (Port) *</label><input type="number" name="port" value="${m?.port || ''}" min="1" max="65535" placeholder="vd: 5432, 3306, 22..."></div>
+        <div class="form-group" data-monitor-type="http"><label>Mã trạng thái mong đợi (tùy chọn)</label><input type="number" name="expected_status_code" value="${m?.expected_status_code ?? ''}" min="100" max="599" placeholder="Để trống = chấp nhận mọi 2xx/3xx">
+          <div style="font-size:11px;color:var(--fg-dim);margin-top:2px">Nhập vd: 200 để CHỈ coi đúng mã 200 là "up" — bỏ trống nếu vẫn muốn chấp nhận cả redirect (3xx).</div>
+        </div>
         <div class="form-group"><label>Chu kỳ kiểm tra (giây)</label><input type="number" name="check_interval_sec" value="${m?.check_interval_sec || 300}" min="30"></div>
         <div class="form-group"><label>Timeout (giây)</label><input type="number" name="timeout_sec" value="${m?.timeout_sec || 10}" min="1"></div>
         <div class="form-group" data-monitor-type="http"><label>Từ khóa kiểm tra (tùy chọn)</label><input type="text" name="keyword" value="${m?.keyword || ''}" placeholder="vd: Đăng nhập thành công"></div>

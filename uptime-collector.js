@@ -82,8 +82,16 @@ function performHttpCheck(monitor) {
       res.on('data', (chunk) => { if (body.length < MAX_BODY_BYTES) body += chunk; });
       res.on('end', () => {
         const response_ms = Date.now() - startedAt;
-        let status = (res.statusCode >= 200 && res.statusCode < 400) ? 'up' : 'down';
-        let error = status === 'down' ? `HTTP ${res.statusCode}` : null;
+        // expected_status_code (nullable) requires an EXACT match when set — e.g. a monitor behind
+        // a redirect-happy load balancer or one that deliberately wants to alert on a 3xx it used to
+        // silently accept. Falls back to the original "any 2xx/3xx counts as up" range when unset,
+        // so every pre-existing monitor keeps behaving exactly as before.
+        let status = monitor.expected_status_code != null
+          ? (res.statusCode === monitor.expected_status_code ? 'up' : 'down')
+          : (res.statusCode >= 200 && res.statusCode < 400) ? 'up' : 'down';
+        let error = status === 'down'
+          ? (monitor.expected_status_code != null ? `HTTP ${res.statusCode} (mong đợi ${monitor.expected_status_code})` : `HTTP ${res.statusCode}`)
+          : null;
         if (status === 'up' && monitor.keyword) {
           const found = body.includes(monitor.keyword);
           const shouldBePresent = monitor.keyword_type !== 'not_contains';

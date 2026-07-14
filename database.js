@@ -653,6 +653,10 @@ const SCHEMA_SQL = `
     url TEXT NOT NULL,
     host VARCHAR(255),
     port INT,
+    -- HTTP-only: NULL (default) keeps the original "any 2xx/3xx counts as up" behavior — a non-null
+    -- value requires the response's status code to match EXACTLY that number instead — see
+    -- uptime-collector.js's performHttpCheck for where this is applied.
+    expected_status_code INT,
     keyword VARCHAR(255),
     keyword_type VARCHAR(20) DEFAULT 'contains',
     check_interval_sec INT NOT NULL DEFAULT 300,
@@ -904,6 +908,10 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE monitors ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'http'"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE monitors ADD COLUMN host VARCHAR(255)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE monitors ADD COLUMN port INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // HTTP monitors gain an optional exact-status-code requirement (NULL keeps the original 2xx/3xx
+  // "up" range) — see monitors' own comment above and uptime-collector.js's performHttpCheck.
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN expected_status_code INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

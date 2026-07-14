@@ -85,6 +85,16 @@ router.get('/:id/history', async (req, res) => {
 const SAFE_HOST_RE = /^[A-Za-z0-9.\-:_]+$/;
 const MONITOR_TYPES = new Set(['http', 'tcp', 'ping']);
 
+// expected_status_code is HTTP-only and optional — empty/undefined means "keep the default 2xx/3xx
+// range" (stored as null), not an error. Returns { value } on success or { error } on a genuinely
+// invalid (non-empty, out-of-range) input.
+function validateExpectedStatusCode(raw) {
+  if (raw === undefined || raw === null || raw === '') return { value: null };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 100 || n > 599) return { error: 'Mã trạng thái mong đợi không hợp lệ — phải từ 100 đến 599' };
+  return { value: n };
+}
+
 // Shared by POST/PUT — type determines which fields are actually required. url stays '' (not null)
 // for non-http types since the column is NOT NULL (see database.js's comment on why it wasn't
 // relaxed). Returns { clean } on success or { error } on the first validation failure.
@@ -93,16 +103,18 @@ function validateMonitorInput(body) {
   if (type === 'http') {
     if (!body.url) return { error: 'Thiếu URL' };
     try { new URL(body.url); } catch { return { error: 'URL không hợp lệ' }; }
-    return { clean: { type, url: body.url, host: null, port: null } };
+    const { value: expected_status_code, error } = validateExpectedStatusCode(body.expected_status_code);
+    if (error) return { error };
+    return { clean: { type, url: body.url, host: null, port: null, expected_status_code } };
   }
   const host = typeof body.host === 'string' ? body.host.trim() : '';
   if (!host || !SAFE_HOST_RE.test(host)) return { error: 'Host không hợp lệ (chỉ gồm chữ, số, dấu chấm, gạch ngang, hai chấm)' };
   if (type === 'tcp') {
     const port = Number(body.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: 'Cổng (port) không hợp lệ — phải từ 1 đến 65535' };
-    return { clean: { type, url: '', host, port } };
+    return { clean: { type, url: '', host, port, expected_status_code: null } };
   }
-  return { clean: { type, url: '', host, port: null } }; // ping
+  return { clean: { type, url: '', host, port: null, expected_status_code: null } }; // ping
 }
 
 router.post('/', requirePermission('monitors.write'), async (req, res) => {
@@ -111,9 +123,9 @@ router.post('/', requirePermission('monitors.write'), async (req, res) => {
   const { clean, error } = validateMonitorInput(req.body);
   if (error) return res.status(400).json({ error });
   const result = await db.prepare(`
-    INSERT INTO monitors (name, type, url, host, port, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, clean.type, clean.url, clean.host, clean.port, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1);
+    INSERT INTO monitors (name, type, url, host, port, expected_status_code, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, clean.type, clean.url, clean.host, clean.port, clean.expected_status_code, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1);
   res.status(201).json({ id: result.lastInsertRowid, message: 'Monitor created' });
 });
 
@@ -124,8 +136,8 @@ router.put('/:id', requirePermission('monitors.write'), async (req, res) => {
   const { clean, error } = validateMonitorInput(req.body);
   if (error) return res.status(400).json({ error });
   await db.prepare(`
-    UPDATE monitors SET name=?, type=?, url=?, host=?, port=?, keyword=?, keyword_type=?, check_interval_sec=?, timeout_sec=?, ignore_tls_errors=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
-  `).run(name, clean.type, clean.url, clean.host, clean.port, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1, req.params.id);
+    UPDATE monitors SET name=?, type=?, url=?, host=?, port=?, expected_status_code=?, keyword=?, keyword_type=?, check_interval_sec=?, timeout_sec=?, ignore_tls_errors=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+  `).run(name, clean.type, clean.url, clean.host, clean.port, clean.expected_status_code, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1, req.params.id);
   res.json({ message: 'Updated' });
 });
 
