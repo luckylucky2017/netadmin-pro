@@ -3039,20 +3039,6 @@ const FAIL2BAN_CLASS = {
   installing: 'installing', running: 'online', sshd_jail_missing: 'warning', error: 'offline'
 };
 
-function fail2banToggle(v) {
-  const status = v.fail2ban_status || 'unknown';
-  const monitored = !!v.ssh_user;
-  const checked = status === 'running';
-  const disabled = !monitored || status === 'installing';
-  const extraClass = status === 'installing' ? 'installing' : (status === 'error' ? 'error' : '');
-  const title = (status === 'error' || status === 'sshd_jail_missing') && v.fail2ban_error ? escAttr(v.fail2ban_error)
-    : !monitored ? 'Bật giám sát SSH trước'
-    : (FAIL2BAN_LABEL[status] || status);
-  return `<label class="toggle-switch ${extraClass}" data-permission="security.fail2ban.manage" title="${title}">
-      <input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} onclick="handleFail2banToggle(event, ${v.id})">
-      <span class="toggle-slider"></span>
-    </label>`;
-}
 
 let managePagination = newPagination();
 let manageSearchFilter = '';
@@ -3079,7 +3065,7 @@ function renderManageRows() {
   wrap.innerHTML = `<table>
         <thead><tr>
           <th style="width:32px"><input type="checkbox" id="manageSelectAll" data-permission="security.ssh_config" ${allOnPageSelected ? 'checked' : ''} onchange="toggleSelectAllManageVms(this.checked)" title="Chọn tất cả trong trang này"></th>
-          <th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}<th>Tài khoản kết nối</th>${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}${thSort('Fail2ban', 'fail2ban_status', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
+          <th>#</th>${thSort('Tên VM', 'name', manageSortState, 'toggleManageSort')}${thSort('Trạng thái', 'power_state', manageSortState, 'toggleManageSort')}${thSort('IP', 'ip_address', manageSortState, 'toggleManageSort')}${thSort('Guest OS', 'guest_family', manageSortState, 'toggleManageSort')}<th>Tài khoản kết nối</th>${thSort('SSH Port', 'ssh_port', manageSortState, 'toggleManageSort')}<th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = v.guest_family === 'LINUX' && v.ip_address;
           // Chưa gán tài khoản nào -> gợi ý sẵn tài khoản mặc định (vd "dev") thay vì để trống, đỡ
@@ -3100,11 +3086,11 @@ function renderManageRows() {
               ${credOptions}
             </select></td>
             <td><input type="number" class="sec-ssh-port" data-id="${v.id}" value="${v.ssh_port || 22}" min="1" max="65535" style="max-width:90px" ${eligible ? '' : 'disabled'}></td>
-            <td>${fail2banToggle(v)}</td>
             <td><button class="btn ${v.ssh_credential_id ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.ssh_credential_id ? 'Đã lưu — đang giám sát SSH' : 'Chưa lưu'}" data-permission="security.ssh_config" ${eligible ? '' : 'disabled'} onclick="saveSecuritySshUser(${v.id}, this)">Lưu</button></td>
           </tr>`;
         }).join('')}</tbody>
-      </table>${paginationBar(managePagination, sortedVms.length, 'managePagination', 'renderManageRows')}`;
+      </table>${paginationBar(managePagination, sortedVms.length, 'managePagination', 'renderManageRows')}
+      <div style="padding:14px 16px;font-size:12px;color:var(--fg-dim);border-top:1px solid var(--border)">Bật/tắt và cài đặt fail2ban (jail sshd) đã chuyển sang trang <a href="#" onclick="navigate('fail2banConfig');return false" style="color:var(--accent)">Cấu hình Fail2ban</a> → tab "Quản lý Jail".</div>`;
   applyPermissionVisibility();
   updateManageBulkToolbar();
 }
@@ -3176,50 +3162,6 @@ async function bulkSaveManageSelected() {
   } catch (e) {
     toast(e.message, 'error');
     if (btn) btn.disabled = false;
-  }
-}
-
-async function refreshManageVms() {
-  try {
-    securityState.vms = await api('/security/vms');
-  } catch { /* keep stale data, next manual retry will refetch */ }
-  renderManageRows();
-}
-
-async function handleFail2banToggle(e, id) {
-  e.preventDefault(); // decide the real outcome via the API first — checkbox visually reverts to its
-  // pre-click state until refreshManageVms() re-renders it from confirmed server state
-  const checkbox = e.target;
-  const turningOn = checkbox.checked; // per checkbox activation behavior, .checked already reflects the attempted new state at this point
-  const vm = securityState.vms.find(v => v.id === id);
-  if (!vm) return;
-  checkbox.disabled = true;
-  try {
-    if (turningOn) {
-      const jailsNote = vm.waf_enabled ? ' (jail sshd + jail WAF)' : ' (jail sshd)';
-      const check = await api(`/security/vms/${id}/fail2ban/check`, 'POST');
-      if (check.status === 'running') {
-        toast(`fail2ban đang chạy đầy đủ trên "${vm.name}"${jailsNote}`, 'success');
-      } else {
-        const reason = check.status === 'not_installed' ? 'chưa được cài đặt' : (check.error || 'chưa hoạt động');
-        if (confirm(`fail2ban trên VM "${vm.name}" ${reason}. Tự động cài đặt/cấu hình${jailsNote} ngay bây giờ?`)) {
-          const install = await api(`/security/vms/${id}/fail2ban/install`, 'POST');
-          if (install.status === 'running') toast(`Đã cài đặt và cấu hình fail2ban trên "${vm.name}"${jailsNote}`, 'success');
-          else toast(install.error || 'Cài đặt fail2ban thất bại', 'error');
-        }
-      }
-    } else {
-      const wafWarning = vm.waf_enabled ? ' VÀ jail WAF (tắt cả 2 vì chung 1 daemon fail2ban)' : '';
-      if (confirm(`Tắt fail2ban trên VM "${vm.name}"? VM sẽ KHÔNG còn tự động chặn brute-force SSH${wafWarning} cho đến khi bật lại.`)) {
-        const stop = await api(`/security/vms/${id}/fail2ban/stop`, 'POST');
-        if (stop.status === 'installed_not_running') toast(`Đã tắt fail2ban trên "${vm.name}"`, 'success');
-        else toast(stop.error || 'Không tắt được fail2ban', 'error');
-      }
-    }
-  } catch (err) {
-    toast(err.message, 'error');
-  } finally {
-    await refreshManageVms();
   }
 }
 
@@ -3414,9 +3356,7 @@ async function renderSecurityManage() {
         <p style="margin-bottom:8px">Chỉ VM Linux đã có IP (do VMware Tools báo cáo) mới bật giám sát được. Chọn 1 tài khoản kết nối (mục "Tài khoản kết nối" bên sidebar) rồi bấm Lưu — để trống rồi Lưu để tắt giám sát.</p>
         <p style="margin-bottom:6px">auth.log/secure chỉ root đọc được, và tên tiến trình đứng sau mỗi kết nối ra ngoài cũng cần root (<code>ss -p</code>) — trước khi bật giám sát, chạy trên VM đó (thay <code>USER</code> bằng username của tài khoản kết nối sẽ dùng):</p>
         <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/wc -l /var/log/auth.log, /usr/bin/wc -l /var/log/secure, /usr/bin/tail -n +* /var/log/auth.log, /usr/bin/tail -n +* /var/log/secure, /usr/bin/ss *' | sudo tee /etc/sudoers.d/netadmin-ssh-monitor</pre>
-        <p style="margin-bottom:6px;font-size:12px">(Thiếu dòng <code>ss *</code> vẫn giám sát kết nối ra ngoài được, chỉ là không biết tên tiến trình — cột "Process" sẽ hiện "không xác định".)</p>
-        <p style="margin-bottom:6px">Cột <strong>Fail2ban</strong>: bấm nút để kiểm tra VM đã cài fail2ban chưa; nếu chưa, hệ thống sẽ hỏi và tự cài đặt + khởi động qua sudo. Cần thêm quyền sudo cho các lệnh cài đặt (thay <code>USER</code> bằng username của tài khoản kết nối):</p>
-        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client' | sudo tee /etc/sudoers.d/netadmin-fail2ban-install</pre>
+        <p style="margin-bottom:0;font-size:12px">(Thiếu dòng <code>ss *</code> vẫn giám sát kết nối ra ngoài được, chỉ là không biết tên tiến trình — cột "Process" sẽ hiện "không xác định". Bật/tắt fail2ban jail sshd đã chuyển sang trang <a href="#" onclick="navigate('fail2banConfig');return false" style="color:var(--accent)">Cấu hình Fail2ban</a> → tab "Quản lý Jail".)</p>
       </div>
       <div class="table-toolbar">
         <div class="search-box">
@@ -3943,8 +3883,7 @@ async function renderWafManage() {
         <p style="margin-bottom:8px">Hệ thống tự dò các domain đang chạy trên VM bằng cách đọc <code>server_name</code>/<code>access_log</code> trong <code>/etc/nginx/**/*.conf</code> mỗi lượt quét — mỗi domain 1 file log riêng sẽ được theo dõi độc lập (xem cột "Domain đã dò"). Ô "Log dự phòng" chỉ dùng khi KHÔNG dò được domain nào (vd không đọc được /etc/nginx).</p>
         <p style="margin-bottom:6px">Cần quyền sudo đọc config + log (thay <code>USER</code> bằng username tài khoản kết nối):</p>
         <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(root) NOPASSWD: /usr/bin/find /etc/nginx*, /usr/bin/cat /etc/nginx/*, /usr/bin/wc -l *, /usr/bin/tail -n +* *, /usr/bin/test -f *' | sudo tee /etc/sudoers.d/netadmin-waf-monitor</pre>
-        <p style="margin-bottom:6px">Cột <strong>Jail WAF</strong>: bấm "Cài đặt" để tự động cấu hình 1 jail fail2ban riêng dùng để chặn IP (việc PHÁT HIỆN dò quét/DoS/DDoS do hệ thống này tự làm, không phụ thuộc fail2ban). Cần quyền sudo:</p>
-        <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client, /usr/bin/tee, /usr/bin/mkdir, /usr/bin/sed' | sudo tee /etc/sudoers.d/netadmin-waf-jail</pre>
+        <p style="margin-bottom:6px">Bật/tắt jail WAF (chặn IP) đã chuyển sang trang <a href="#" onclick="navigate('fail2banConfig');return false" style="color:var(--accent)">Cấu hình Fail2ban</a> → tab "Quản lý Jail" — việc PHÁT HIỆN dò quét/DoS/DDoS do hệ thống này tự làm, không phụ thuộc fail2ban.</p>
         <p style="margin-bottom:0">Cột <strong>Tin X-Forwarded-For</strong>: CHỈ bật nếu VM này nằm sau 1 reverse proxy/load balancer thật (khi đó $remote_addr trong log luôn là IP của proxy, không phải khách thật) — bật nhầm cho VM nhận traffic trực tiếp sẽ cho phép giả mạo header để đổ lỗi/chặn nhầm IP bất kỳ.</p>
       </div>
       <div class="table-toolbar">
@@ -3962,21 +3901,6 @@ async function renderWafManage() {
   renderWafManageRows();
 }
 
-function wafJailCell(v) {
-  const status = v.waf_jail_status || 'unknown';
-  const label = WAF_JAIL_LABEL[status] || status;
-  const cls = status === 'running' ? 'online' : (status === 'error' ? 'offline' : (status === 'installing' ? 'warning' : 'unknown'));
-  const title = status === 'error' && v.waf_jail_error ? escAttr(v.waf_jail_error) : '';
-  return `<div style="display:flex;flex-direction:column;gap:4px">
-    <span class="status ${cls}" title="${title}"><span class="dot"></span>${label}</span>
-    <div class="actions">
-      <button class="btn-icon" data-permission="waf.jail.check" title="Kiểm tra" onclick="wafJailAction(${v.id}, 'check', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-      ${status === 'running' || status === 'installed_not_running'
-        ? `<button class="btn-icon delete" data-permission="waf.jail.manage" title="Dừng jail" onclick="wafJailAction(${v.id}, 'stop', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg></button>`
-        : `<button class="btn-icon edit" data-permission="waf.jail.manage" title="Cài đặt jail" onclick="wafJailAction(${v.id}, 'install', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>`}
-    </div>
-  </div>`;
-}
 
 function renderWafManageRows() {
   const wrap = document.getElementById('wafManageTableWrap');
@@ -3994,7 +3918,7 @@ function renderWafManageRows() {
   const rowOffset = (wafManagePagination.page - 1) * wafManagePagination.pageSize;
   wrap.innerHTML = `<table>
         <thead><tr>
-          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}${thSort('Tài khoản SSH', 'ssh_user', wafManageSortState, 'toggleWafManageSort')}${thSort('Port', 'ssh_port', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th>${thSort('Jail WAF', 'waf_jail_status', wafManageSortState, 'toggleWafManageSort')}<th>Hành động</th></tr></thead>
+          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}${thSort('Tài khoản SSH', 'ssh_user', wafManageSortState, 'toggleWafManageSort')}${thSort('Port', 'ssh_port', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th><th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = !!(v.ssh_credential_id && v.ip_address);
           return `<tr data-vm-id="${v.id}">
@@ -4008,14 +3932,14 @@ function renderWafManageRows() {
             <td><label class="toggle-switch" data-permission="waf.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}"><input type="checkbox" class="waf-enabled" data-id="${v.id}" ${v.waf_enabled ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="Tự động chặn IP khi phát hiện tấn công"><input type="checkbox" class="waf-auto-block" data-id="${v.id}" ${v.waf_auto_block ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="CHỈ bật nếu VM này sau reverse proxy/load balancer thật"><input type="checkbox" class="waf-trust-xff" data-id="${v.id}" ${v.waf_trust_xff ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
-            <td>${wafJailCell(v)}</td>
             <td><div class="actions">
               <button class="btn ${v.waf_enabled ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.waf_enabled ? 'Đã lưu — đang giám sát WAF' : 'Chưa lưu'}" data-permission="waf.manage" ${eligible ? '' : 'disabled'} onclick="saveWafConfig(${v.id}, this)">Lưu</button>
               <button class="btn-icon" data-permission="waf.jail.check" title="Xem IP đang bị chặn" ${eligible ? '' : 'disabled'} onclick="openWafBannedIpsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></button>
             </div></td>
           </tr>`;
         }).join('')}</tbody>
-      </table>${paginationBar(wafManagePagination, sortedVms.length, 'wafManagePagination', 'renderWafManageRows')}`;
+      </table>${paginationBar(wafManagePagination, sortedVms.length, 'wafManagePagination', 'renderWafManageRows')}
+      <div style="padding:14px 16px;font-size:12px;color:var(--fg-dim);border-top:1px solid var(--border)">Bật/tắt và cài đặt jail WAF đã chuyển sang trang <a href="#" onclick="navigate('fail2banConfig');return false" style="color:var(--accent)">Cấu hình Fail2ban</a> → tab "Quản lý Jail".</div>`;
   applyPermissionVisibility();
 }
 
@@ -4060,27 +3984,6 @@ async function openWafDomainsModal(vmId) {
   } catch (e) {
     document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
   }
-}
-
-async function refreshWafManageVms() {
-  try { wafState.vms = await api('/waf/vms'); } catch { /* keep stale data, next manual retry will refetch */ }
-  renderWafManageRows();
-}
-
-async function wafJailAction(id, action, btn) {
-  const vm = wafState.vms.find(v => v.id === id);
-  if (!vm) return;
-  if (action === 'install' && !confirm(`Cài đặt jail WAF trên "${vm.name}"? Sẽ cài fail2ban nếu chưa có và cấu hình jail riêng để chặn IP theo yêu cầu.`)) return;
-  if (action === 'stop' && !confirm(`Dừng jail WAF trên "${vm.name}"? IP đang bị chặn qua jail này sẽ được gỡ khi jail dừng.`)) return;
-  btn.disabled = true;
-  try {
-    const result = await api(`/waf/vms/${id}/jail/${action}`, 'POST');
-    if (result.status === 'running') toast(`Jail WAF đang chạy trên "${vm.name}"`, 'success');
-    else if (result.status === 'installed_not_running') toast(`Đã dừng jail WAF trên "${vm.name}"`, 'success');
-    else if (result.status === 'not_installed') toast(`Jail WAF chưa được cài đặt trên "${vm.name}"`, 'error');
-    else toast(result.error || 'Thao tác thất bại', 'error');
-  } catch (e) { toast(e.message, 'error'); }
-  finally { await refreshWafManageVms(); }
 }
 
 async function openWafBannedIpsModal(vmId) {
@@ -4337,9 +4240,43 @@ function fail2banFieldGroup(group, title, values, isOverride, baseValues) {
 let fail2banProfilesData = [];
 let fail2banOverridesData = [];
 
+const FAIL2BAN_CONFIG_TAB_KEY = 'netadmin_fail2banConfigTab';
+let fail2banConfigTab = loadSavedTab(FAIL2BAN_CONFIG_TAB_KEY, 'jail');
+
+function setFail2banConfigTab(tab) {
+  fail2banConfigTab = tab;
+  saveTab(FAIL2BAN_CONFIG_TAB_KEY, tab);
+  document.querySelectorAll('#fail2banConfigTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderFail2banConfigTabBody();
+}
+
+function renderFail2banConfigTabBody() {
+  if (fail2banConfigTab === 'jail') renderFail2banJailTab();
+  else renderFail2banPolicyTab();
+}
+
 async function renderFail2banConfig() {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Cấu hình Fail2ban</div><div class="page-subtitle">Bật/tắt & cài đặt jail, và tùy chỉnh ngưỡng phát hiện tấn công/thời gian chặn IP cho jail sshd và netadmin-waf — tất cả trong 1 trang</div></div>
+      <button class="btn btn-secondary btn-sm" onclick="renderFail2banConfig()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Làm mới
+      </button>
+    </div>
+    <div class="filter-tabs" id="fail2banConfigTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${fail2banConfigTab === 'jail' ? 'active' : ''}" data-tab="jail" onclick="setFail2banConfigTab('jail')">Quản lý Jail</div>
+      <div class="filter-tab ${fail2banConfigTab === 'policy' ? 'active' : ''}" data-tab="policy" onclick="setFail2banConfigTab('policy')">Chính sách (ngưỡng & bantime)</div>
+    </div>
+    <div id="fail2banConfigTabBody"></div>`;
+  renderFail2banConfigTabBody();
+}
+
+async function renderFail2banPolicyTab() {
+  const body = document.getElementById('fail2banConfigTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
   try {
     const [global, profiles, overrides] = await Promise.all([
       api('/fail2ban-config/global'), api('/fail2ban-config/profiles'), api('/fail2ban-config/overrides'),
@@ -4347,21 +4284,14 @@ async function renderFail2banConfig() {
     fail2banGlobalData = global;
     fail2banProfilesData = profiles;
     fail2banOverridesData = overrides;
-    c.innerHTML = `
-    <div class="page-header">
-      <div><div class="page-title">Cấu hình Fail2ban</div><div class="page-subtitle">Tùy chỉnh ngưỡng phát hiện tấn công & thời gian chặn IP cho jail sshd và netadmin-waf, áp dụng cho các server</div></div>
-      <button class="btn btn-secondary btn-sm" onclick="renderFail2banConfig()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        Làm mới
-      </button>
-    </div>
+    body.innerHTML = `
     <div class="table-wrap" style="padding:20px;margin-bottom:16px">
       <h3 style="font-size:14px;font-weight:600;margin-bottom:4px">Cấu hình mặc định (áp dụng cho mọi server)</h3>
       <p style="font-size:12px;color:var(--fg-dim);margin-bottom:16px">Server chưa gán hồ sơ và chưa có ghi đè riêng bên dưới sẽ dùng đúng các giá trị này. Lưu sẽ tự động ghi lại file cấu hình và reload fail2ban trên mọi server đang chạy jail.</p>
       <form id="fail2banGlobalForm" onsubmit="saveFail2banGlobal(event)">
         ${fail2banFieldGroup('ssh', 'SSH (jail sshd)', global, false)}
         ${fail2banFieldGroup('waf', 'WAF (jail netadmin-waf)', global, false)}
-        <div class="form-actions"><button type="submit" class="btn btn-primary">Lưu & áp dụng xuống server</button></div>
+        <div class="form-actions"><button type="submit" class="btn btn-primary" data-permission="fail2ban.config.manage">Lưu & áp dụng xuống server</button></div>
       </form>
     </div>
     <div class="table-wrap" style="margin-bottom:16px">
@@ -4370,7 +4300,7 @@ async function renderFail2banConfig() {
           <h3 style="font-size:14px;font-weight:600">Hồ sơ cấu hình (Profiles)</h3>
           <p style="font-size:12px;color:var(--fg-dim);margin-top:2px">Bộ giá trị đặt tên sẵn, gán cho bất kỳ server nào — sửa 1 hồ sơ sẽ tự áp dụng lại cho mọi server đang dùng hồ sơ đó.</p>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="openFail2banProfileForm()">+ Tạo hồ sơ</button>
+        <button class="btn btn-primary btn-sm" data-permission="fail2ban.config.manage" onclick="openFail2banProfileForm()">+ Tạo hồ sơ</button>
       </div>
       <table>
         <thead><tr><th>Tên hồ sơ</th><th>Mô tả</th><th>Server đang dùng</th><th style="text-align:right">Thao tác</th></tr></thead>
@@ -4384,7 +4314,171 @@ async function renderFail2banConfig() {
         <tbody id="fail2banOverridesBody">${renderFail2banOverrideRows()}</tbody>
       </table>
     </div>`;
-  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+// ─── "Quản lý Jail" tab — bật/tắt & cài đặt jail sshd + jail WAF cho từng server, consolidated ──
+// Previously this lived split across 2 pages (Security page's "Quản lý VM giám sát" tab had the
+// sshd fail2ban toggle, WAF page's "Quản lý giám sát" tab had the WAF jail check/install/stop
+// buttons) — moved here per user report: an admin has to know 2 separate pages exist just to turn
+// fail2ban on for one server, and the 2 pages' own eligibility checks had drifted (Security page's
+// toggle checked v.ssh_user, a denormalized display-cache string that can legitimately be empty/
+// stale independent of whether SSH is actually configured; WAF page correctly checked
+// v.ssh_credential_id, the real foreign key). That mismatch is exactly what could make a VM show
+// "fail2ban is installed and running" while its own enable toggle stayed disabled. Fixed here by
+// using v.ssh_credential_id consistently, the same field WAF page's check already used correctly.
+let fail2banJailVms = [];
+let fail2banJailSearch = '';
+let fail2banJailPagination = newPagination();
+let fail2banJailSortState = { key: null, dir: 'asc' };
+
+async function renderFail2banJailTab() {
+  const body = document.getElementById('fail2banConfigTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    // GET /security/vms already carries fail2ban_status/fail2ban_error/ssh_credential_id; GET
+    // /waf/vms carries waf_jail_status/waf_jail_error/waf_enabled — same underlying vcenter_vms
+    // rows, just 2 existing endpoints already shaped for their own pages. Merged by id here rather
+    // than adding a 3rd endpoint that duplicates both.
+    const [secVms, wafVms] = await Promise.all([api('/security/vms'), api('/waf/vms')]);
+    const wafById = new Map(wafVms.map(v => [v.id, v]));
+    fail2banJailVms = secVms.map(v => ({ ...v, ...(wafById.get(v.id) || {}) }));
+    body.innerHTML = `
+      <div class="table-wrap">
+        <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+          <p style="margin-bottom:6px">Cột <strong>Jail sshd</strong>: bấm nút để kiểm tra VM đã cài fail2ban chưa; nếu chưa, hệ thống sẽ hỏi và tự cài đặt + khởi động qua sudo. Cần thêm quyền sudo cho các lệnh cài đặt (thay <code>USER</code> bằng username của tài khoản kết nối):</p>
+          <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:10px">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client' | sudo tee /etc/sudoers.d/netadmin-fail2ban-install</pre>
+          <p style="margin-bottom:0">Cột <strong>Jail WAF</strong>: bấm "Cài đặt" để tự động cấu hình 1 jail fail2ban riêng dùng để chặn IP. Cần quyền sudo:</p>
+          <pre style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;font-size:12px;overflow-x:auto;margin-bottom:0">echo 'USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /usr/bin/systemctl, /usr/bin/fail2ban-client, /usr/bin/tee, /usr/bin/mkdir, /usr/bin/sed' | sudo tee /etc/sudoers.d/netadmin-waf-jail</pre>
+        </div>
+        <div class="table-toolbar">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="fail2banJailSearch" placeholder="Tìm theo tên VM, IP..." value="${escAttr(fail2banJailSearch)}">
+          </div>
+        </div>
+        <div id="fail2banJailBody"></div>
+      </div>`;
+    document.getElementById('fail2banJailSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { fail2banJailSearch = e.target.value; fail2banJailPagination.page = 1; renderFail2banJailRows(); }, 300);
+    });
+    renderFail2banJailRows();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function toggleFail2banJailSort(key) { toggleSortState(fail2banJailSortState, key); renderFail2banJailRows(); }
+
+function renderFail2banJailRows() {
+  const wrap = document.getElementById('fail2banJailBody');
+  if (!wrap) return;
+  const q = fail2banJailSearch.trim().toLowerCase();
+  const filtered = q ? fail2banJailVms.filter(v => (v.name || '').toLowerCase().includes(q) || (v.ip_address || '').toLowerCase().includes(q)) : fail2banJailVms;
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không tìm thấy VM</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, fail2banJailSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, fail2banJailPagination);
+  const rowOffset = (fail2banJailPagination.page - 1) * fail2banJailPagination.pageSize;
+  wrap.innerHTML = `<table>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', fail2banJailSortState, 'toggleFail2banJailSort')}<th>IP</th><th>Jail sshd</th><th>Jail WAF</th></tr></thead>
+    <tbody>${rows.map((v, i) => {
+      const eligible = !!v.ssh_credential_id; // the fix — was v.ssh_user (a display-cache string) on the old Security-page toggle
+      return `<tr>
+        <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+        <td style="font-weight:600">${escHtml(v.name)}</td>
+        <td>${v.ip_address || '—'}</td>
+        <td>${fail2banJailSshCell(v, eligible)}</td>
+        <td>${fail2banJailWafCell(v, eligible)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>${paginationBar(fail2banJailPagination, sorted.length, 'fail2banJailPagination', 'renderFail2banJailRows')}`;
+  applyPermissionVisibility();
+}
+
+function fail2banJailSshCell(v, eligible) {
+  const status = v.fail2ban_status || 'unknown';
+  const checked = status === 'running';
+  const disabled = !eligible || status === 'installing';
+  const title = !eligible ? 'Chưa gán tài khoản kết nối SSH (trang Giám sát bất thường → Quản lý VM giám sát)'
+    : (status === 'error' || status === 'sshd_jail_missing') && v.fail2ban_error ? v.fail2ban_error
+    : (FAIL2BAN_LABEL[status] || status);
+  return `<div style="display:flex;align-items:center;gap:8px">
+    <label class="toggle-switch ${status === 'installing' ? 'installing' : status === 'error' ? 'error' : ''}" data-permission="security.fail2ban.manage" title="${escAttr(title)}">
+      <input type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} onclick="handleFail2banJailSshToggle(event, ${v.id})">
+      <span class="toggle-slider"></span>
+    </label>
+    <span class="status ${FAIL2BAN_CLASS[status] || 'unknown'}"><span class="dot"></span>${FAIL2BAN_LABEL[status] || status}</span>
+  </div>`;
+}
+
+function fail2banJailWafCell(v, eligible) {
+  const status = v.waf_jail_status || 'unknown';
+  const label = WAF_JAIL_LABEL[status] || status;
+  const cls = status === 'running' ? 'online' : (status === 'error' ? 'offline' : (status === 'installing' ? 'warning' : 'unknown'));
+  const title = !eligible ? 'Chưa gán tài khoản kết nối SSH' : (status === 'error' && v.waf_jail_error ? v.waf_jail_error : '');
+  return `<div style="display:flex;align-items:center;gap:8px">
+    <span class="status ${cls}" title="${escAttr(title)}"><span class="dot"></span>${label}</span>
+    <div class="actions">
+      <button class="btn-icon" data-permission="waf.jail.check" title="Kiểm tra" ${eligible ? '' : 'disabled'} onclick="handleFail2banJailWafAction(${v.id}, 'check', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+      ${status === 'running' || status === 'installed_not_running'
+        ? `<button class="btn-icon delete" data-permission="waf.jail.manage" title="Dừng jail" onclick="handleFail2banJailWafAction(${v.id}, 'stop', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg></button>`
+        : `<button class="btn-icon edit" data-permission="waf.jail.manage" title="Cài đặt jail" ${eligible ? '' : 'disabled'} onclick="handleFail2banJailWafAction(${v.id}, 'install', this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>`}
+    </div>
+  </div>`;
+}
+
+async function handleFail2banJailSshToggle(e, id) {
+  e.preventDefault();
+  const checkbox = e.target;
+  const turningOn = checkbox.checked;
+  const vm = fail2banJailVms.find(v => v.id === id);
+  if (!vm) return;
+  checkbox.disabled = true;
+  try {
+    if (turningOn) {
+      const jailsNote = vm.waf_enabled ? ' (jail sshd + jail WAF)' : ' (jail sshd)';
+      const check = await api(`/security/vms/${id}/fail2ban/check`, 'POST');
+      if (check.status === 'running') {
+        toast(`fail2ban đang chạy đầy đủ trên "${vm.name}"${jailsNote}`, 'success');
+      } else {
+        const reason = check.status === 'not_installed' ? 'chưa được cài đặt' : (check.error || 'chưa hoạt động');
+        if (confirm(`fail2ban trên VM "${vm.name}" ${reason}. Tự động cài đặt/cấu hình${jailsNote} ngay bây giờ?`)) {
+          const install = await api(`/security/vms/${id}/fail2ban/install`, 'POST');
+          if (install.status === 'running') toast(`Đã cài đặt và cấu hình fail2ban trên "${vm.name}"${jailsNote}`, 'success');
+          else toast(install.error || 'Cài đặt fail2ban thất bại', 'error');
+        }
+      }
+    } else {
+      const wafWarning = vm.waf_enabled ? ' VÀ jail WAF (tắt cả 2 vì chung 1 daemon fail2ban)' : '';
+      if (confirm(`Tắt fail2ban trên VM "${vm.name}"? VM sẽ KHÔNG còn tự động chặn brute-force SSH${wafWarning} cho đến khi bật lại.`)) {
+        const stop = await api(`/security/vms/${id}/fail2ban/stop`, 'POST');
+        if (stop.status === 'installed_not_running') toast(`Đã tắt fail2ban trên "${vm.name}"`, 'success');
+        else toast(stop.error || 'Không tắt được fail2ban', 'error');
+      }
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    await renderFail2banJailTab();
+  }
+}
+
+async function handleFail2banJailWafAction(id, action, btn) {
+  const vm = fail2banJailVms.find(v => v.id === id);
+  if (!vm) return;
+  if (action === 'install' && !confirm(`Cài đặt jail WAF trên "${vm.name}"? Sẽ cài fail2ban nếu chưa có và cấu hình jail riêng để chặn IP theo yêu cầu.`)) return;
+  if (action === 'stop' && !confirm(`Dừng jail WAF trên "${vm.name}"? IP đang bị chặn qua jail này sẽ được gỡ khi jail dừng.`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/waf/vms/${id}/jail/${action}`, 'POST');
+    if (result.status === 'running') toast(`Jail WAF đang chạy trên "${vm.name}"`, 'success');
+    else if (result.status === 'installed_not_running') toast(`Đã dừng jail WAF trên "${vm.name}"`, 'success');
+    else if (result.status === 'not_installed') toast(`Jail WAF chưa được cài đặt trên "${vm.name}"`, 'error');
+    else toast(result.error || 'Thao tác thất bại', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { await renderFail2banJailTab(); }
 }
 
 function renderFail2banProfileRows() {
@@ -4396,8 +4490,8 @@ function renderFail2banProfileRows() {
       <td style="color:var(--fg-muted);font-size:13px">${escHtml(p.description || '—')}</td>
       <td>${usageCount > 0 ? `<span class="status warning">${usageCount} server</span>` : `<span class="status unknown">Chưa dùng</span>`}</td>
       <td style="text-align:right">
-        <button class="btn btn-secondary btn-sm" onclick='openFail2banProfileForm(${JSON.stringify(p).replace(/'/g, "&#39;")})'>Sửa</button>
-        <button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="deleteFail2banProfile(${p.id}, '${escAttr(p.name)}')">Xóa</button>
+        <button class="btn btn-secondary btn-sm" data-permission="fail2ban.config.manage" onclick='openFail2banProfileForm(${JSON.stringify(p).replace(/'/g, "&#39;")})'>Sửa</button>
+        <button class="btn btn-secondary btn-sm" style="color:var(--red)" data-permission="fail2ban.config.manage" onclick="deleteFail2banProfile(${p.id}, '${escAttr(p.name)}')">Xóa</button>
       </td>
     </tr>`;
   }).join('');
@@ -4415,8 +4509,8 @@ function renderFail2banOverrideRows() {
       <td style="font-weight:600">${escHtml(o.vmName)}</td>
       <td>${status}</td>
       <td style="text-align:right">
-        <button class="btn btn-secondary btn-sm" onclick='openFail2banOverrideForm(${JSON.stringify(o).replace(/'/g, "&#39;")})'>Sửa</button>
-        ${(o.profileId || overriddenCount > 0) ? `<button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="resetFail2banVm(${o.vmId}, '${escAttr(o.vmName)}')">Về mặc định chung</button>` : ''}
+        <button class="btn btn-secondary btn-sm" data-permission="fail2ban.config.manage" onclick='openFail2banOverrideForm(${JSON.stringify(o).replace(/'/g, "&#39;")})'>Sửa</button>
+        ${(o.profileId || overriddenCount > 0) ? `<button class="btn btn-secondary btn-sm" style="color:var(--red)" data-permission="fail2ban.config.manage" onclick="resetFail2banVm(${o.vmId}, '${escAttr(o.vmName)}')">Về mặc định chung</button>` : ''}
       </td>
     </tr>`;
   }).join('');
