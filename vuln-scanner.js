@@ -197,9 +197,11 @@ async function scanVm(vm, detailCache) {
 }
 
 async function collectAll() {
+  // vuln_scan_mode = 'manual' VMs are deliberately excluded here — they're only ever scanned via the
+  // explicit "Quét ngay" route handler (routes/vuln.js), never on this automatic due-check schedule.
   const due = await db.prepare(`
     SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
-    WHERE vuln_scan_enabled = 1 AND ssh_credential_id IS NOT NULL AND ip_address IS NOT NULL AND ip_address != ''
+    WHERE vuln_scan_enabled = 1 AND vuln_scan_mode = 'auto' AND ssh_credential_id IS NOT NULL AND ip_address IS NOT NULL AND ip_address != ''
       AND power_state = 'POWERED_ON' AND (guest_family IS NULL OR guest_family = 'LINUX')
       AND (vuln_last_scanned_at IS NULL OR vuln_last_scanned_at <= DATE_SUB(NOW(), INTERVAL ${SCAN_INTERVAL_HOURS} HOUR))
   `).all();

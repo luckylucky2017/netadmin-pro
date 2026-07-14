@@ -10,7 +10,7 @@ const vulnScanner = require('../vuln-scanner');
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id, ssh_user, ssh_port,
-           vuln_scan_enabled, vuln_last_scanned_at, vuln_scan_status, vuln_scan_error, vuln_package_count
+           vuln_scan_enabled, vuln_scan_mode, vuln_last_scanned_at, vuln_scan_status, vuln_scan_error, vuln_package_count
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
@@ -23,11 +23,15 @@ router.patch('/vms/:id', requirePermission('vuln.scan.manage'), async (req, res)
   if (enabled && (!vm.ssh_credential_id || !vm.ip_address)) {
     return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước (trang Giám sát bất thường → Quản lý VM giám sát)' });
   }
-  await db.prepare('UPDATE vcenter_vms SET vuln_scan_enabled = ? WHERE id = ?').run(enabled, vm.id);
+  // 'auto' (default — rescanned automatically every 12h) or 'manual' (opted into monitoring, but only
+  // ever scanned when the admin explicitly clicks "Quét ngay" — see vuln-scanner.js's collectAll).
+  const mode = req.body?.mode === 'manual' ? 'manual' : 'auto';
+  await db.prepare('UPDATE vcenter_vms SET vuln_scan_enabled = ?, vuln_scan_mode = ? WHERE id = ?').run(enabled, mode, vm.id);
   // Clear stale status when turning off — an old "error"/"unsupported_os" from a prior scan
   // shouldn't linger and confuse the row once scanning is disabled.
   if (!enabled) await db.prepare('UPDATE vcenter_vms SET vuln_scan_status = NULL, vuln_scan_error = NULL WHERE id = ?').run(vm.id);
-  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, enabled ? 'Bật quét lỗ hổng (CVE)' : 'Tắt quét lỗ hổng (CVE)');
+  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
+    enabled ? `Bật quét lỗ hổng (CVE) — chế độ ${mode === 'manual' ? 'thủ công' : 'tự động'}` : 'Tắt quét lỗ hổng (CVE)');
   res.json({ message: 'OK' });
 });
 

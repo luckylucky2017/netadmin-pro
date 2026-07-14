@@ -6592,7 +6592,7 @@ async function renderVulnManage() {
     body.innerHTML = `
       <div class="table-wrap">
         <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
-          <p style="margin-bottom:0">Chỉ VM đã có "Tài khoản kết nối" SSH (gán ở trang Giám sát bất thường → tab "Quản lý VM giám sát" — dùng chung, không cấu hình lại ở đây) mới bật quét được. Quét lại tự động mỗi 12 giờ; bấm "Quét ngay" để quét ngoài lịch. Hiện chỉ hỗ trợ VM chạy Ubuntu/Debian (dpkg) — RPM-based (RHEL/CentOS/...) chưa được hỗ trợ.</p>
+          <p style="margin-bottom:0">Chỉ VM đã có "Tài khoản kết nối" SSH (gán ở trang Giám sát bất thường → tab "Quản lý VM giám sát" — dùng chung, không cấu hình lại ở đây) mới bật quét được. Chọn chế độ theo từng VM: <strong>Tự động</strong> (quét lại mỗi 12 giờ, không cần thao tác gì thêm) hoặc <strong>Thủ công</strong> (chỉ quét khi bấm "Quét ngay" — hợp lý nếu bạn muốn tự chủ động thời điểm quét). Cả 2 chế độ đều có nút "Quét ngay" để quét ngoài lịch bất cứ lúc nào. Hiện chỉ hỗ trợ VM chạy Ubuntu/Debian (dpkg) — RPM-based (RHEL/CentOS/...) chưa được hỗ trợ.</p>
         </div>
         <div class="table-toolbar">
           <div class="search-box">
@@ -6625,11 +6625,12 @@ function renderVulnManageRows() {
   const rows = paginateRows(sorted, vulnManagePagination);
   const rowOffset = (vulnManagePagination.page - 1) * vulnManagePagination.pageSize;
   wrap.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('Tên VM', 'name', vulnManageSortState, 'toggleVulnManageSort')}<th>IP</th><th>Bật quét</th><th>Trạng thái</th><th>Số gói đã quét</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', vulnManageSortState, 'toggleVulnManageSort')}<th>IP</th><th>Bật quét</th><th>Chế độ</th><th>Trạng thái</th><th>Số gói đã quét</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
     <tbody>${rows.map((v, i) => {
       const eligible = !!v.ssh_credential_id;
       const status = v.vuln_scan_status || 'unknown';
       const checked = !!v.vuln_scan_enabled;
+      const mode = v.vuln_scan_mode === 'manual' ? 'manual' : 'auto';
       const title = !eligible ? 'Chưa gán tài khoản kết nối SSH (trang Giám sát bất thường → Quản lý VM giám sát)'
         : (status === 'error' || status === 'unsupported_os') && v.vuln_scan_error ? v.vuln_scan_error
         : (VULN_SCAN_STATUS_LABEL[status] || status);
@@ -6643,6 +6644,12 @@ function renderVulnManageRows() {
             <span class="toggle-slider"></span>
           </label>
         </td>
+        <td>${checked
+          ? `<select class="filter-select" style="font-size:12px;padding:4px 8px" data-permission="vuln.scan.manage" onchange="handleVulnScanModeChange(${v.id}, this)">
+               <option value="auto" ${mode === 'auto' ? 'selected' : ''}>Tự động (mỗi 12h)</option>
+               <option value="manual" ${mode === 'manual' ? 'selected' : ''}>Thủ công</option>
+             </select>`
+          : '<span style="color:var(--fg-dim)">—</span>'}</td>
         <td><span class="status ${VULN_SCAN_STATUS_CLASS[status] || 'unknown'}" title="${escAttr(title)}"><span class="dot"></span>${VULN_SCAN_STATUS_LABEL[status] || status}</span></td>
         <td>${v.vuln_package_count ?? '—'}</td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${v.vuln_last_scanned_at ? formatTime(v.vuln_last_scanned_at) : '—'}</span></td>
@@ -6656,8 +6663,12 @@ function renderVulnManageRows() {
 async function handleVulnScanToggle(e, id) {
   const checked = e.target.checked;
   e.target.disabled = true;
+  // Preserve whatever mode this VM already had (so turning monitoring off and back on doesn't
+  // silently reset a deliberately-chosen "Thủ công" back to "Tự động").
+  const vm = vulnManageVms.find(v => v.id === id);
+  const mode = vm?.vuln_scan_mode === 'manual' ? 'manual' : 'auto';
   try {
-    await api(`/vuln/vms/${id}`, 'PATCH', { enabled: checked });
+    await api(`/vuln/vms/${id}`, 'PATCH', { enabled: checked, mode });
     toast(checked ? 'Đã bật quét lỗ hổng — lần quét đầu sẽ chạy trong ít phút' : 'Đã tắt quét lỗ hổng', 'success');
   } catch (err) {
     e.target.checked = !checked;
@@ -6665,6 +6676,16 @@ async function handleVulnScanToggle(e, id) {
   } finally {
     await renderVulnManage();
   }
+}
+
+async function handleVulnScanModeChange(id, selectEl) {
+  const mode = selectEl.value;
+  selectEl.disabled = true;
+  try {
+    await api(`/vuln/vms/${id}`, 'PATCH', { enabled: true, mode });
+    toast(mode === 'manual' ? 'Đã chuyển sang chế độ quét thủ công — chỉ quét khi bấm "Quét ngay"' : 'Đã chuyển sang chế độ tự động quét mỗi 12h', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+  finally { await renderVulnManage(); }
 }
 
 async function handleVulnScanNow(id, btn) {

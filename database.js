@@ -956,6 +956,9 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_status VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_package_count INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // 'auto' (default — collectAll's 12h due-check picks it up) or 'manual' (never auto-scheduled,
+  // only scanned via the explicit "Quét ngay" action) — see vuln-scanner.js's collectAll query.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_mode VARCHAR(10) DEFAULT 'auto'"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
