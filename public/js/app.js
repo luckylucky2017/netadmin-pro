@@ -6033,6 +6033,17 @@ async function renderUptimeMonitors() {
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
+// Display string for a monitor's actual target — matches uptime-collector.js's 3 check types
+// (monitors.type: 'http' checks m.url, 'tcp'/'ping' check m.host[:m.port]). Old rows created before
+// this feature existed have type='http' via the column default, so they keep showing m.url exactly
+// as before — no migration/backfill needed beyond the schema change itself.
+function monitorTargetLabel(m) {
+  if (m.type === 'tcp') return `TCP ${m.host}:${m.port}`;
+  if (m.type === 'ping') return `Ping (ICMP) ${m.host}`;
+  return m.url;
+}
+const MONITOR_TYPE_LABEL = { http: 'HTTP(S)', tcp: 'TCP Port', ping: 'Ping (ICMP)' };
+
 function certBadge(m) {
   if (m.cert_days_remaining == null) return '';
   const d = m.cert_days_remaining;
@@ -6053,7 +6064,7 @@ function renderMonitorList() {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
         <div>
           <div style="font-weight:600;font-size:15px;cursor:pointer" onclick="openMonitorDetail(${m.id})" title="Xem chi tiết">${m.name}${m.enabled ? '' : ' <span style="font-size:11px;color:var(--fg-dim);font-weight:400">(đã tắt)</span>'}</div>
-          <div style="font-size:12px;color:var(--fg-dim);font-family:'Fira Code',monospace">${m.url}</div>
+          <div style="font-size:12px;color:var(--fg-dim);font-family:'Fira Code',monospace">${escHtml(monitorTargetLabel(m))}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <span class="status ${m.current_status === 'up' ? 'online' : m.current_status === 'down' ? 'offline' : 'unknown'}"><span class="dot"></span>${m.current_status === 'up' ? 'Up' : m.current_status === 'down' ? 'Down' : 'Chưa kiểm tra'}</span>
@@ -6103,7 +6114,7 @@ async function openMonitorDetail(id) {
   if (m) {
     document.getElementById('modalBody').innerHTML = `
       <div style="margin-bottom:14px">
-        <div style="font-size:12px;color:var(--fg-dim);font-family:'Fira Code',monospace">${m.url}</div>
+        <div style="font-size:12px;color:var(--fg-dim);font-family:'Fira Code',monospace">${escHtml(monitorTargetLabel(m))}</div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
           <span class="status ${m.current_status === 'up' ? 'online' : m.current_status === 'down' ? 'offline' : 'unknown'}"><span class="dot"></span>${m.current_status === 'up' ? 'Up' : m.current_status === 'down' ? 'Down' : 'Chưa kiểm tra'}</span>
           ${certBadge(m)}
@@ -6207,20 +6218,31 @@ function renderTimeSeriesChart(points) {
 function openMonitorForm(monitor) {
   const m = typeof monitor === 'string' ? JSON.parse(monitor) : monitor;
   const isEdit = m && m.id;
+  const type = m?.type || 'http';
   openModal(isEdit ? 'Sửa monitor' : 'Thêm monitor', `
     <form id="monitorForm" onsubmit="saveMonitor(event, ${isEdit ? m.id : 'null'})">
       <div class="form-grid">
         <div class="form-group full"><label>Tên *</label><input type="text" name="name" value="${m?.name || ''}" required placeholder="Website công ty"></div>
-        <div class="form-group full"><label>URL *</label><input type="text" name="url" value="${m?.url || ''}" required placeholder="https://example.com hoặc http://1.2.3.4:8080"></div>
+        <div class="form-group full"><label>Loại giám sát *</label>
+          <select name="type" class="form-select" onchange="toggleMonitorTypeFields(this.value)">
+            <option value="http" ${type === 'http' ? 'selected' : ''}>HTTP(S) — kiểm tra website/API</option>
+            <option value="tcp" ${type === 'tcp' ? 'selected' : ''}>TCP Port — kiểm tra cổng dịch vụ đang mở (DB, SSH, message queue...)</option>
+            <option value="ping" ${type === 'ping' ? 'selected' : ''}>Ping (ICMP) — chỉ kiểm tra máy chủ có phản hồi mạng, không cần cổng/dịch vụ nào</option>
+          </select>
+          <div style="font-size:11px;color:var(--fg-dim);margin-top:2px">Chỉ theo dõi URL không phản ánh đúng máy chủ có "sống" hay không — TCP Port/Ping kiểm tra trực tiếp ở tầng mạng/dịch vụ, sâu hơn 1 request HTTP.</div>
+        </div>
+        <div class="form-group full" data-monitor-type="http"><label>URL *</label><input type="text" name="url" value="${m?.url || ''}" placeholder="https://example.com hoặc http://1.2.3.4:8080"></div>
+        <div class="form-group" data-monitor-type="tcp,ping"><label>Host / IP *</label><input type="text" name="host" value="${m?.host || ''}" placeholder="vd: 192.168.1.10 hoặc db.example.com"></div>
+        <div class="form-group" data-monitor-type="tcp"><label>Cổng (Port) *</label><input type="number" name="port" value="${m?.port || ''}" min="1" max="65535" placeholder="vd: 5432, 3306, 22..."></div>
         <div class="form-group"><label>Chu kỳ kiểm tra (giây)</label><input type="number" name="check_interval_sec" value="${m?.check_interval_sec || 300}" min="30"></div>
         <div class="form-group"><label>Timeout (giây)</label><input type="number" name="timeout_sec" value="${m?.timeout_sec || 10}" min="1"></div>
-        <div class="form-group"><label>Từ khóa kiểm tra (tùy chọn)</label><input type="text" name="keyword" value="${m?.keyword || ''}" placeholder="vd: Đăng nhập thành công"></div>
-        <div class="form-group"><label>Loại từ khóa</label>
+        <div class="form-group" data-monitor-type="http"><label>Từ khóa kiểm tra (tùy chọn)</label><input type="text" name="keyword" value="${m?.keyword || ''}" placeholder="vd: Đăng nhập thành công"></div>
+        <div class="form-group" data-monitor-type="http"><label>Loại từ khóa</label>
           <select name="keyword_type" class="form-select">
             <option value="contains" ${m?.keyword_type !== 'not_contains' ? 'selected' : ''}>Phải CÓ từ khóa</option>
             <option value="not_contains" ${m?.keyword_type === 'not_contains' ? 'selected' : ''}>KHÔNG được có từ khóa</option>
           </select></div>
-        <div class="form-group full"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--fg)"><input type="checkbox" name="ignore_tls_errors" value="1" style="width:auto" ${m?.ignore_tls_errors ? 'checked' : ''}> Bỏ qua lỗi chứng chỉ TLS (cho IP public/cert tự ký)</label></div>
+        <div class="form-group full" data-monitor-type="http"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--fg)"><input type="checkbox" name="ignore_tls_errors" value="1" style="width:auto" ${m?.ignore_tls_errors ? 'checked' : ''}> Bỏ qua lỗi chứng chỉ TLS (cho IP public/cert tự ký)</label></div>
         <div class="form-group full"><label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--fg)"><input type="checkbox" name="enabled" value="1" style="width:auto" ${m?.enabled === false ? '' : 'checked'}> Bật giám sát</label></div>
       </div>
       <div class="form-actions">
@@ -6228,6 +6250,22 @@ function openMonitorForm(monitor) {
         <button type="submit" class="btn btn-primary">${isEdit ? 'Cập nhật' : 'Thêm mới'}</button>
       </div>
     </form>`);
+  toggleMonitorTypeFields(type);
+}
+
+// Shows/hides the URL vs Host/Port field groups (and the HTTP-only keyword/TLS options) based on
+// the selected monitor type, and keeps the `required` attribute in sync with what's actually
+// visible — the API would reject a mismatched submission anyway (routes/monitors.js's
+// validateMonitorInput), but this catches it in the browser first with a clearer inline message.
+function toggleMonitorTypeFields(type) {
+  const form = document.getElementById('monitorForm');
+  if (!form) return;
+  form.querySelectorAll('[data-monitor-type]').forEach(el => {
+    el.style.display = el.dataset.monitorType.split(',').includes(type) ? '' : 'none';
+  });
+  if (form.elements.url) form.elements.url.required = type === 'http';
+  if (form.elements.host) form.elements.host.required = type !== 'http';
+  if (form.elements.port) form.elements.port.required = type === 'tcp';
 }
 
 async function saveMonitor(e, id) {

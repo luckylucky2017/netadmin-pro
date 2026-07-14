@@ -1,11 +1,28 @@
-// "Outside-in" HTTP/HTTPS uptime + SSL certificate expiry monitoring — UptimeRobot/Kuma-style,
-// separate from the internal SSH/vCenter monitoring elsewhere in the app. Uses Node's built-in
-// http/https modules (no extra dependency) so the SSL certificate can be read straight off the
-// same TLS socket used for the uptime check itself, rather than opening a second connection.
+// "Outside-in" uptime + SSL certificate expiry monitoring — UptimeRobot/Kuma-style, separate from
+// the internal SSH/vCenter monitoring elsewhere in the app. 3 check types (monitors.type):
+//   - 'http' (default): full HTTP(S) request, status code + optional keyword matching + TLS cert
+//     read straight off the same socket used for the check (see performHttpCheck).
+//   - 'tcp': raw TCP connect to host:port, no protocol awareness — for anything a browser can't
+//     directly hit (databases, message queues, SSH, a custom service on a bare port).
+//   - 'ping': ICMP echo via the `ping` npm package (host reachability only, no port/protocol at
+//     all) — the actual escape hatch for "URL-only isn't accurate enough", since a host can be
+//     network-reachable while its web server is down, or vice versa; these 3 types answer 3
+//     genuinely different questions about the same target.
+// Uses Node's built-in http/https modules for the 'http' type (no extra dependency) so the SSL
+// certificate can be read straight off the same TLS socket used for the uptime check itself,
+// rather than opening a second connection.
 const https = require('https');
 const http = require('http');
+const net = require('net');
 const { URL } = require('url');
 const db = require('./database');
+
+// Already a real dependency (routes/ping.js/chatbot-tools.js use it the same way) — internally
+// spawns the system `ping` binary with an argument array (not a shell string), so a malicious host
+// value can't inject shell metacharacters; routes/monitors.js still validates host against a strict
+// charset as defense-in-depth before it ever reaches here.
+let pingLib;
+try { pingLib = require('ping'); } catch { pingLib = null; }
 
 const MAX_BODY_BYTES = 1_000_000; // cap keyword-matching reads so a huge page can't blow up memory
 
@@ -21,7 +38,7 @@ function toSqlDatetime(date) {
 // Single HTTP(S) request: measures response time, reads the peer TLS certificate (https only), and
 // applies keyword matching if configured. Never throws — network/timeout failures resolve as 'down'
 // with an error string, same contract as fail2ban-manager.js/ipmi-collector.js's check functions.
-function performCheck(monitor) {
+function performHttpCheck(monitor) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     let target;
@@ -88,6 +105,55 @@ function performCheck(monitor) {
   });
 }
 
+// Raw TCP connect — 'up' the instant the handshake completes, no data exchanged. This is
+// deliberately protocol-blind: it answers "is something listening and accepting connections on
+// this port" (a database, SSH, a message broker, a bare custom service), not "is the application
+// behind it healthy" — that distinction is exactly what makes it a meaningfully different check
+// from an HTTP monitor, not a strictly weaker one.
+function performTcpCheck(monitor) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const timeoutMs = (monitor.timeout_sec || 10) * 1000;
+    const finish = (status, error) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve({ status, status_code: null, response_ms: Date.now() - startedAt, error, cert_expires_at: null, cert_issuer: null });
+    };
+    const socket = net.createConnection({ host: monitor.host, port: monitor.port, timeout: timeoutMs });
+    socket.on('connect', () => finish('up', null));
+    socket.on('timeout', () => finish('down', `Timeout kết nối TCP tới ${monitor.host}:${monitor.port}`));
+    socket.on('error', (e) => finish('down', e.message));
+  });
+}
+
+// ICMP echo via the `ping` package — pure host reachability, no port/protocol involved at all.
+// response_ms falls back to our own wall-clock measurement when the underlying `ping` binary's
+// reported time is 'unknown' (observed on some minimal/musl-based ping implementations that don't
+// print a time on a fast local reply) rather than storing a misleading null on an otherwise-alive host.
+async function performPingCheck(monitor) {
+  const startedAt = Date.now();
+  if (!pingLib) {
+    return { status: 'down', status_code: null, response_ms: null, error: 'Thư viện ping (ICMP) không khả dụng trên server này', cert_expires_at: null, cert_issuer: null };
+  }
+  try {
+    const res = await pingLib.promise.probe(monitor.host, { timeout: monitor.timeout_sec || 10 });
+    if (!res.alive) return { status: 'down', status_code: null, response_ms: null, error: 'Không phản hồi ping (ICMP)', cert_expires_at: null, cert_issuer: null };
+    const response_ms = (res.time == null || res.time === 'unknown') ? (Date.now() - startedAt) : Math.round(parseFloat(res.time));
+    return { status: 'up', status_code: null, response_ms, error: null, cert_expires_at: null, cert_issuer: null };
+  } catch (e) {
+    return { status: 'down', status_code: null, response_ms: Date.now() - startedAt, error: e.message, cert_expires_at: null, cert_issuer: null };
+  }
+}
+
+// Dispatches to the right check by monitors.type — the single entry point every caller
+// (checkMonitor below, routes/monitors.js's POST /:id/check) actually calls; individual
+// performXCheck functions above are exported mainly for direct unit testing.
+function performCheck(monitor) {
+  if (monitor.type === 'tcp') return performTcpCheck(monitor);
+  if (monitor.type === 'ping') return performPingCheck(monitor);
+  return performHttpCheck(monitor);
+}
+
 const insertCheck = db.prepare('INSERT INTO monitor_checks (monitor_id, status, status_code, response_ms, error) VALUES (?, ?, ?, ?, ?)');
 const updateMonitorCache = db.prepare(`
   UPDATE monitors SET current_status=?, last_checked_at=CURRENT_TIMESTAMP, last_response_ms=?, last_status_code=?, last_error=?, cert_expires_at=?, cert_issuer=?, updated_at=CURRENT_TIMESTAMP
@@ -119,4 +185,4 @@ function start(intervalMs = 30000) {
   return setInterval(tick, intervalMs);
 }
 
-module.exports = { start, collectAll, checkMonitor, performCheck };
+module.exports = { start, collectAll, checkMonitor, performCheck, performHttpCheck, performTcpCheck, performPingCheck };

@@ -77,25 +77,55 @@ router.get('/:id/history', async (req, res) => {
   res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms != null ? Math.round(r.response_ms) : null, up: r.up })), uptime_pct, bucketed: true });
 });
 
+// Hostnames, IPv4, IPv6 only — rejects shell metacharacters as defense-in-depth. Not strictly
+// required for safety (uptime-collector.js's net.createConnection and the `ping` package's
+// array-based child_process.spawn both take host as a plain argument, never shell-interpolated),
+// but matches this app's established discipline of validating anything that flows toward a network
+// operation against a strict charset before it's ever stored.
+const SAFE_HOST_RE = /^[A-Za-z0-9.\-:_]+$/;
+const MONITOR_TYPES = new Set(['http', 'tcp', 'ping']);
+
+// Shared by POST/PUT — type determines which fields are actually required. url stays '' (not null)
+// for non-http types since the column is NOT NULL (see database.js's comment on why it wasn't
+// relaxed). Returns { clean } on success or { error } on the first validation failure.
+function validateMonitorInput(body) {
+  const type = MONITOR_TYPES.has(body.type) ? body.type : 'http';
+  if (type === 'http') {
+    if (!body.url) return { error: 'Thiếu URL' };
+    try { new URL(body.url); } catch { return { error: 'URL không hợp lệ' }; }
+    return { clean: { type, url: body.url, host: null, port: null } };
+  }
+  const host = typeof body.host === 'string' ? body.host.trim() : '';
+  if (!host || !SAFE_HOST_RE.test(host)) return { error: 'Host không hợp lệ (chỉ gồm chữ, số, dấu chấm, gạch ngang, hai chấm)' };
+  if (type === 'tcp') {
+    const port = Number(body.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: 'Cổng (port) không hợp lệ — phải từ 1 đến 65535' };
+    return { clean: { type, url: '', host, port } };
+  }
+  return { clean: { type, url: '', host, port: null } }; // ping
+}
+
 router.post('/', requirePermission('monitors.write'), async (req, res) => {
-  const { name, url, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled } = req.body;
-  if (!name || !url) return res.status(400).json({ error: 'Thiếu tên hoặc URL' });
-  try { new URL(url); } catch { return res.status(400).json({ error: 'URL không hợp lệ' }); }
+  const { name, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled } = req.body;
+  if (!name) return res.status(400).json({ error: 'Thiếu tên' });
+  const { clean, error } = validateMonitorInput(req.body);
+  if (error) return res.status(400).json({ error });
   const result = await db.prepare(`
-    INSERT INTO monitors (name, url, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, url, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1);
+    INSERT INTO monitors (name, type, url, host, port, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, clean.type, clean.url, clean.host, clean.port, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1);
   res.status(201).json({ id: result.lastInsertRowid, message: 'Monitor created' });
 });
 
 router.put('/:id', requirePermission('monitors.write'), async (req, res) => {
   const monitor = await db.prepare('SELECT id FROM monitors WHERE id=?').get(req.params.id);
   if (!monitor) return res.status(404).json({ error: 'Not found' });
-  const { name, url, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled } = req.body;
-  if (url) { try { new URL(url); } catch { return res.status(400).json({ error: 'URL không hợp lệ' }); } }
+  const { name, keyword, keyword_type, check_interval_sec, timeout_sec, ignore_tls_errors, enabled } = req.body;
+  const { clean, error } = validateMonitorInput(req.body);
+  if (error) return res.status(400).json({ error });
   await db.prepare(`
-    UPDATE monitors SET name=?, url=?, keyword=?, keyword_type=?, check_interval_sec=?, timeout_sec=?, ignore_tls_errors=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
-  `).run(name, url, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1, req.params.id);
+    UPDATE monitors SET name=?, type=?, url=?, host=?, port=?, keyword=?, keyword_type=?, check_interval_sec=?, timeout_sec=?, ignore_tls_errors=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+  `).run(name, clean.type, clean.url, clean.host, clean.port, keyword || null, keyword_type || 'contains', check_interval_sec || 300, timeout_sec || 10, ignore_tls_errors ? 1 : 0, enabled === false ? 0 : 1, req.params.id);
   res.json({ message: 'Updated' });
 });
 

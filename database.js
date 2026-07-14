@@ -644,7 +644,15 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS monitors (
     id INT PRIMARY KEY AUTO_INCREMENT,
     name TEXT NOT NULL,
+    -- type: 'http' (default, checks the url column) | 'tcp' (connects to host:port) | 'ping'
+    -- (ICMP via the ping npm package, host only) — see uptime-collector.js's performCheck
+    -- dispatcher. The url column stays NOT NULL for backward compatibility with the pre-existing
+    -- column — non-http monitors just store an empty string there instead of relaxing the
+    -- constraint, and use host/port instead.
+    type VARCHAR(20) NOT NULL DEFAULT 'http',
     url TEXT NOT NULL,
+    host VARCHAR(255),
+    port INT,
     keyword VARCHAR(255),
     keyword_type VARCHAR(20) DEFAULT 'contains',
     check_interval_sec INT NOT NULL DEFAULT 300,
@@ -889,6 +897,13 @@ async function ensureSchemaAndMigrations() {
   // governed by the global default (or a per-VM override)". See fail2ban_config_profiles' own
   // comment above for the full effective-config precedence.
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN fail2ban_profile_id INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Uptime monitors gain non-HTTP check types (TCP port connect, ICMP ping) — see monitors' own
+  // comment above and uptime-collector.js's performCheck dispatcher. Existing rows implicitly stay
+  // type='http' via the column default, so no backfill needed beyond adding the columns themselves.
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN type VARCHAR(20) NOT NULL DEFAULT 'http'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN host VARCHAR(255)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN port INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
