@@ -65,8 +65,18 @@ router.get('/outbound/stats', async (req, res) => {
   // more urgent headline number (recent enough to have been refreshed by the last ~2 poll cycles).
   const foreign = (await db.prepare('SELECT COUNT(*) as cnt FROM outbound_connections WHERE is_foreign = 1').get()).cnt;
   const foreignActive = (await db.prepare("SELECT COUNT(*) as cnt FROM outbound_connections WHERE is_foreign = 1 AND last_seen >= DATE_SUB(NOW(), INTERVAL 150 SECOND)").get()).cnt;
+  // Backs the "Kết nối ra IP nước ngoài (đang mở)" stat card's hover list on the frontend — same
+  // is_foreign=1 + 150s-freshness definition as foreignActive above, just returning the actual rows
+  // instead of only a count. Capped at 50 (a hover list isn't meant to be a full data table — the
+  // "Kết nối ra ngoài" tab already covers that) — foreignActive itself stays the true, uncapped
+  // count from its own COUNT(*) query above, so the headline number never silently caps at 50.
+  const foreignActiveList = await db.prepare(`
+    SELECT vm_name, remote_ip, remote_port, country, process_name FROM outbound_connections
+    WHERE is_foreign = 1 AND last_seen >= DATE_SUB(NOW(), INTERVAL 150 SECOND)
+    ORDER BY last_seen DESC LIMIT 50
+  `).all();
   const foreignVms = (await db.prepare('SELECT COUNT(DISTINCT vm_id) as cnt FROM outbound_connections WHERE is_foreign = 1').get()).cnt;
-  res.json({ total, foreign, foreignActive, foreignVms });
+  res.json({ total, foreign, foreignActive, foreignVms, foreignActiveList });
 });
 
 // credentialId (not a free-text username) selects which saved account — from "Tài khoản kết nối" —

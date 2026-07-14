@@ -2672,6 +2672,18 @@ const securityState = { vms: [] };
 let securityRefreshMs = 5000;
 let securityRefreshTimer = null;
 
+// Content of the "Kết nối ra IP nước ngoài (đang mở)" stat card's hover popover — rows are
+// outboundStats.foreignActiveList (routes/security.js's GET /outbound/stats, capped at 50, same
+// is_foreign=1 + 150s-freshness definition as the headline count itself).
+function renderOutboundHoverList(rows) {
+  if (!rows || !rows.length) return `<div style="color:var(--fg-dim);padding:4px 2px">Không có kết nối nào đang mở</div>`;
+  return rows.map(r => `
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:5px 2px;border-bottom:1px solid var(--border)">
+      <span style="font-family:monospace;font-size:12px">${escHtml(r.remote_ip)}${r.remote_port ? `:${r.remote_port}` : ''}</span>
+      <span style="font-size:11px;color:var(--fg-dim);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px" title="${escAttr(r.vm_name || '')}">${escHtml(r.vm_name || '—')}${r.country ? ` · ${escHtml(r.country)}` : ''}</span>
+    </div>`).join('');
+}
+
 async function renderSecurity(search = '') {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
@@ -2719,7 +2731,10 @@ async function renderSecurity(search = '') {
       <div class="stat-card">
         <div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
         <div class="stat-label">Kết nối ra IP nước ngoài (đang mở)</div>
-        <div class="stat-value yellow" id="secStatOutbound">${outboundStats.foreignActive}<span style="font-size:13px;color:var(--fg-dim);font-weight:500"> / ${outboundStats.foreign} lịch sử</span></div>
+        <div class="stat-hover-wrap">
+          <div class="stat-value yellow" id="secStatOutbound">${outboundStats.foreignActive}<span style="font-size:13px;color:var(--fg-dim);font-weight:500"> / ${outboundStats.foreign} lịch sử</span></div>
+          <div class="stat-hover-panel" id="secStatOutboundPanel">${renderOutboundHoverList(outboundStats.foreignActiveList)}</div>
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg></div>
@@ -2762,6 +2777,7 @@ async function refreshSecurityData() {
     document.getElementById('secStatForeign').textContent = stats.foreign;
     document.getElementById('secStatMonitored').textContent = stats.monitored;
     document.getElementById('secStatOutbound').innerHTML = `${outboundStats.foreignActive}<span style="font-size:13px;color:var(--fg-dim);font-weight:500"> / ${outboundStats.foreign} lịch sử</span>`;
+    document.getElementById('secStatOutboundPanel').innerHTML = renderOutboundHoverList(outboundStats.foreignActiveList);
   } catch { /* transient — next tick retries */ }
   if (currentPage !== 'security') return;
   if (securityTab === 'events') loadSecurityEvents();
