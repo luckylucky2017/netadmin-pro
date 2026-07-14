@@ -598,6 +598,31 @@ const SCHEMA_SQL = `
     INDEX idx_outbound_vm (vm_id)
   );
 
+  -- Known-vulnerable installed packages, per VM — see vuln-scanner.js for how these are found
+  -- (dpkg/rpm package list from each opted-in VM, matched against the OSV.dev public vulnerability
+  -- database). One row per distinct (vm, package, vulnerability) combination currently detected, not
+  -- an ever-growing event log — resolved_at is set once a later scan no longer finds this specific
+  -- vulnerability on this VM (the package was upgraded past the affected version, or removed), the
+  -- same "still open until proven otherwise" shape as alerts elsewhere in this app.
+  CREATE TABLE IF NOT EXISTS vuln_findings (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    vm_name VARCHAR(255),
+    package_name VARCHAR(255) NOT NULL,
+    package_version VARCHAR(150) NOT NULL,
+    vuln_id VARCHAR(100) NOT NULL,
+    summary TEXT,
+    -- 'critical'|'high'|'medium'|'low'|'negligible'|'unknown' — prefers the distro-provided
+    -- categorical rating (e.g. Ubuntu Security Notices already classify this way) over parsing a raw
+    -- CVSS vector string ourselves — see vuln-scanner.js's extractSeverity.
+    severity VARCHAR(20) DEFAULT 'unknown',
+    reference_url TEXT,
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    UNIQUE KEY uq_vuln_finding (vm_id, package_name, vuln_id)
+  );
+
   CREATE TABLE IF NOT EXISTS alert_rules (
     id INT PRIMARY KEY AUTO_INCREMENT,
     name TEXT NOT NULL,
@@ -922,6 +947,15 @@ async function ensureSchemaAndMigrations() {
   // ddos-type waf_events rows gain the top contributing IPs from the batch that triggered them —
   // see waf_events' own comment above and nginx-waf-collector.js's processHits.
   try { await pool.query("ALTER TABLE waf_events ADD COLUMN top_ips TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Vulnerability scanning opt-in and status, per VM — mirrors the ssh_user/fail2ban_status/
+  // waf_enabled triplet pattern already used for the other opt-in SSH-based collectors on this VM.
+  // See vuln-scanner.js for how these are populated.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_enabled TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_last_scanned_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_status VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_package_count INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

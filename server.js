@@ -94,6 +94,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/waf', requireAuth, require('./routes/waf'));
   app.use('/api/reports', requireAuth, require('./routes/reports'));
   app.use('/api/fail2ban-config', requireAuth, require('./routes/fail2ban-config'));
+  app.use('/api/vuln', requireAuth, require('./routes/vuln'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([
@@ -165,6 +166,7 @@ if (!process.env.SESSION_SECRET) {
     require('./snmp-collector').start();
     require('./pfsense-collector').start();
     require('./nginx-waf-collector').start();
+    require('./vuln-scanner').start();
   } else {
     console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');
   }

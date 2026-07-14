@@ -452,7 +452,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, vuln: renderVuln, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -6422,6 +6422,260 @@ async function deleteMonitor(id, name) {
     toast('Đã xóa monitor', 'success');
     renderUptimeMonitors();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+// ─── VULN (CVE SCAN) ────────────────────────────────────────────────────────
+// Package-level CVE scanning per VM (dpkg/rpm package list → OSV.dev match) — see vuln-scanner.js.
+// Two tabs: "Lỗ hổng phát hiện" (findings, server-filtered by search/severity/VM then client
+// sorted+paginated — same shape as WAF's "Sự kiện" tab) and "Quản lý quét" (per-VM enable + scan-now,
+// same shape as the Fail2ban Config page's "Quản lý Jail" tab).
+const VULN_TAB_KEY = 'netadmin_vulnTab';
+let vulnTab = loadSavedTab(VULN_TAB_KEY, 'findings');
+let vulnStats = null;
+
+const VULN_SEVERITY_LABEL = { critical: 'Nghiêm trọng', high: 'Cao', medium: 'Trung bình', low: 'Thấp', negligible: 'Không đáng kể', unknown: 'Chưa rõ' };
+const VULN_SEVERITY_CLASS = { critical: 'critical', high: 'high', medium: 'medium', low: 'low', negligible: 'low', unknown: 'low' };
+function vulnSeverityBadge(sev) {
+  const s = sev || 'unknown';
+  return `<span class="severity ${VULN_SEVERITY_CLASS[s] || 'low'}"><span class="dot"></span>${VULN_SEVERITY_LABEL[s] || s}</span>`;
+}
+
+const VULN_SCAN_STATUS_LABEL = { unknown: 'Chưa quét', ok: 'Đã quét', error: 'Lỗi', unsupported_os: 'Chưa hỗ trợ HĐH này', installing: 'Đang quét…' };
+const VULN_SCAN_STATUS_CLASS = { ok: 'online', error: 'error', unsupported_os: 'warning', installing: 'installing' };
+
+async function renderVuln(search = '') {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    vulnStats = await api('/vuln/stats');
+    if (search) vulnTab = 'findings';
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">Quét lỗ hổng (CVE)</div><div class="page-subtitle">Quét gói phần mềm đã cài trên VM, đối chiếu với cơ sở dữ liệu lỗ hổng công khai OSV.dev (hiện chỉ hỗ trợ Ubuntu/Debian)</div></div>
+      <button class="btn btn-secondary btn-sm" onclick="renderVuln()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Làm mới
+      </button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><div class="stat-label">Nghiêm trọng</div><div class="stat-value red">${vulnStats.counts.critical}</div></div>
+      <div class="stat-card"><div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><div class="stat-label">Cao</div><div class="stat-value yellow">${vulnStats.counts.high}</div></div>
+      <div class="stat-card"><div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></div><div class="stat-label">Trung bình + Thấp</div><div class="stat-value blue">${vulnStats.counts.medium + vulnStats.counts.low + vulnStats.counts.negligible + vulnStats.counts.unknown}</div></div>
+      <div class="stat-card"><div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg></div><div class="stat-label">VM đang giám sát</div><div class="stat-value green">${vulnStats.vmsScanned}</div></div>
+      <div class="stat-card"><div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></div><div class="stat-label">VM lỗi/chưa hỗ trợ</div><div class="stat-value red">${vulnStats.vmsWithError}</div></div>
+    </div>
+    <div class="filter-tabs" id="vulnTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${vulnTab === 'findings' ? 'active' : ''}" data-tab="findings" onclick="setVulnTab('findings')">Lỗ hổng phát hiện</div>
+      <div class="filter-tab ${vulnTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setVulnTab('manage')">Quản lý quét</div>
+    </div>
+    <div id="vulnTabBody"></div>`;
+    renderVulnTabBody(search);
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function setVulnTab(tab) {
+  vulnTab = tab;
+  saveTab(VULN_TAB_KEY, tab);
+  document.querySelectorAll('#vulnTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderVulnTabBody();
+}
+
+function renderVulnTabBody(search = '') {
+  if (vulnTab === 'manage') renderVulnManage();
+  else renderVulnFindings(search);
+}
+
+// ── "Lỗ hổng phát hiện" tab ──
+let vulnFindingRows = [];
+let vulnFindingSortState = { key: 'last_seen', dir: 'desc' };
+let vulnFindingPagination = newPagination();
+let vulnFindingFilter = { vmId: '', severity: '' };
+let vulnFindingVms = [];
+
+function renderVulnFindings(search = '') {
+  document.getElementById('vulnTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="vulnFindingSearch" placeholder="Tìm theo VM, package, mã CVE..." value="${escAttr(search)}">
+        </div>
+        <select class="filter-select" id="vulnFindingVmFilter" onchange="applyVulnFindingFilter()">
+          <option value="">Tất cả VM</option>
+        </select>
+        <select class="filter-select" id="vulnFindingSeverityFilter" onchange="applyVulnFindingFilter()">
+          <option value="">Tất cả mức độ</option>
+          <option value="critical">Nghiêm trọng</option>
+          <option value="high">Cao</option>
+          <option value="medium">Trung bình</option>
+          <option value="low">Thấp</option>
+          <option value="negligible">Không đáng kể</option>
+          <option value="unknown">Chưa rõ</option>
+        </select>
+      </div>
+      <div id="vulnFindingsBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  document.getElementById('vulnFindingSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => { vulnFindingPagination.page = 1; loadVulnFindings(e.target.value); }, 300);
+  });
+  loadVulnFindings(search);
+}
+
+function applyVulnFindingFilter() {
+  vulnFindingFilter.vmId = document.getElementById('vulnFindingVmFilter')?.value || '';
+  vulnFindingFilter.severity = document.getElementById('vulnFindingSeverityFilter')?.value || '';
+  vulnFindingPagination.page = 1;
+  loadVulnFindings();
+}
+
+async function loadVulnFindings(search) {
+  const s = search != null ? search : (document.getElementById('vulnFindingSearch')?.value || '');
+  const params = new URLSearchParams({ search: s, vmId: vulnFindingFilter.vmId, severity: vulnFindingFilter.severity });
+  try {
+    const [rows, vms] = await Promise.all([api(`/vuln/findings?${params}`), api('/vuln/vms')]);
+    vulnFindingRows = rows;
+    vulnFindingVms = vms.filter(v => v.vuln_scan_enabled);
+    if (!document.getElementById('vulnFindingsBody')) return;
+    const vmSelect = document.getElementById('vulnFindingVmFilter');
+    if (vmSelect && vmSelect.options.length <= 1) {
+      vmSelect.innerHTML = `<option value="">Tất cả VM</option>${vulnFindingVms.map(v => `<option value="${v.id}">${escHtml(v.name)}</option>`).join('')}`;
+      vmSelect.value = vulnFindingFilter.vmId;
+    }
+    renderVulnFindingRows();
+  } catch (e) {
+    const el = document.getElementById('vulnFindingsBody');
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+function toggleVulnFindingSort(key) { toggleSortState(vulnFindingSortState, key); renderVulnFindingRows(); }
+
+function renderVulnFindingRows() {
+  const body = document.getElementById('vulnFindingsBody');
+  if (!vulnFindingRows.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><h3>Không có lỗ hổng nào</h3><p>Bật quét cho VM ở tab "Quản lý quét"</p></div>`;
+    return;
+  }
+  const sorted = applySort(vulnFindingRows, vulnFindingSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, vulnFindingPagination);
+  const rowOffset = (vulnFindingPagination.page - 1) * vulnFindingPagination.pageSize;
+  body.innerHTML = `<table>
+    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Phát hiện lần đầu', 'first_seen', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th></tr></thead>
+    <tbody>${rows.map((f, i) => `
+      <tr>
+        <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+        <td style="font-weight:600">${escHtml(f.vm_name)}</td>
+        <td style="font-family:monospace">${escHtml(f.package_name)}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(f.package_version)}</td>
+        <td>${f.reference_url ? `<a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${escHtml(f.vuln_id)}</a>` : escHtml(f.vuln_id)}</td>
+        <td>${vulnSeverityBadge(f.severity)}</td>
+        <td><span style="font-size:12px;color:var(--fg-muted)" title="${f.summary ? escAttr(f.summary) : ''}">${f.summary ? escHtml(f.summary).slice(0, 80) + (f.summary.length > 80 ? '…' : '') : '—'}</span></td>
+        <td><span style="font-size:12px;color:var(--fg-dim)">${formatTime(f.first_seen)}</span></td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(f.last_seen)}</span></td>
+        <td>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</td>
+      </tr>`).join('')}
+    </tbody></table>${paginationBar(vulnFindingPagination, sorted.length, 'vulnFindingPagination', 'renderVulnFindingRows')}`;
+}
+
+// ── "Quản lý quét" tab ──
+let vulnManageVms = [];
+let vulnManageSearch = '';
+let vulnManagePagination = newPagination();
+let vulnManageSortState = { key: null, dir: 'asc' };
+
+async function renderVulnManage() {
+  const body = document.getElementById('vulnTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    vulnManageVms = await api('/vuln/vms');
+    body.innerHTML = `
+      <div class="table-wrap">
+        <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+          <p style="margin-bottom:0">Chỉ VM đã có "Tài khoản kết nối" SSH (gán ở trang Giám sát bất thường → tab "Quản lý VM giám sát" — dùng chung, không cấu hình lại ở đây) mới bật quét được. Quét lại tự động mỗi 12 giờ; bấm "Quét ngay" để quét ngoài lịch. Hiện chỉ hỗ trợ VM chạy Ubuntu/Debian (dpkg) — RPM-based (RHEL/CentOS/...) chưa được hỗ trợ.</p>
+        </div>
+        <div class="table-toolbar">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="vulnManageSearch" placeholder="Tìm theo tên VM, IP..." value="${escAttr(vulnManageSearch)}">
+          </div>
+        </div>
+        <div id="vulnManageTableWrap"></div>
+      </div>`;
+    document.getElementById('vulnManageSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { vulnManageSearch = e.target.value; vulnManagePagination.page = 1; renderVulnManageRows(); }, 300);
+    });
+    renderVulnManageRows();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function toggleVulnManageSort(key) { toggleSortState(vulnManageSortState, key); renderVulnManageRows(); }
+
+function renderVulnManageRows() {
+  const wrap = document.getElementById('vulnManageTableWrap');
+  if (!wrap) return;
+  const q = vulnManageSearch.trim().toLowerCase();
+  const filtered = q ? vulnManageVms.filter(v => (v.name || '').toLowerCase().includes(q) || (v.ip_address || '').toLowerCase().includes(q)) : vulnManageVms;
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không tìm thấy VM</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, vulnManageSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, vulnManagePagination);
+  const rowOffset = (vulnManagePagination.page - 1) * vulnManagePagination.pageSize;
+  wrap.innerHTML = `<table>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', vulnManageSortState, 'toggleVulnManageSort')}<th>IP</th><th>Bật quét</th><th>Trạng thái</th><th>Số gói đã quét</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
+    <tbody>${rows.map((v, i) => {
+      const eligible = !!v.ssh_credential_id;
+      const status = v.vuln_scan_status || 'unknown';
+      const checked = !!v.vuln_scan_enabled;
+      const title = !eligible ? 'Chưa gán tài khoản kết nối SSH (trang Giám sát bất thường → Quản lý VM giám sát)'
+        : (status === 'error' || status === 'unsupported_os') && v.vuln_scan_error ? v.vuln_scan_error
+        : (VULN_SCAN_STATUS_LABEL[status] || status);
+      return `<tr>
+        <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+        <td style="font-weight:600">${escHtml(v.name)}</td>
+        <td>${v.ip_address || '—'}</td>
+        <td>
+          <label class="toggle-switch" data-permission="vuln.scan.manage" title="${escAttr(title)}">
+            <input type="checkbox" ${checked ? 'checked' : ''} ${!eligible ? 'disabled' : ''} onclick="handleVulnScanToggle(event, ${v.id})">
+            <span class="toggle-slider"></span>
+          </label>
+        </td>
+        <td><span class="status ${VULN_SCAN_STATUS_CLASS[status] || 'unknown'}" title="${escAttr(title)}"><span class="dot"></span>${VULN_SCAN_STATUS_LABEL[status] || status}</span></td>
+        <td>${v.vuln_package_count ?? '—'}</td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${v.vuln_last_scanned_at ? formatTime(v.vuln_last_scanned_at) : '—'}</span></td>
+        <td>${checked ? `<button class="btn btn-secondary btn-sm" data-permission="vuln.scan.manage" onclick="handleVulnScanNow(${v.id}, this)">Quét ngay</button>` : ''}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>${paginationBar(vulnManagePagination, sorted.length, 'vulnManagePagination', 'renderVulnManageRows')}`;
+  applyPermissionVisibility();
+}
+
+async function handleVulnScanToggle(e, id) {
+  const checked = e.target.checked;
+  e.target.disabled = true;
+  try {
+    await api(`/vuln/vms/${id}`, 'PATCH', { enabled: checked });
+    toast(checked ? 'Đã bật quét lỗ hổng — lần quét đầu sẽ chạy trong ít phút' : 'Đã tắt quét lỗ hổng', 'success');
+  } catch (err) {
+    e.target.checked = !checked;
+    toast(err.message, 'error');
+  } finally {
+    await renderVulnManage();
+  }
+}
+
+async function handleVulnScanNow(id, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Đang quét…';
+  try {
+    const result = await api(`/vuln/vms/${id}/scan-now`, 'POST');
+    if (result.vuln_scan_status === 'ok') toast(`Quét xong — ${result.vuln_package_count} gói đã kiểm tra`, 'success');
+    else toast(result.vuln_scan_error || 'Quét gặp lỗi', 'error');
+  } catch (err) { toast(err.message, 'error'); }
+  finally { await renderVulnManage(); }
 }
 
 // ─── ACTIVITY ─────────────────────────────────────────────────────────────────
