@@ -36,10 +36,18 @@ router.get('/stats', async (req, res) => {
     SELECT vm_name, domain, src_ip, country, hit_count, occurred_at FROM waf_events
     WHERE event_type='dos' AND occurred_at >= ${since} ORDER BY occurred_at DESC LIMIT 50
   `).all();
-  const ddosList = await db.prepare(`
-    SELECT vm_name, domain, hit_count, occurred_at FROM waf_events
+  // top_ips (JSON, see database.js's waf_events comment) is parsed here rather than left as a raw
+  // string — a malformed/legacy-null value degrades to an empty array instead of the frontend
+  // having to defensively JSON.parse untrusted DB content itself.
+  const ddosListRaw = await db.prepare(`
+    SELECT vm_name, domain, hit_count, occurred_at, top_ips FROM waf_events
     WHERE event_type='ddos' AND occurred_at >= ${since} ORDER BY occurred_at DESC LIMIT 50
   `).all();
+  const ddosList = ddosListRaw.map((r) => {
+    let topIps = [];
+    try { topIps = r.top_ips ? JSON.parse(r.top_ips) : []; } catch { /* legacy/malformed row — treat as no data */ }
+    return { vm_name: r.vm_name, domain: r.domain, hit_count: r.hit_count, occurred_at: r.occurred_at, topIps };
+  });
   // MAX(vm_name)/MAX(country) here is safe per (vm_id, src_ip) group, same reasoning as
   // routes/reports.js's equivalent — both are deterministic given the group key, never genuinely
   // mixed within one bucket; just needed to satisfy ONLY_FULL_GROUP_BY.

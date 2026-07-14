@@ -269,6 +269,23 @@ function aggregateHitsForTraffic(hits, countryFn) {
   return { daily, dims };
 }
 
+// Pure, testable: which IPs actually made up a batch of hits, most active first — used specifically
+// to attach "who was part of this" to a DDoS event, since detectDdos itself only ever looks at the
+// batch's TOTAL count (no single IP crossing a per-IP threshold is what makes it a DDoS rather than
+// a DoS in the first place). Capped at `limit` — this is context for a human investigating an
+// alert, not a full breakdown (the "Lưu lượng" traffic report already covers that).
+function computeTopIps(hits, countryFn, limit = 10) {
+  const byIp = new Map();
+  for (const h of hits) {
+    if (!h.ip) continue;
+    byIp.set(h.ip, (byIp.get(h.ip) || 0) + 1);
+  }
+  return [...byIp.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([ip, hits]) => ({ ip, hits, country: countryFn(ip) || null }));
+}
+
 // ── nginx config parsing: discover per-domain access_log files ────────────────────────────────
 // Finds every /etc/nginx/**/*.conf-ish file and cats its content back, one file at a time, each
 // prefixed with a marker line so discoverDomainLogs() can attribute results to their source file.
@@ -412,8 +429,8 @@ function parseBatchTailOutput(stdout) {
 }
 
 const insertEvent = db.prepare(`
-  INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at, attack_category)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at, attack_category, top_ips)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const setByteOffset = db.prepare('UPDATE waf_domain_logs SET last_byte_offset = ? WHERE id = ?');
 const recordTraffic = db.prepare(`
@@ -550,7 +567,7 @@ async function processHits(vm, domain, domainLogId, hits) {
     await insertEvent.run(
       vm.id, vm.name, domain, ev.type, ev.ip, country, isForeign,
       ev.sample.method, ev.sample.path, ev.sample.status, ev.sample.userAgent,
-      ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp), ev.attackCategory || null
+      ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp), ev.attackCategory || null, null
     );
     await raiseWafAlert(vm, domain, ev, country, blockResult, config);
   }
@@ -559,7 +576,8 @@ async function processHits(vm, domain, domainLogId, hits) {
   const totalCount = hits.length;
   const recentSamples = await getRecentTraffic.all(domainLogId, DDOS_BASELINE_SAMPLES);
   if (detectDdos(totalCount, recentSamples.map(r => r.request_count), config)) {
-    await insertEvent.run(vm.id, vm.name, domain, 'ddos', null, null, 0, null, null, null, null, totalCount, 0, toSqlDatetime(lastTs), null);
+    const topIps = computeTopIps(hits, (ip) => classifyIp(ip).country);
+    await insertEvent.run(vm.id, vm.name, domain, 'ddos', null, null, 0, null, null, null, null, totalCount, 0, toSqlDatetime(lastTs), null, JSON.stringify(topIps));
     await raiseDdosAlert(vm, domain, totalCount);
   }
   await recordTraffic.run(domainLogId, toSqlDatetime(lastTs), totalCount);
@@ -766,5 +784,5 @@ module.exports = {
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
   classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,
   buildBatchTailScript, parseBatchTailOutput, stripPartialFirstLine,
-  classifyBrowser, classifyOs, statusClass, aggregateHitsForTraffic,
+  classifyBrowser, classifyOs, statusClass, aggregateHitsForTraffic, computeTopIps,
 };

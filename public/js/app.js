@@ -3474,10 +3474,26 @@ function renderWafDosHoverList(rows) {
   }), 'Không có tấn công DoS nào trong 24h qua');
 }
 
-function renderWafDdosHoverList(rows) {
+// DDoS has no single "the" attacking IP by definition (that's what makes it distributed rather than
+// a per-IP DoS) — routes/waf.js's GET /stats now attaches topIps (the actual contributing IPs
+// nginx-waf-collector.js captured at detection time) to each ddos event. Flattens events × their
+// top IPs into one row per IP (consistent with the DoS/Blocked lists' shape) rather than a nested
+// event->IPs structure, which the shared renderStatHoverRows layout isn't built for. Events from
+// before this feature existed have no topIps captured — those fall back to a single "no IP data"
+// row so they don't just silently vanish from the list.
+function renderWafDdosHoverList(events) {
+  const rows = [];
+  for (const ev of events || []) {
+    const label = domainLabel(ev.domain, ev.vm_name) || '—';
+    if (!ev.topIps || !ev.topIps.length) {
+      rows.push({ ip: null, hits: ev.hit_count, label, country: null, occurred_at: ev.occurred_at });
+    } else {
+      for (const ipInfo of ev.topIps) rows.push({ ip: ipInfo.ip, hits: ipInfo.hits, label, country: ipInfo.country, occurred_at: ev.occurred_at });
+    }
+  }
   return renderStatHoverRows(rows, r => ({
-    primary: `${r.hit_count ?? '?'} request`,
-    secondary: `<span title="${escAttr(domainLabel(r.domain, r.vm_name) || '')}">${escHtml(domainLabel(r.domain, r.vm_name) || '—')} · ${formatTime(r.occurred_at)}</span>`,
+    primary: r.ip ? `${escHtml(r.ip)} (${r.hits})` : `${r.hits ?? '?'} request (không rõ IP)`,
+    secondary: `<span title="${escAttr(r.label)}">${escHtml(r.label)}${r.country ? ` · ${escHtml(r.country)}` : ''} · ${formatTime(r.occurred_at)}</span>`,
   }), 'Không có tấn công DDoS nào trong 24h qua');
 }
 

@@ -376,6 +376,12 @@ const SCHEMA_SQL = `
     blocked INT NOT NULL DEFAULT 0,
     occurred_at DATETIME NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- event_type='ddos' rows only: JSON array of the top contributing IPs from the batch that
+    -- triggered this specific spike ([{ip,country,hits}, ...], capped — see nginx-waf-collector.js's
+    -- processHits). src_ip stays NULL for ddos (no single IP is "the" attacker by definition), but an
+    -- admin investigating a DDoS alert still needs to know WHICH IPs made up that traffic — this is
+    -- what the "DDoS (24h)" stat card's hover list on the WAF page reads.
+    top_ips TEXT,
     INDEX idx_waf_events_vm_time (vm_id, occurred_at),
     INDEX idx_waf_events_time (occurred_at)
   );
@@ -912,6 +918,10 @@ async function ensureSchemaAndMigrations() {
   // HTTP monitors gain an optional exact-status-code requirement (NULL keeps the original 2xx/3xx
   // "up" range) — see monitors' own comment above and uptime-collector.js's performHttpCheck.
   try { await pool.query("ALTER TABLE monitors ADD COLUMN expected_status_code INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // ddos-type waf_events rows gain the top contributing IPs from the batch that triggered them —
+  // see waf_events' own comment above and nginx-waf-collector.js's processHits.
+  try { await pool.query("ALTER TABLE waf_events ADD COLUMN top_ips TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
