@@ -2672,16 +2672,29 @@ const securityState = { vms: [] };
 let securityRefreshMs = 5000;
 let securityRefreshTimer = null;
 
+// Generic renderer for a .stat-hover-panel's content — one row per item, a primary value on the
+// left (IP, count...) and a secondary label on the right (VM name, time...), both already-escaped
+// HTML strings from rowFn. Shared by every stat-card hover list on the Security/WAF pages so each
+// one is just "what are the rows and how do I describe one" rather than re-deriving the layout.
+function renderStatHoverRows(rows, rowFn, emptyText) {
+  if (!rows || !rows.length) return `<div style="color:var(--fg-dim);padding:4px 2px">${emptyText}</div>`;
+  return rows.map(r => {
+    const { primary, secondary } = rowFn(r);
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:5px 2px;border-bottom:1px solid var(--border)">
+      <span style="font-family:monospace;font-size:12px">${primary}</span>
+      <span style="font-size:11px;color:var(--fg-dim);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px">${secondary}</span>
+    </div>`;
+  }).join('');
+}
+
 // Content of the "Kết nối ra IP nước ngoài (đang mở)" stat card's hover popover — rows are
 // outboundStats.foreignActiveList (routes/security.js's GET /outbound/stats, capped at 50, same
 // is_foreign=1 + 150s-freshness definition as the headline count itself).
 function renderOutboundHoverList(rows) {
-  if (!rows || !rows.length) return `<div style="color:var(--fg-dim);padding:4px 2px">Không có kết nối nào đang mở</div>`;
-  return rows.map(r => `
-    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:5px 2px;border-bottom:1px solid var(--border)">
-      <span style="font-family:monospace;font-size:12px">${escHtml(r.remote_ip)}${r.remote_port ? `:${r.remote_port}` : ''}</span>
-      <span style="font-size:11px;color:var(--fg-dim);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px" title="${escAttr(r.vm_name || '')}">${escHtml(r.vm_name || '—')}${r.country ? ` · ${escHtml(r.country)}` : ''}</span>
-    </div>`).join('');
+  return renderStatHoverRows(rows, r => ({
+    primary: `${escHtml(r.remote_ip)}${r.remote_port ? `:${r.remote_port}` : ''}`,
+    secondary: `<span title="${escAttr(r.vm_name || '')}">${escHtml(r.vm_name || '—')}${r.country ? ` · ${escHtml(r.country)}` : ''}</span>`,
+  }), 'Không có kết nối nào đang mở');
 }
 
 async function renderSecurity(search = '') {
@@ -3446,6 +3459,42 @@ const wafState = { vms: [] };
 let wafRefreshMs = 5000;
 let wafRefreshTimer = null;
 
+// Mirrors nginx-waf-collector.js's own domainLabel — a waf_events row's domain can be NULL (no
+// per-vhost log could be discovered for that VM, see the collector's fallback), in which case the
+// VM name itself is the best available label for "which site was this".
+function domainLabel(domain, vmName) { return domain || vmName; }
+
+// Hover-popover content for the WAF page's DoS/DDoS/IP đã chặn/VM đang giám sát stat cards — rows
+// come straight from routes/waf.js's GET /stats (dosList/ddosList/blockedList/monitoredList),
+// each already capped/shaped server-side; see renderStatHoverRows for the shared row layout.
+function renderWafDosHoverList(rows) {
+  return renderStatHoverRows(rows, r => ({
+    primary: escHtml(r.src_ip || '—'),
+    secondary: `<span title="${escAttr(domainLabel(r.domain, r.vm_name) || '')}">${escHtml(domainLabel(r.domain, r.vm_name) || '—')} · ${formatTime(r.occurred_at)}</span>`,
+  }), 'Không có tấn công DoS nào trong 24h qua');
+}
+
+function renderWafDdosHoverList(rows) {
+  return renderStatHoverRows(rows, r => ({
+    primary: `${r.hit_count ?? '?'} request`,
+    secondary: `<span title="${escAttr(domainLabel(r.domain, r.vm_name) || '')}">${escHtml(domainLabel(r.domain, r.vm_name) || '—')} · ${formatTime(r.occurred_at)}</span>`,
+  }), 'Không có tấn công DDoS nào trong 24h qua');
+}
+
+function renderWafBlockedHoverList(rows) {
+  return renderStatHoverRows(rows, r => ({
+    primary: escHtml(r.src_ip),
+    secondary: `<span title="${escAttr(r.vm_name || '')}">${escHtml(r.vm_name || '—')}${r.country ? ` · ${escHtml(r.country)}` : ''} · ${formatTime(r.last_seen)}</span>`,
+  }), 'Không có IP nào bị chặn trong 24h qua');
+}
+
+function renderWafMonitoredHoverList(rows) {
+  return renderStatHoverRows(rows, r => ({
+    primary: escHtml(r.name),
+    secondary: `${r.waf_jail_status === 'running' ? 'Jail: đang chạy' : 'Jail: chưa cài/chưa chạy'}${r.waf_auto_block ? ' · Tự động chặn' : ''}`,
+  }), 'Chưa có VM nào bật giám sát WAF');
+}
+
 async function renderWaf(search = '') {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
@@ -3478,22 +3527,34 @@ async function renderWaf(search = '') {
       <div class="stat-card">
         <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
         <div class="stat-label">DoS (24h)</div>
-        <div class="stat-value red" id="wafStatDos">${stats.dos}</div>
+        <div class="stat-hover-wrap">
+          <div class="stat-value red" id="wafStatDos">${stats.dos}</div>
+          <div class="stat-hover-panel" id="wafStatDosPanel">${renderWafDosHoverList(stats.dosList)}</div>
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
         <div class="stat-label">DDoS (24h)</div>
-        <div class="stat-value red" id="wafStatDdos">${stats.ddos}</div>
+        <div class="stat-hover-wrap">
+          <div class="stat-value red" id="wafStatDdos">${stats.ddos}</div>
+          <div class="stat-hover-panel" id="wafStatDdosPanel">${renderWafDdosHoverList(stats.ddosList)}</div>
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></div>
         <div class="stat-label">IP đã chặn (24h)</div>
-        <div class="stat-value green" id="wafStatBlocked">${stats.blocked}</div>
+        <div class="stat-hover-wrap">
+          <div class="stat-value green" id="wafStatBlocked">${stats.blocked}</div>
+          <div class="stat-hover-panel" id="wafStatBlockedPanel">${renderWafBlockedHoverList(stats.blockedList)}</div>
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg></div>
         <div class="stat-label">VM đang giám sát</div>
-        <div class="stat-value blue" id="wafStatMonitored">${stats.monitored}</div>
+        <div class="stat-hover-wrap">
+          <div class="stat-value blue" id="wafStatMonitored">${stats.monitored}</div>
+          <div class="stat-hover-panel" id="wafStatMonitoredPanel">${renderWafMonitoredHoverList(stats.monitoredList)}</div>
+        </div>
       </div>
     </div>
     <div class="filter-tabs" id="wafTabs" style="margin-bottom:16px">
@@ -3526,6 +3587,10 @@ async function refreshWafData() {
     document.getElementById('wafStatDdos').textContent = stats.ddos;
     document.getElementById('wafStatBlocked').textContent = stats.blocked;
     document.getElementById('wafStatMonitored').textContent = stats.monitored;
+    document.getElementById('wafStatDosPanel').innerHTML = renderWafDosHoverList(stats.dosList);
+    document.getElementById('wafStatDdosPanel').innerHTML = renderWafDdosHoverList(stats.ddosList);
+    document.getElementById('wafStatBlockedPanel').innerHTML = renderWafBlockedHoverList(stats.blockedList);
+    document.getElementById('wafStatMonitoredPanel').innerHTML = renderWafMonitoredHoverList(stats.monitoredList);
   } catch { /* transient — next tick retries */ }
   if (currentPage !== 'waf') return;
   if (wafTab === 'events') loadWafEvents();

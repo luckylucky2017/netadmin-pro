@@ -26,7 +26,33 @@ router.get('/stats', async (req, res) => {
   // would otherwise double-count 1 blocked IP as 2+ toward this stat.
   const blocked = (await db.prepare(`SELECT COUNT(DISTINCT vm_id, src_ip) as cnt FROM waf_events WHERE blocked=1 AND occurred_at >= ${since}`).get()).cnt;
   const monitored = (await db.prepare('SELECT COUNT(*) as cnt FROM vcenter_vms WHERE waf_enabled = 1').get()).cnt;
-  res.json({ scan, dos, ddos, blocked, monitored });
+
+  // Backs the DoS/DDoS/IP đã chặn/VM đang giám sát stat cards' hover lists on the frontend — same
+  // underlying condition as each count above, just the actual rows instead of only a number. Each
+  // capped at 50 (a hover list isn't meant to replace the "Sự kiện"/"Quản lý giám sát" tabs, which
+  // already cover the full data) — the *count* fields above stay their own separate COUNT(*)/GROUP
+  // BY queries, never derived from list.length, so none of the headline numbers silently cap at 50.
+  const dosList = await db.prepare(`
+    SELECT vm_name, domain, src_ip, country, hit_count, occurred_at FROM waf_events
+    WHERE event_type='dos' AND occurred_at >= ${since} ORDER BY occurred_at DESC LIMIT 50
+  `).all();
+  const ddosList = await db.prepare(`
+    SELECT vm_name, domain, hit_count, occurred_at FROM waf_events
+    WHERE event_type='ddos' AND occurred_at >= ${since} ORDER BY occurred_at DESC LIMIT 50
+  `).all();
+  // MAX(vm_name)/MAX(country) here is safe per (vm_id, src_ip) group, same reasoning as
+  // routes/reports.js's equivalent — both are deterministic given the group key, never genuinely
+  // mixed within one bucket; just needed to satisfy ONLY_FULL_GROUP_BY.
+  const blockedList = await db.prepare(`
+    SELECT vm_id, MAX(vm_name) as vm_name, src_ip, MAX(country) as country, MAX(occurred_at) as last_seen
+    FROM waf_events WHERE blocked=1 AND occurred_at >= ${since}
+    GROUP BY vm_id, src_ip ORDER BY last_seen DESC LIMIT 50
+  `).all();
+  const monitoredList = await db.prepare(`
+    SELECT name, waf_auto_block, waf_jail_status FROM vcenter_vms WHERE waf_enabled = 1 ORDER BY name ASC LIMIT 50
+  `).all();
+
+  res.json({ scan, dos, ddos, blocked, monitored, dosList, ddosList, blockedList, monitoredList });
 });
 
 // VMs list for "Quản lý giám sát": which are eligible (have an SSH credential + IP — assigned on
