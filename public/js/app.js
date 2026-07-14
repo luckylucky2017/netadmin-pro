@@ -6512,6 +6512,10 @@ function renderVulnFindings(search = '') {
           <option value="negligible">Không đáng kể</option>
           <option value="unknown">Chưa rõ</option>
         </select>
+        <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="exportVulnFindingsCsv()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất báo cáo CSV
+        </button>
       </div>
       <div id="vulnFindingsBody"><div class="loading"><div class="spinner"></div></div></div>
     </div>`;
@@ -6561,7 +6565,7 @@ function renderVulnFindingRows() {
   const rows = paginateRows(sorted, vulnFindingPagination);
   const rowOffset = (vulnFindingPagination.page - 1) * vulnFindingPagination.pageSize;
   body.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Phát hiện lần đầu', 'first_seen', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Phát hiện lần đầu', 'first_seen', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th><th>Chi tiết</th></tr></thead>
     <tbody>${rows.map((f, i) => `
       <tr>
         <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -6574,8 +6578,71 @@ function renderVulnFindingRows() {
         <td><span style="font-size:12px;color:var(--fg-dim)">${formatTime(f.first_seen)}</span></td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(f.last_seen)}</span></td>
         <td>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</td>
+        <td><button class="btn-icon" title="Xem chi tiết & giải pháp xử lý" onclick="openVulnFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button></td>
       </tr>`).join('')}
     </tbody></table>${paginationBar(vulnFindingPagination, sorted.length, 'vulnFindingPagination', 'renderVulnFindingRows')}`;
+}
+
+// Mirrors vuln-scanner.js's extractRemediation exactly — kept as a client-side copy (same pattern as
+// WAF_EVENT_LABEL etc.) so the modal/CSV export don't need a round-trip just to phrase this text.
+function vulnRemediationText(f) {
+  if (f.fixed_version) return `Nâng cấp package "${f.package_name}" lên phiên bản ${f.fixed_version} trở lên để khắc phục.`;
+  return `OSV.dev chưa ghi nhận phiên bản vá cụ thể cho gói này — chạy "apt update && apt upgrade ${f.package_name}" (Debian/Ubuntu) để nhận bản vá bảo mật mới nhất từ nhà phân phối (thường vá qua bản backport trong cùng dòng phiên bản, không tăng version rõ ràng).`;
+}
+
+function openVulnFindingDetail(id) {
+  const f = vulnFindingRows.find(r => r.id === id);
+  if (!f) return;
+  openModal(`${f.package_name} — ${f.vuln_id}`, `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">VM</div><div style="font-weight:600">${escHtml(f.vm_name)}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Package</div><div style="font-family:monospace">${escHtml(f.package_name)}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Phiên bản hiện tại</div><div style="font-family:monospace">${escHtml(f.package_version)}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Mức độ</div>${vulnSeverityBadge(f.severity)}</div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Trạng thái</div>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Mô tả</div>
+        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap">${escHtml(f.details || f.summary || 'Không có mô tả')}</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Giải pháp xử lý</div>
+        <div style="font-size:13px;line-height:1.6">${escHtml(vulnRemediationText(f))}</div>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--fg-muted)">
+        <div>Phát hiện lần đầu: ${formatTime(f.first_seen)}</div>
+        <div>Lần cuối thấy: ${formatTime(f.last_seen)}</div>
+        ${f.resolved_at ? `<div>Đã khắc phục lúc: ${formatTime(f.resolved_at)}</div>` : ''}
+      </div>
+      ${f.reference_url ? `<div><a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:13px">Xem chi tiết trên OSV.dev / nguồn tham khảo →</a></div>` : ''}
+    </div>`, 'detail-modal');
+}
+
+// Exports whatever the current search/VM/severity filters currently match — re-fetches at the
+// server's own max cap (2000, see routes/vuln.js's GET /findings) rather than just the loaded page,
+// so the report isn't silently truncated to whatever page size happens to be showing on screen.
+async function exportVulnFindingsCsv() {
+  const s = document.getElementById('vulnFindingSearch')?.value || '';
+  const params = new URLSearchParams({ search: s, vmId: vulnFindingFilter.vmId, severity: vulnFindingFilter.severity, limit: 2000 });
+  let rows;
+  try { rows = await api(`/vuln/findings?${params}`); } catch (e) { toast(e.message, 'error'); return; }
+  if (!rows.length) { toast('Không có dữ liệu để xuất', 'error'); return; }
+  if (rows.length >= 2000) toast('Báo cáo giới hạn 2000 dòng đầu khớp bộ lọc hiện tại', 'warning');
+  const headers = ['VM', 'Package', 'Phiên bản', 'Mã CVE', 'Mức độ', 'Mô tả', 'Giải pháp xử lý', 'Link tham khảo', 'Phát hiện lần đầu', 'Lần cuối thấy', 'Trạng thái'];
+  const csvRows = rows.map(f => [
+    f.vm_name, f.package_name, f.package_version, f.vuln_id, VULN_SEVERITY_LABEL[f.severity] || f.severity,
+    f.details || f.summary || '', vulnRemediationText(f), f.reference_url || '',
+    f.first_seen, f.last_seen, f.resolved_at ? 'Đã khắc phục' : 'Còn tồn tại',
+  ]);
+  const csv = [headers, ...csvRows].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `bao-cao-lo-hong-cve-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── "Quản lý quét" tab ──

@@ -612,6 +612,14 @@ const SCHEMA_SQL = `
     package_version VARCHAR(150) NOT NULL,
     vuln_id VARCHAR(100) NOT NULL,
     summary TEXT,
+    -- Full OSV.dev "details" text (markdown-ish, longer than summary) — for the finding detail modal,
+    -- kept separate from summary so the table row's short blurb and the modal's full writeup can
+    -- differ without re-fetching from OSV.dev. See vuln-scanner.js's scanVm.
+    details TEXT,
+    -- The version that resolves this specific finding, parsed from OSV's affected[].ranges[].events
+    -- ("fixed" events) — see vuln-scanner.js's extractFixedVersion. NULL means OSV has no fix
+    -- published yet for this vulnerability, not that we failed to look it up.
+    fixed_version VARCHAR(150),
     -- 'critical'|'high'|'medium'|'low'|'negligible'|'unknown' — prefers the distro-provided
     -- categorical rating (e.g. Ubuntu Security Notices already classify this way) over parsing a raw
     -- CVSS vector string ourselves — see vuln-scanner.js's extractSeverity.
@@ -959,6 +967,10 @@ async function ensureSchemaAndMigrations() {
   // 'auto' (default — collectAll's 12h due-check picks it up) or 'manual' (never auto-scheduled,
   // only scanned via the explicit "Quét ngay" action) — see vuln-scanner.js's collectAll query.
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN vuln_scan_mode VARCHAR(10) DEFAULT 'auto'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Fuller description + remediation (fixed version) for vuln_findings — see that table's own
+  // comment above and vuln-scanner.js's extractFixedVersion.
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN details TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN fixed_version VARCHAR(150)"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

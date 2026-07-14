@@ -117,16 +117,46 @@ function extractSeverity(detail) {
   return 'unknown';
 }
 
+// Pure, testable: the version that resolves this finding, parsed from OSV's affected[].ranges[].
+// events "fixed" markers. Ecosystem strings inside affected[] can carry a longer suffix than what we
+// queried/matched with (a real example: querying "Ubuntu:24.04" returns hits whose own affected[]
+// entry says ecosystem "Ubuntu:24.04:LTS") — matched by PREFIX here, not exact equality, confirmed
+// against real OSV.dev responses. In practice this is null for most Debian/Ubuntu-ecosystem findings
+// today (OSV.dev doesn't encode a clean "fixed version" the way it does for e.g. PyPI/npm — distro
+// security patches are backported into the same version string) — extractRemediation below turns
+// that null into distro-appropriate guidance instead of silently showing nothing.
+function extractFixedVersion(detail, packageName, ecosystem) {
+  const candidates = (detail?.affected || []).filter((a) => (a.package?.name || '').toLowerCase() === packageName.toLowerCase());
+  const match = (ecosystem && candidates.find((a) => String(a.package?.ecosystem || '').startsWith(ecosystem))) || candidates[0];
+  if (!match) return null;
+  const fixedVersions = [];
+  for (const range of match.ranges || []) {
+    for (const event of range.events || []) if (event.fixed) fixedVersions.push(String(event.fixed).slice(0, 150));
+  }
+  return fixedVersions.length ? fixedVersions[fixedVersions.length - 1] : null;
+}
+
+// Pure, testable: always returns SOME actionable remediation text — a specific upgrade target when
+// OSV has one, otherwise a generic-but-correct package-manager command, rather than leaving the admin
+// with nothing when fixedVersion is null (the common case for Debian/Ubuntu findings today — see
+// extractFixedVersion's comment). Not family-specific (dpkg vs rpm) since that isn't persisted per
+// finding and, in practice, only Debian/Ubuntu findings exist today (buildEcosystem returns null for
+// rpm, which makes scanVm exit at 'unsupported_os' before any finding is ever stored for that family).
+function extractRemediation(packageName, fixedVersion) {
+  if (fixedVersion) return `Nâng cấp package "${packageName}" lên phiên bản ${fixedVersion} trở lên để khắc phục.`;
+  return `OSV.dev chưa ghi nhận phiên bản vá cụ thể cho gói này — chạy "apt update && apt upgrade ${packageName}" (Debian/Ubuntu) để nhận bản vá bảo mật mới nhất từ nhà phân phối (thường vá qua bản backport trong cùng dòng phiên bản, không tăng version rõ ràng).`;
+}
+
 function toSqlDatetime(date) {
   return date.toLocaleString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
 }
 
 const upsertFinding = db.prepare(`
-  INSERT INTO vuln_findings (vm_id, vm_name, package_name, package_version, vuln_id, summary, severity, reference_url, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  INSERT INTO vuln_findings (vm_id, vm_name, package_name, package_version, vuln_id, summary, details, severity, reference_url, fixed_version, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   ON DUPLICATE KEY UPDATE package_version = VALUES(package_version), summary = VALUES(summary),
-    severity = VALUES(severity), reference_url = VALUES(reference_url), last_seen = CURRENT_TIMESTAMP,
-    resolved_at = NULL
+    details = VALUES(details), severity = VALUES(severity), reference_url = VALUES(reference_url),
+    fixed_version = VALUES(fixed_version), last_seen = CURRENT_TIMESTAMP, resolved_at = NULL
 `);
 const resolveStaleFindings = db.prepare(`
   UPDATE vuln_findings SET resolved_at = CURRENT_TIMESTAMP
@@ -147,7 +177,7 @@ async function raiseVulnAlert(vm, finding) {
     VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, 'vuln_finding', ?, 'open')
   `).run(
     `Phát hiện lỗ hổng bảo mật (${finding.severity})`,
-    `Package "${finding.package_name}" (${finding.package_version}) trên VM "${vm.name}" dính lỗ hổng ${finding.vuln_id}${finding.summary ? `: ${finding.summary.slice(0, 200)}` : ''}`,
+    `Package "${finding.package_name}" (${finding.package_version}) trên VM "${vm.name}" dính lỗ hổng ${finding.vuln_id}${finding.summary ? `: ${finding.summary.slice(0, 200)}` : ''} — ${extractRemediation(finding.package_name, finding.fixedVersion)}`,
     vm.id, vm.name, `${finding.package_name}:${finding.vuln_id}`
   );
 }
@@ -180,10 +210,12 @@ async function scanVm(vm, detailCache) {
           detailCache.set(vulnId, detail);
         }
         const summary = detail?.summary || detail?.details?.slice(0, 500) || null;
+        const details = detail?.details ? detail.details.slice(0, 4000) : null;
         const severity = extractSeverity(detail);
         const referenceUrl = detail?.references?.[0]?.url || null;
-        await upsertFinding.run(vm.id, vm.name, hit.name, hit.version, vulnId, summary, severity, referenceUrl);
-        if (ALERT_SEVERITIES.has(severity)) await raiseVulnAlert(vm, { package_name: hit.name, package_version: hit.version, vuln_id: vulnId, summary, severity });
+        const fixedVersion = extractFixedVersion(detail, hit.name, ecosystem);
+        await upsertFinding.run(vm.id, vm.name, hit.name, hit.version, vulnId, summary, details, severity, referenceUrl, fixedVersion);
+        if (ALERT_SEVERITIES.has(severity)) await raiseVulnAlert(vm, { package_name: hit.name, package_version: hit.version, vuln_id: vulnId, summary, severity, fixedVersion });
       }
     }
     await resolveStaleFindings.run(vm.id, scanStartedAt);
@@ -221,4 +253,5 @@ function start(intervalMs = TICK_MS) {
 module.exports = {
   start, collectAll, scanVm,
   parseScanOutput, buildEcosystem, queryOsvBatch, fetchVulnDetail, extractSeverity,
+  extractFixedVersion, extractRemediation,
 };
