@@ -1038,6 +1038,13 @@ async function ensureSchemaAndMigrations() {
   // kernel package was already installed and waiting on reboot, with zero "upgradable" entries for it.
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN reboot_required TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN reboot_required_packages TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Extra vulnerability-intelligence sources layered on top of OSV.dev — see vuln-enrichment.js.
+  // cve_id is the canonical "CVE-YYYY-NNNNN" (OSV's own id for Ubuntu findings is its own advisory ID,
+  // e.g. "UBUNTU-CVE-...", not directly usable to cross-reference KEV/EPSS without this).
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN cve_id VARCHAR(30)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN in_kev TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN epss_score DECIMAL(6,5)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN epss_percentile DECIMAL(6,5)"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

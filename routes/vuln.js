@@ -4,6 +4,7 @@ const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 const vulnScanner = require('../vuln-scanner');
 const aptUpdateManager = require('../apt-update-manager');
+const vulnEnrichment = require('../vuln-enrichment');
 
 // VM list for the "Quản lý quét" tab: which are eligible (have an SSH credential + IP — assigned on
 // the "Giám sát bất thường" → "Quản lý VM giám sát" tab, reused as-is, no separate credential picker
@@ -64,16 +65,30 @@ router.get('/findings', async (req, res) => {
   if (vmId) { query += ' AND vm_id = ?'; params.push(vmId); }
   if (severity) { query += ' AND severity = ?'; params.push(severity); }
   if (search) { query += ' AND (vm_name LIKE ? OR package_name LIKE ? OR vuln_id LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
-  // Worst-first: open findings before resolved, critical/high before the noisier low/medium bulk,
-  // most-recently-seen first within a severity tier.
+  // Worst-first: open findings before resolved, CISA KEV (actively exploited right now) before even
+  // critical severity, then critical/high before the noisier low/medium bulk, most-recently-seen
+  // first within a tier.
   query += `
-    ORDER BY (resolved_at IS NULL) DESC,
+    ORDER BY (resolved_at IS NULL) DESC, in_kev DESC,
       CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'negligible' THEN 4 ELSE 5 END,
       last_seen DESC
     LIMIT ?
   `;
   params.push(Math.min(Number(limit) || 500, 2000));
   res.json(await db.prepare(query).all(...params));
+});
+
+// Live, on-demand only (see vuln-enrichment.js's header comment for why NOT during the bulk scan) —
+// fetches NVD's own CVSS score/vector + CWE classification for the finding's canonical CVE ID.
+// cve_id can be null (e.g. OSV had no `upstream` entry for this advisory) — reported as a normal
+// "no NVD data" response, not an error, so the frontend can show a clear message either way.
+router.get('/findings/:id/nvd', async (req, res) => {
+  const finding = await db.prepare('SELECT cve_id FROM vuln_findings WHERE id = ?').get(req.params.id);
+  if (!finding) return res.status(404).json({ error: 'Không tìm thấy' });
+  if (!finding.cve_id) return res.json({ available: false, reason: 'Không xác định được mã CVE gốc cho lỗ hổng này' });
+  const nvd = await vulnEnrichment.fetchNvdDetail(finding.cve_id);
+  if (!nvd) return res.json({ available: false, reason: 'Không lấy được dữ liệu từ NVD (có thể do giới hạn tần suất truy vấn hoặc CVE chưa có trên NVD) — thử lại sau' });
+  res.json({ available: true, ...nvd });
 });
 
 // ── Package update management ("Cập nhật gói" tab) ──────────────────────────────────────────
@@ -173,7 +188,8 @@ router.get('/stats', async (req, res) => {
   const totalOpen = bySeverity.reduce((sum, r) => sum + r.cnt, 0);
   const vmsScanned = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE vuln_scan_enabled = 1").get()).cnt;
   const vmsWithError = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE vuln_scan_enabled = 1 AND vuln_scan_status IN ('error', 'unsupported_os')").get()).cnt;
-  res.json({ totalOpen, counts, vmsScanned, vmsWithError });
+  const inKevCount = (await db.prepare("SELECT COUNT(*) as cnt FROM vuln_findings WHERE resolved_at IS NULL AND in_kev = 1").get()).cnt;
+  res.json({ totalOpen, counts, vmsScanned, vmsWithError, inKevCount });
 });
 
 module.exports = router;

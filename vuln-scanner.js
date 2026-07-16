@@ -10,6 +10,7 @@ const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
 const rebootStatus = require('./reboot-status');
+const vulnEnrichment = require('./vuln-enrichment');
 
 const OSV_API = 'https://api.osv.dev/v1';
 const OSV_BATCH_CHUNK = 500; // OSV's documented batch limit is 1000 queries/request — chunk well under that
@@ -153,11 +154,13 @@ function toSqlDatetime(date) {
 }
 
 const upsertFinding = db.prepare(`
-  INSERT INTO vuln_findings (vm_id, vm_name, package_name, package_version, vuln_id, summary, details, severity, reference_url, fixed_version, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  INSERT INTO vuln_findings (vm_id, vm_name, package_name, package_version, vuln_id, summary, details, severity, reference_url, fixed_version, cve_id, in_kev, epss_score, epss_percentile, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   ON DUPLICATE KEY UPDATE package_version = VALUES(package_version), summary = VALUES(summary),
     details = VALUES(details), severity = VALUES(severity), reference_url = VALUES(reference_url),
-    fixed_version = VALUES(fixed_version), last_seen = CURRENT_TIMESTAMP, resolved_at = NULL
+    fixed_version = VALUES(fixed_version), cve_id = VALUES(cve_id), in_kev = VALUES(in_kev),
+    epss_score = VALUES(epss_score), epss_percentile = VALUES(epss_percentile),
+    last_seen = CURRENT_TIMESTAMP, resolved_at = NULL
 `);
 const resolveStaleFindings = db.prepare(`
   UPDATE vuln_findings SET resolved_at = CURRENT_TIMESTAMP
@@ -173,11 +176,17 @@ async function raiseVulnAlert(vm, finding) {
     SELECT id FROM alerts WHERE metric = 'vuln_finding' AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
   `).get(vm.id, `${finding.package_name}:${finding.vuln_id}`);
   if (already) return;
+  // A CISA KEV listing means this specific CVE is being exploited in the wild RIGHT NOW — that's a
+  // stronger operational signal than OSV/distro-assigned CVSS severity, so it forces 'critical'
+  // regardless of what finding.severity says (a KEV-listed 'medium' is still an emergency).
+  const alertSeverity = finding.inKev ? 'critical' : finding.severity;
+  const kevPrefix = finding.inKev ? '[CISA KEV — đang bị khai thác thực tế] ' : '';
   await db.prepare(`
     INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
-    VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, 'vuln_finding', ?, 'open')
+    VALUES ('security', ?, ?, ?, 'vcenter_vm', ?, ?, 'vuln_finding', ?, 'open')
   `).run(
-    `Phát hiện lỗ hổng bảo mật (${finding.severity})`,
+    alertSeverity,
+    `${kevPrefix}Phát hiện lỗ hổng bảo mật (${finding.severity})`,
     `Package "${finding.package_name}" (${finding.package_version}) trên VM "${vm.name}" dính lỗ hổng ${finding.vuln_id}${finding.summary ? `: ${finding.summary.slice(0, 200)}` : ''} — ${extractRemediation(finding.package_name, finding.fixedVersion)}`,
     vm.id, vm.name, `${finding.package_name}:${finding.vuln_id}`
   );
@@ -213,6 +222,11 @@ async function scanVm(vm, detailCache) {
     }
 
     const hits = await queryOsvBatch(packages, ecosystem);
+    // Two passes: first collect every finding's OSV detail + canonical CVE ID (needed to batch-query
+    // KEV/EPSS once for the whole scan), THEN upsert — rather than querying KEV/EPSS per-finding,
+    // which would mean dozens of extra round trips per VM. See vuln-enrichment.js's header comment.
+    const pending = [];
+    const cveIdsThisScan = [];
     for (const hit of hits) {
       for (const vulnId of hit.vulnIds) {
         let detail = detailCache.get(vulnId);
@@ -225,8 +239,28 @@ async function scanVm(vm, detailCache) {
         const severity = extractSeverity(detail);
         const referenceUrl = detail?.references?.[0]?.url || null;
         const fixedVersion = extractFixedVersion(detail, hit.name, ecosystem);
-        await upsertFinding.run(vm.id, vm.name, hit.name, hit.version, vulnId, summary, details, severity, referenceUrl, fixedVersion);
-        if (ALERT_SEVERITIES.has(severity)) await raiseVulnAlert(vm, { package_name: hit.name, package_version: hit.version, vuln_id: vulnId, summary, severity, fixedVersion });
+        const cveId = vulnEnrichment.extractCanonicalCveId(detail);
+        if (cveId) cveIdsThisScan.push(cveId);
+        pending.push({ hit, vulnId, summary, details, severity, referenceUrl, fixedVersion, cveId });
+      }
+    }
+
+    const [kevSet, epssScores] = await Promise.all([
+      vulnEnrichment.getKevSet(),
+      vulnEnrichment.queryEpssBatch(cveIdsThisScan),
+    ]);
+
+    for (const f of pending) {
+      const inKev = !!f.cveId && kevSet.has(f.cveId);
+      const epss = f.cveId ? epssScores.get(f.cveId) : null;
+      await upsertFinding.run(
+        vm.id, vm.name, f.hit.name, f.hit.version, f.vulnId, f.summary, f.details, f.severity, f.referenceUrl, f.fixedVersion,
+        f.cveId, inKev ? 1 : 0, epss?.score ?? null, epss?.percentile ?? null
+      );
+      // KEV listing raises an alert even for an OSV/distro severity below the usual critical/high bar
+      // — see raiseVulnAlert's own comment for why.
+      if (ALERT_SEVERITIES.has(f.severity) || inKev) {
+        await raiseVulnAlert(vm, { package_name: f.hit.name, package_version: f.hit.version, vuln_id: f.vulnId, summary: f.summary, severity: f.severity, fixedVersion: f.fixedVersion, inKev });
       }
     }
     await resolveStaleFindings.run(vm.id, scanStartedAt);

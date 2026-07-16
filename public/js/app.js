@@ -6452,13 +6452,14 @@ async function renderVuln(search = '') {
     if (search) vulnTab = 'findings';
     c.innerHTML = `
     <div class="page-header">
-      <div><div class="page-title">Quét lỗ hổng (CVE)</div><div class="page-subtitle">Quét gói phần mềm đã cài trên VM, đối chiếu với cơ sở dữ liệu lỗ hổng công khai OSV.dev (hiện chỉ hỗ trợ Ubuntu/Debian)</div></div>
+      <div><div class="page-title">Quét lỗ hổng (CVE)</div><div class="page-subtitle">Quét gói phần mềm đã cài trên VM, đối chiếu OSV.dev (hiện chỉ hỗ trợ Ubuntu/Debian) — ưu tiên theo CISA KEV (đang bị khai thác thực tế) & EPSS (xác suất bị khai thác), chi tiết CVSS/CWE bổ sung từ NVD khi cần</div></div>
       <button class="btn btn-secondary btn-sm" onclick="renderVuln()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         Làm mới
       </button>
     </div>
     <div class="stats-grid">
+      <div class="stat-card"><div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></div><div class="stat-label" title="CISA KEV — đang bị khai thác thực tế ngoài đời">Đang bị khai thác (KEV)</div><div class="stat-value red">${vulnStats.inKevCount}</div></div>
       <div class="stat-card"><div class="stat-icon red"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><div class="stat-label">Nghiêm trọng</div><div class="stat-value red">${vulnStats.counts.critical}</div></div>
       <div class="stat-card"><div class="stat-icon yellow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><div class="stat-label">Cao</div><div class="stat-value yellow">${vulnStats.counts.high}</div></div>
       <div class="stat-card"><div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></div><div class="stat-label">Trung bình + Thấp</div><div class="stat-value blue">${vulnStats.counts.medium + vulnStats.counts.low + vulnStats.counts.negligible + vulnStats.counts.unknown}</div></div>
@@ -6490,7 +6491,10 @@ function renderVulnTabBody(search = '') {
 
 // ── "Lỗ hổng phát hiện" tab ──
 let vulnFindingRows = [];
-let vulnFindingSortState = { key: 'last_seen', dir: 'desc' };
+// No default key — preserves the server's own ORDER BY (open-first, CISA KEV before even critical
+// severity, then severity tier, most-recent within a tier) rather than overriding it with a single
+// column sort. Clicking any column header still re-sorts normally from there.
+let vulnFindingSortState = { key: null, dir: 'asc' };
 let vulnFindingPagination = newPagination();
 let vulnFindingFilter = { vmId: '', severity: '' };
 let vulnFindingVms = [];
@@ -6568,22 +6572,35 @@ function renderVulnFindingRows() {
   const rows = paginateRows(sorted, vulnFindingPagination);
   const rowOffset = (vulnFindingPagination.page - 1) * vulnFindingPagination.pageSize;
   body.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Phát hiện lần đầu', 'first_seen', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th><th>Chi tiết</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('EPSS', 'epss_score', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th><th>Chi tiết</th></tr></thead>
     <tbody>${rows.map((f, i) => `
       <tr>
         <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
         <td style="font-weight:600">${escHtml(f.vm_name)}</td>
         <td style="font-family:monospace">${escHtml(f.package_name)}</td>
         <td style="font-family:monospace;font-size:12px">${escHtml(f.package_version)}</td>
-        <td>${f.reference_url ? `<a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${escHtml(f.vuln_id)}</a>` : escHtml(f.vuln_id)}</td>
+        <td>
+          ${f.reference_url ? `<a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${escHtml(f.vuln_id)}</a>` : escHtml(f.vuln_id)}
+          ${f.in_kev ? `<span class="severity critical" title="CISA KEV: đang bị khai thác thực tế ngoài đời" style="margin-left:4px">KEV</span>` : ''}
+        </td>
         <td>${vulnSeverityBadge(f.severity)}</td>
+        <td>${vulnEpssCell(f)}</td>
         <td><span style="font-size:12px;color:var(--fg-muted)" title="${f.summary ? escAttr(f.summary) : ''}">${f.summary ? escHtml(f.summary).slice(0, 80) + (f.summary.length > 80 ? '…' : '') : '—'}</span></td>
-        <td><span style="font-size:12px;color:var(--fg-dim)">${formatTime(f.first_seen)}</span></td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(f.last_seen)}</span></td>
         <td>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</td>
         <td><button class="btn-icon" title="Xem chi tiết & giải pháp xử lý" onclick="openVulnFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button></td>
       </tr>`).join('')}
     </tbody></table>${paginationBar(vulnFindingPagination, sorted.length, 'vulnFindingPagination', 'renderVulnFindingRows')}`;
+}
+
+// EPSS score is a 0-1 probability — shown as a percentage. epss_score comes back from MySQL as a
+// DECIMAL, which the mysql2 driver hands to JS as a string ("0.00157"), not a number — Number(...)
+// first or toFixed would throw on a string in some engines, so always coerce explicitly.
+function vulnEpssCell(f) {
+  if (f.epss_score == null) return '<span style="color:var(--fg-dim)">—</span>';
+  const pct = (Number(f.epss_score) * 100).toFixed(2);
+  const title = f.epss_percentile != null ? `Percentile: ${(Number(f.epss_percentile) * 100).toFixed(1)}% — cao hơn ${(Number(f.epss_percentile) * 100).toFixed(1)}% các CVE khác đã được EPSS chấm điểm` : '';
+  return `<span style="font-family:monospace;font-size:12px" title="${escAttr(title)}">${pct}%</span>`;
 }
 
 // Mirrors vuln-scanner.js's extractRemediation exactly — kept as a client-side copy (same pattern as
@@ -6598,11 +6615,13 @@ function openVulnFindingDetail(id) {
   if (!f) return;
   openModal(`${f.package_name} — ${f.vuln_id}`, `
     <div style="display:flex;flex-direction:column;gap:14px">
+      ${f.in_kev ? `<div style="background:var(--red-dim);border:1px solid var(--red);border-radius:var(--radius);padding:10px 12px;font-size:13px;color:var(--red);font-weight:600">CISA KEV — CVE này đang bị khai thác thực tế ngoài đời, cần ưu tiên xử lý trước bất kể mức độ CVSS/OSV.</div>` : ''}
       <div style="display:flex;gap:16px;flex-wrap:wrap">
         <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">VM</div><div style="font-weight:600">${escHtml(f.vm_name)}</div></div>
         <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Package</div><div style="font-family:monospace">${escHtml(f.package_name)}</div></div>
         <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Phiên bản hiện tại</div><div style="font-family:monospace">${escHtml(f.package_version)}</div></div>
-        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Mức độ</div>${vulnSeverityBadge(f.severity)}</div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Mức độ (OSV)</div>${vulnSeverityBadge(f.severity)}</div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">EPSS (xác suất bị khai thác 30 ngày tới)</div>${vulnEpssCell(f)}</div>
         <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Trạng thái</div>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</div>
       </div>
       <div>
@@ -6619,7 +6638,40 @@ function openVulnFindingDetail(id) {
         ${f.resolved_at ? `<div>Đã khắc phục lúc: ${formatTime(f.resolved_at)}</div>` : ''}
       </div>
       ${f.reference_url ? `<div><a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:13px">Xem chi tiết trên OSV.dev / nguồn tham khảo →</a></div>` : ''}
+      <div id="vulnNvdSection">
+        ${f.cve_id
+          ? `<button class="btn btn-secondary btn-sm" onclick="loadVulnNvdDetail(${f.id})">Xem thêm CVSS/CWE từ NVD (${escHtml(f.cve_id)})</button>`
+          : `<span style="font-size:12px;color:var(--fg-dim)">Không xác định được mã CVE gốc để tra thêm từ NVD.</span>`}
+      </div>
     </div>`, 'detail-modal');
+}
+
+// Lazy/on-demand only — never fetched automatically when the modal opens, since NVD's public rate
+// limit is low (5 req/30s without an API key) and most findings a user glances at won't need this
+// extra detail. See routes/vuln.js's GET /findings/:id/nvd and vuln-enrichment.js.
+async function loadVulnNvdDetail(id) {
+  const section = document.getElementById('vulnNvdSection');
+  if (!section) return;
+  section.innerHTML = `<div style="font-size:12px;color:var(--fg-dim)">Đang tải từ NVD...</div>`;
+  try {
+    const r = await api(`/vuln/findings/${id}/nvd`);
+    if (!r.available) {
+      section.innerHTML = `<span style="font-size:12px;color:var(--fg-dim)">${escHtml(r.reason || 'Không có dữ liệu')}</span>`;
+      return;
+    }
+    section.innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:6px">Dữ liệu bổ sung từ NVD</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+          ${r.cvssScore != null ? `<div><span style="color:var(--fg-dim)">CVSS v${escHtml(r.cvssVersion || '?')}:</span> <strong>${r.cvssScore}</strong> (${escHtml(r.cvssSeverity || '')})</div>` : '<div style="color:var(--fg-dim)">Chưa có điểm CVSS trên NVD</div>'}
+          ${r.cwes && r.cwes.length ? `<div><span style="color:var(--fg-dim)">CWE:</span> ${r.cwes.map(escHtml).join(', ')}</div>` : ''}
+        </div>
+        ${r.cvssVector ? `<div style="font-family:monospace;font-size:11px;color:var(--fg-muted);margin-top:6px">${escHtml(r.cvssVector)}</div>` : ''}
+        <div style="margin-top:8px"><a href="${escAttr(r.nvdUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:12px">Xem trên NVD →</a></div>
+      </div>`;
+  } catch (e) {
+    section.innerHTML = `<span style="font-size:12px;color:var(--red)">${escHtml(e.message)}</span>`;
+  }
 }
 
 // Exports whatever the current search/VM/severity filters currently match — re-fetches at the
@@ -6631,10 +6683,11 @@ async function exportVulnFindingsCsv() {
   let rows;
   try { rows = await api(`/vuln/findings?${params}`); } catch (e) { toast(e.message, 'error'); return; }
   if (!rows.length) { toast('Không có dữ liệu để xuất', 'error'); return; }
-  if (rows.length >= 2000) toast('Báo cáo giới hạn 2000 dòng đầu khớp bộ lọc hiện tại', 'warning');
-  const headers = ['VM', 'Package', 'Phiên bản', 'Mã CVE', 'Mức độ', 'Mô tả', 'Giải pháp xử lý', 'Link tham khảo', 'Phát hiện lần đầu', 'Lần cuối thấy', 'Trạng thái'];
+  if (rows.length >= 2000) toast('Báo cáo giới hạn 2000 dòng đầu khớp bộ lọc hiện tại', 'info');
+  const headers = ['VM', 'Package', 'Phiên bản', 'Mã CVE', 'Mã CVE gốc', 'Đang bị khai thác (CISA KEV)', 'Mức độ (OSV)', 'EPSS (%)', 'Mô tả', 'Giải pháp xử lý', 'Link tham khảo', 'Phát hiện lần đầu', 'Lần cuối thấy', 'Trạng thái'];
   const csvRows = rows.map(f => [
-    f.vm_name, f.package_name, f.package_version, f.vuln_id, VULN_SEVERITY_LABEL[f.severity] || f.severity,
+    f.vm_name, f.package_name, f.package_version, f.vuln_id, f.cve_id || '', f.in_kev ? 'Có' : 'Không',
+    VULN_SEVERITY_LABEL[f.severity] || f.severity, f.epss_score != null ? (Number(f.epss_score) * 100).toFixed(2) : '',
     f.details || f.summary || '', vulnRemediationText(f), f.reference_url || '',
     f.first_seen, f.last_seen, f.resolved_at ? 'Đã khắc phục' : 'Còn tồn tại',
   ]);
