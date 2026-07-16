@@ -634,6 +634,55 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_vuln_finding (vm_id, package_name, vuln_id)
   );
 
+  -- Snapshot of "what apt currently reports as upgradable" for a VM, from the last "Kiểm tra update"
+  -- click — see apt-update-manager.js. Wholesale-replaced on every check (DELETE+INSERT), not an
+  -- accumulating log — this reflects CURRENT reality only, so a package that's no longer upgradable
+  -- (already updated another way, or removed) simply stops appearing next check. What actually got
+  -- applied lives in vuln_update_history below, which IS an append-only log.
+  CREATE TABLE IF NOT EXISTS vuln_pending_updates (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    vm_name VARCHAR(255),
+    package_name VARCHAR(255) NOT NULL,
+    current_version VARCHAR(150),
+    candidate_version VARCHAR(150),
+    checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_pending_update (vm_id, package_name),
+    INDEX idx_pending_vm (vm_id)
+  );
+
+  -- Append-only record of every "Cập nhật đã chọn" attempt, one row per package — backs the
+  -- post-update status report (đã cập nhật / lỗi / lên phiên bản gì) and a short per-VM history.
+  CREATE TABLE IF NOT EXISTS vuln_update_history (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    vm_name VARCHAR(255),
+    package_name VARCHAR(255) NOT NULL,
+    from_version VARCHAR(150),
+    to_version VARCHAR(150),
+    status VARCHAR(20) NOT NULL, -- 'updated' | 'failed'
+    error TEXT,
+    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    applied_by VARCHAR(255),
+    INDEX idx_history_vm (vm_id, applied_at)
+  );
+
+  -- Global package-name excludes — "loại trừ các gói sẽ không update", checked at check-updates
+  -- display time (excepted packages still show up, so the admin can see they're deliberately held
+  -- back — see routes/vuln.js) and again server-side in apply-updates as defense in depth (a package
+  -- name here is silently dropped from the apply request even if the frontend somehow submitted it).
+  -- Global, not per-VM, matching this app's existing waf_ip_exceptions/ssh_ip_exceptions shape —
+  -- "never auto-update this package on any VM" is the common real case (a pinned compatibility
+  -- version, a package the team reviews manually) — a future per-VM override can be layered on if
+  -- that turns out to be needed.
+  CREATE TABLE IF NOT EXISTS vuln_update_exceptions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    package_name VARCHAR(255) NOT NULL UNIQUE,
+    note VARCHAR(255),
+    created_by VARCHAR(255),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS alert_rules (
     id INT PRIMARY KEY AUTO_INCREMENT,
     name TEXT NOT NULL,
@@ -980,6 +1029,8 @@ async function ensureSchemaAndMigrations() {
   // VMs. See nginx-waf-collector.js's header comment, which already documents/solved the same issue
   // for its own log-tailing — this migration ports the same stat-c%s + tail-c+N technique here.
   try { await pool.query("ALTER TABLE ssh_log_cursor ADD COLUMN last_byte_offset INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Last "Kiểm tra update" (apt-get update) run, per VM — see apt-update-manager.js.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN update_checked_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

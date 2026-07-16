@@ -6468,6 +6468,7 @@ async function renderVuln(search = '') {
     <div class="filter-tabs" id="vulnTabs" style="margin-bottom:16px">
       <div class="filter-tab ${vulnTab === 'findings' ? 'active' : ''}" data-tab="findings" onclick="setVulnTab('findings')">Lỗ hổng phát hiện</div>
       <div class="filter-tab ${vulnTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setVulnTab('manage')">Quản lý quét</div>
+      <div class="filter-tab ${vulnTab === 'updates' ? 'active' : ''}" data-tab="updates" onclick="setVulnTab('updates')">Cập nhật gói</div>
     </div>
     <div id="vulnTabBody"></div>`;
     renderVulnTabBody(search);
@@ -6483,6 +6484,7 @@ function setVulnTab(tab) {
 
 function renderVulnTabBody(search = '') {
   if (vulnTab === 'manage') renderVulnManage();
+  else if (vulnTab === 'updates') renderVulnUpdates();
   else renderVulnFindings(search);
 }
 
@@ -6765,6 +6767,246 @@ async function handleVulnScanNow(id, btn) {
     else toast(result.vuln_scan_error || 'Quét gặp lỗi', 'error');
   } catch (err) { toast(err.message, 'error'); }
   finally { await renderVulnManage(); }
+}
+
+// ── "Cập nhật gói" tab ──
+let vulnUpdateVms = [];
+let vulnUpdateSelectedVmId = null;
+let vulnUpdatePendingRows = [];
+let vulnUpdateSelectedPackages = new Set();
+let vulnUpdateExceptions = [];
+let vulnUpdateHistoryRows = [];
+
+async function renderVulnUpdates() {
+  const body = document.getElementById('vulnTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    const [vms, exceptions] = await Promise.all([api('/vuln/vms'), api('/vuln/update-exceptions')]);
+    vulnUpdateVms = vms.filter(v => v.vuln_scan_enabled);
+    vulnUpdateExceptions = exceptions;
+    if (!vulnUpdateSelectedVmId || !vulnUpdateVms.find(v => v.id === vulnUpdateSelectedVmId)) {
+      vulnUpdateSelectedVmId = vulnUpdateVms[0]?.id || null;
+    }
+    body.innerHTML = `
+      <div class="table-wrap">
+        <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+          <p style="margin-bottom:0">Bấm "Kiểm tra update" để chạy <code>apt update</code> thật trên VM và liệt kê các gói có bản mới — chỉ dò, không tự cài gì cả. Chọn gói muốn cập nhật rồi bấm "Cập nhật đã chọn" (chỉ cài đúng các gói đã chọn, không phải toàn bộ). Gói trong danh sách Ngoại lệ sẽ không thể chọn.</p>
+        </div>
+        <div class="table-toolbar" style="flex-wrap:wrap;gap:10px">
+          <select class="filter-select" id="vulnUpdateVmSelect" onchange="onVulnUpdateVmChange(this.value)">
+            ${vulnUpdateVms.length ? vulnUpdateVms.map(v => `<option value="${v.id}" ${v.id === vulnUpdateSelectedVmId ? 'selected' : ''}>${escHtml(v.name)}</option>`).join('') : '<option value="">Chưa có VM nào bật giám sát</option>'}
+          </select>
+          <button class="btn btn-secondary btn-sm" data-permission="vuln.update.manage" id="vulnUpdateCheckBtn" onclick="handleVulnCheckUpdates()" ${vulnUpdateSelectedVmId ? '' : 'disabled'}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Kiểm tra update
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="openVulnUpdateExceptionsModal()">Quản lý ngoại lệ (${vulnUpdateExceptions.length})</button>
+          <span id="vulnUpdateCheckedAt" style="font-size:12px;color:var(--fg-dim);margin-left:auto"></span>
+        </div>
+        <div id="vulnUpdatePendingBody"></div>
+        <div id="vulnUpdateHistoryWrap" style="border-top:1px solid var(--border)"></div>
+      </div>`;
+    if (vulnUpdateSelectedVmId) await loadVulnUpdateData();
+    else document.getElementById('vulnUpdatePendingBody').innerHTML = `<div class="empty-state"><h3>Chưa có VM nào bật giám sát CVE</h3><p>Bật ở tab "Quản lý quét" trước</p></div>`;
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+}
+
+function onVulnUpdateVmChange(id) {
+  vulnUpdateSelectedVmId = Number(id);
+  vulnUpdateSelectedPackages = new Set();
+  loadVulnUpdateData();
+}
+
+// Pure DB reads — selecting a VM or reloading this tab NEVER re-runs the live apt-get update itself
+// (see the "no auto-recheck on render" rule); only the explicit "Kiểm tra update" button does that.
+async function loadVulnUpdateData() {
+  const wrap = document.getElementById('vulnUpdatePendingBody');
+  wrap.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    // Re-fetches /vuln/vms too (not just reused from the stale array renderVulnUpdates() loaded
+    // once) — after a real "Kiểm tra update" run this same function refetches to show the fresh
+    // update_checked_at; a cheap DB-only call, no SSH involved.
+    const [pending, history, vms] = await Promise.all([
+      api(`/vuln/vms/${vulnUpdateSelectedVmId}/pending-updates`),
+      api(`/vuln/vms/${vulnUpdateSelectedVmId}/update-history`),
+      api('/vuln/vms'),
+    ]);
+    vulnUpdatePendingRows = pending;
+    vulnUpdateHistoryRows = history;
+    vulnUpdateVms = vms.filter(v => v.vuln_scan_enabled);
+    const vm = vulnUpdateVms.find(v => v.id === vulnUpdateSelectedVmId);
+    const checkedAtEl = document.getElementById('vulnUpdateCheckedAt');
+    if (checkedAtEl) checkedAtEl.textContent = vm?.update_checked_at ? `Kiểm tra lần cuối: ${formatTime(vm.update_checked_at)}` : 'Chưa kiểm tra lần nào';
+    renderVulnUpdatePendingRows();
+    renderVulnUpdateHistory();
+    applyPermissionVisibility();
+  } catch (e) { wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+}
+
+function renderVulnUpdatePendingRows() {
+  const wrap = document.getElementById('vulnUpdatePendingBody');
+  if (!wrap) return;
+  if (!vulnUpdatePendingRows.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg><h3>Không có bản cập nhật nào đang chờ</h3><p>Bấm "Kiểm tra update" để dò lại</p></div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <div style="padding:10px 16px;display:flex;gap:8px;align-items:center;border-top:1px solid var(--border)">
+      <button class="btn btn-secondary btn-sm" data-permission="vuln.update.manage" onclick="toggleAllVulnUpdateSelection(true)">Chọn tất cả</button>
+      <button class="btn btn-secondary btn-sm" data-permission="vuln.update.manage" onclick="toggleAllVulnUpdateSelection(false)">Bỏ chọn</button>
+      <button class="btn btn-primary btn-sm" data-permission="vuln.update.manage" style="margin-left:auto" onclick="handleVulnApplyUpdates()" ${vulnUpdateSelectedPackages.size ? '' : 'disabled'}>
+        Cập nhật đã chọn (${vulnUpdateSelectedPackages.size})
+      </button>
+    </div>
+    <table>
+      <thead><tr><th style="width:36px"></th><th>Package</th><th>Phiên bản hiện tại</th><th>Phiên bản mới</th><th>Trạng thái</th></tr></thead>
+      <tbody>${vulnUpdatePendingRows.map(r => `
+        <tr>
+          <td><input type="checkbox" data-permission="vuln.update.manage" ${r.excepted ? 'disabled' : ''} ${vulnUpdateSelectedPackages.has(r.package_name) ? 'checked' : ''} onchange="toggleVulnUpdateSelection('${escAttr(r.package_name)}', this.checked)"></td>
+          <td style="font-family:monospace;font-weight:600">${escHtml(r.package_name)}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.current_version)}</td>
+          <td style="font-family:monospace;font-size:12px;color:var(--accent)">${escHtml(r.candidate_version)}</td>
+          <td>${r.excepted ? '<span class="status warning"><span class="dot"></span>Ngoại lệ — không cập nhật</span>' : '<span class="status offline"><span class="dot"></span>Chờ cập nhật</span>'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  applyPermissionVisibility();
+}
+
+function toggleVulnUpdateSelection(pkg, checked) {
+  if (checked) vulnUpdateSelectedPackages.add(pkg);
+  else vulnUpdateSelectedPackages.delete(pkg);
+  renderVulnUpdatePendingRows();
+}
+
+function toggleAllVulnUpdateSelection(select) {
+  vulnUpdateSelectedPackages = select ? new Set(vulnUpdatePendingRows.filter(r => !r.excepted).map(r => r.package_name)) : new Set();
+  renderVulnUpdatePendingRows();
+}
+
+async function handleVulnCheckUpdates() {
+  const btn = document.getElementById('vulnUpdateCheckBtn');
+  btn.disabled = true;
+  btn.textContent = 'Đang kiểm tra… (có thể mất 20-30s)';
+  try {
+    const result = await api(`/vuln/vms/${vulnUpdateSelectedVmId}/check-updates`, 'POST');
+    if (result.updateError) toast(`apt update gặp lỗi: ${result.updateError.slice(0, 150)}`, 'error');
+    toast(`Tìm thấy ${result.packages.length} gói có bản cập nhật`, 'success');
+    vulnUpdateSelectedPackages = new Set();
+    await loadVulnUpdateData();
+  } catch (e) { toast(e.message, 'error'); }
+  finally {
+    if (document.getElementById('vulnUpdateCheckBtn')) { btn.disabled = false; btn.textContent = 'Kiểm tra update'; }
+  }
+}
+
+async function handleVulnApplyUpdates() {
+  const packages = [...vulnUpdateSelectedPackages];
+  if (!packages.length) return;
+  if (!confirm(`Cập nhật ${packages.length} gói trên VM này ngay bây giờ?\n\n${packages.join(', ')}\n\nLưu ý: có thể khởi động lại 1 số dịch vụ liên quan. Không thể hoàn tác.`)) return;
+  const wrap = document.getElementById('vulnUpdatePendingBody');
+  wrap.innerHTML = `<div class="loading"><div class="spinner"></div> Đang cập nhật, có thể mất vài phút...</div>`;
+  try {
+    const { results } = await api(`/vuln/vms/${vulnUpdateSelectedVmId}/apply-updates`, 'POST', { packages });
+    const okCount = results.filter(r => r.status === 'updated').length;
+    toast(`Đã cập nhật ${okCount}/${results.length} gói thành công`, okCount === results.length ? 'success' : 'error');
+    vulnUpdateSelectedPackages = new Set();
+    openVulnUpdateResultModal(results);
+    await loadVulnUpdateData();
+  } catch (e) { toast(e.message, 'error'); await loadVulnUpdateData(); }
+}
+
+function openVulnUpdateResultModal(results) {
+  openModal('Kết quả cập nhật', `
+    <table>
+      <thead><tr><th>Package</th><th>Trước</th><th>Sau</th><th>Trạng thái</th></tr></thead>
+      <tbody>${results.map(r => `
+        <tr>
+          <td style="font-family:monospace">${escHtml(r.package)}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.fromVersion || '—')}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.toVersion || '—')}</td>
+          <td>${r.status === 'updated' ? '<span class="status online"><span class="dot"></span>Đã cập nhật</span>' : `<span class="status offline" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Lỗi</span>`}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`);
+}
+
+function renderVulnUpdateHistory() {
+  const wrap = document.getElementById('vulnUpdateHistoryWrap');
+  if (!wrap) return;
+  if (!vulnUpdateHistoryRows.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = `
+    <div style="padding:14px 16px 6px;font-weight:600;font-size:13px">Lịch sử cập nhật</div>
+    <table>
+      <thead><tr><th>Thời gian</th><th>Package</th><th>Trước</th><th>Sau</th><th>Trạng thái</th><th>Người thực hiện</th></tr></thead>
+      <tbody>${vulnUpdateHistoryRows.slice(0, 50).map(r => `
+        <tr>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.applied_at)}</span></td>
+          <td style="font-family:monospace">${escHtml(r.package_name)}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.from_version || '—')}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(r.to_version || '—')}</td>
+          <td>${r.status === 'updated' ? '<span class="status online"><span class="dot"></span>Đã cập nhật</span>' : `<span class="status offline" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Lỗi</span>`}</td>
+          <td style="font-size:12px;color:var(--fg-dim)">${escHtml(r.applied_by || '—')}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+// ── Ngoại lệ cập nhật gói (global — không phân biệt VM, xem database.js's vuln_update_exceptions) ──
+function openVulnUpdateExceptionsModal() {
+  openModal('Ngoại lệ cập nhật gói', `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <p style="font-size:13px;color:var(--fg-dim);margin:0">Gói trong danh sách này sẽ không thể chọn để cập nhật ở bất kỳ VM nào.</p>
+      <form id="vulnUpdateExceptionForm" style="display:flex;gap:8px" onsubmit="submitVulnUpdateException(event)">
+        <input type="text" name="packageName" placeholder="Tên gói (vd: nginx)" style="flex:1" required>
+        <input type="text" name="note" placeholder="Ghi chú (tùy chọn)" style="flex:1">
+        <button type="submit" class="btn btn-primary btn-sm" data-permission="vuln.update.manage">Thêm</button>
+      </form>
+      <div id="vulnUpdateExceptionsListWrap"></div>
+    </div>`, 'detail-modal');
+  renderVulnUpdateExceptionsList();
+}
+
+function renderVulnUpdateExceptionsList() {
+  const wrap = document.getElementById('vulnUpdateExceptionsListWrap');
+  if (!wrap) return;
+  if (!vulnUpdateExceptions.length) { wrap.innerHTML = '<p style="font-size:13px;color:var(--fg-dim)">Chưa có ngoại lệ nào</p>'; applyPermissionVisibility(); return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Package</th><th>Ghi chú</th><th>Thêm bởi</th><th></th></tr></thead>
+    <tbody>${vulnUpdateExceptions.map(e => `
+      <tr>
+        <td style="font-family:monospace;font-weight:600">${escHtml(e.package_name)}</td>
+        <td style="font-size:12px;color:var(--fg-muted)">${escHtml(e.note || '—')}</td>
+        <td style="font-size:12px;color:var(--fg-dim)">${escHtml(e.created_by || '—')}</td>
+        <td><button class="btn-icon delete" data-permission="vuln.update.manage" onclick="deleteVulnUpdateException(${e.id})"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+  applyPermissionVisibility();
+}
+
+async function submitVulnUpdateException(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try {
+    await api('/vuln/update-exceptions', 'POST', { packageName: fd.get('packageName'), note: fd.get('note') });
+    toast('Đã thêm ngoại lệ', 'success');
+    vulnUpdateExceptions = await api('/vuln/update-exceptions');
+    renderVulnUpdateExceptionsList();
+    e.target.reset();
+    await loadVulnUpdateData();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteVulnUpdateException(id) {
+  if (!confirm('Xóa ngoại lệ này? Gói sẽ có thể được chọn để cập nhật trở lại.')) return;
+  try {
+    await api(`/vuln/update-exceptions/${id}`, 'DELETE');
+    toast('Đã xóa ngoại lệ', 'success');
+    vulnUpdateExceptions = await api('/vuln/update-exceptions');
+    renderVulnUpdateExceptionsList();
+    await loadVulnUpdateData();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 // ─── ACTIVITY ─────────────────────────────────────────────────────────────────
