@@ -1031,6 +1031,13 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE ssh_log_cursor ADD COLUMN last_byte_offset INT"); } catch (e) { if (e.errno !== 1060) throw e; }
   // Last "Kiểm tra update" (apt-get update) run, per VM — see apt-update-manager.js.
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN update_checked_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // A newly-installed kernel (or a handful of other packages like libc) doesn't show up in "Kiểm tra
+  // update" at all once installed — it needs a reboot to actually take effect, tracked separately by
+  // Debian/Ubuntu via /var/run/reboot-required(.pkgs), not the package-upgrade mechanism. See
+  // apt-update-manager.js's checkUpdates/parseCheckOutput — confirmed against a real VM whose newest
+  // kernel package was already installed and waiting on reboot, with zero "upgradable" entries for it.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN reboot_required TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN reboot_required_packages TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

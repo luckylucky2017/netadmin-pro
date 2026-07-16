@@ -12,7 +12,7 @@ router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id, ssh_user, ssh_port,
            vuln_scan_enabled, vuln_scan_mode, vuln_last_scanned_at, vuln_scan_status, vuln_scan_error, vuln_package_count,
-           update_checked_at
+           update_checked_at, reboot_required, reboot_required_packages
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
@@ -105,9 +105,10 @@ router.post('/vms/:id/check-updates', requirePermission('vuln.update.manage'), a
     return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
   }
   try {
-    const { packages, updateError } = await aptUpdateManager.checkUpdates(vm);
-    await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Kiểm tra update — tìm thấy ${packages.length} gói có bản cập nhật`);
-    res.json({ packages, updateError });
+    const { packages, updateError, rebootRequired, rebootPackages } = await aptUpdateManager.checkUpdates(vm);
+    await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
+      `Kiểm tra update — tìm thấy ${packages.length} gói có bản cập nhật${rebootRequired ? ', VM cần khởi động lại' : ''}`);
+    res.json({ packages, updateError, rebootRequired, rebootPackages });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

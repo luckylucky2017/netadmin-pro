@@ -6803,6 +6803,7 @@ async function renderVulnUpdates() {
           <button class="btn btn-secondary btn-sm" onclick="openVulnUpdateExceptionsModal()">Quản lý ngoại lệ (${vulnUpdateExceptions.length})</button>
           <span id="vulnUpdateCheckedAt" style="font-size:12px;color:var(--fg-dim);margin-left:auto"></span>
         </div>
+        <div id="vulnUpdateRebootBanner"></div>
         <div id="vulnUpdatePendingBody"></div>
         <div id="vulnUpdateHistoryWrap" style="border-top:1px solid var(--border)"></div>
       </div>`;
@@ -6838,10 +6839,30 @@ async function loadVulnUpdateData() {
     const vm = vulnUpdateVms.find(v => v.id === vulnUpdateSelectedVmId);
     const checkedAtEl = document.getElementById('vulnUpdateCheckedAt');
     if (checkedAtEl) checkedAtEl.textContent = vm?.update_checked_at ? `Kiểm tra lần cuối: ${formatTime(vm.update_checked_at)}` : 'Chưa kiểm tra lần nào';
+    renderVulnUpdateRebootBanner(vm);
     renderVulnUpdatePendingRows();
     renderVulnUpdateHistory();
     applyPermissionVisibility();
   } catch (e) { wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+}
+
+// A newly-installed kernel (or libc, etc.) commonly never appears in the pending-updates table at
+// all — apt already considers it fully up to date once dpkg has installed it; it's just not the
+// RUNNING kernel/library yet. Surfaced separately here from /var/run/reboot-required(.pkgs) — see
+// apt-update-manager.js's parseCheckOutput for why this is a different signal than "upgradable".
+function renderVulnUpdateRebootBanner(vm) {
+  const wrap = document.getElementById('vulnUpdateRebootBanner');
+  if (!wrap) return;
+  if (!vm?.reboot_required) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = `
+    <div style="margin:0 16px 12px;padding:12px 14px;background:var(--yellow-dim);border:1px solid var(--yellow);border-radius:var(--radius);display:flex;gap:10px;align-items:flex-start">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="2" style="flex-shrink:0;margin-top:1px"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+      <div style="font-size:13px">
+        <strong>VM cần khởi động lại</strong> — đã có bản cập nhật (thường là kernel) cài xong nhưng chưa chạy vì VM chưa reboot. Đây là lý do gói kernel không xuất hiện trong danh sách "Kiểm tra update" ở dưới — nó đã cài rồi, chỉ đang chờ khởi động lại để áp dụng.
+        ${vm.reboot_required_packages ? `<div style="margin-top:4px;font-family:monospace;font-size:12px;color:var(--fg-muted)">${escHtml(vm.reboot_required_packages)}</div>` : ''}
+        <div style="margin-top:6px;color:var(--fg-dim)">Khởi động lại VM ở trang vCenter (nút quyền lực trên hàng VM tương ứng).</div>
+      </div>
+    </div>`;
 }
 
 function renderVulnUpdatePendingRows() {
@@ -6893,6 +6914,7 @@ async function handleVulnCheckUpdates() {
     const result = await api(`/vuln/vms/${vulnUpdateSelectedVmId}/check-updates`, 'POST');
     if (result.updateError) toast(`apt update gặp lỗi: ${result.updateError.slice(0, 150)}`, 'error');
     toast(`Tìm thấy ${result.packages.length} gói có bản cập nhật`, 'success');
+    if (result.rebootRequired) toast('VM cần khởi động lại để áp dụng bản cập nhật đã cài (thường là kernel)', 'info');
     vulnUpdateSelectedPackages = new Set();
     await loadVulnUpdateData();
   } catch (e) { toast(e.message, 'error'); }
