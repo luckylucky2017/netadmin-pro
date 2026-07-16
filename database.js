@@ -330,12 +330,15 @@ const SCHEMA_SQL = `
     PRIMARY KEY (firewall_id, username)
   );
 
-  -- One row per VM/server being SSH-monitored: remembers how many lines of the guest's auth log
-  -- have already been parsed, so each collection cycle only reads new lines (never the full log).
+  -- One row per VM/server being SSH-monitored: remembers how far into the guest's auth log
+  -- ssh-security-collector.js has already parsed, so each collection cycle only reads new bytes
+  -- (never the full log). last_byte_offset is the live cursor (see that file's header comment for
+  -- why byte offset, not line count) — last_line_count is legacy/unused, kept rather than dropped.
   CREATE TABLE IF NOT EXISTS ssh_log_cursor (
     source_type VARCHAR(20) NOT NULL,
     source_id INT NOT NULL,
     last_line_count INT NOT NULL DEFAULT 0,
+    last_byte_offset INT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_type, source_id)
   );
@@ -971,6 +974,12 @@ async function ensureSchemaAndMigrations() {
   // comment above and vuln-scanner.js's extractFixedVersion.
   try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN details TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN fixed_version VARCHAR(150)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Byte-offset cursor for ssh-security-collector.js — replaces the old wc-l/tail-n line-count
+  // approach (last_line_count, still present but unused going forward) which required reading the
+  // ENTIRE auth.log/secure just to count lines on every ~45s poll; real, reported CPU load on busy
+  // VMs. See nginx-waf-collector.js's header comment, which already documents/solved the same issue
+  // for its own log-tailing — this migration ports the same stat-c%s + tail-c+N technique here.
+  try { await pool.query("ALTER TABLE ssh_log_cursor ADD COLUMN last_byte_offset INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

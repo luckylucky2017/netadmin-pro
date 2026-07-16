@@ -10,15 +10,74 @@ const fail2banManager = require('./fail2ban-manager');
 
 // Ubuntu/Debian log to auth.log, RHEL/CentOS to secure — try both, first one that exists wins.
 // Both are root-only (0600), so every read goes through `sudo -n` — the target VM needs a scoped
-// NOPASSWD sudoers rule for exactly these tail/wc invocations (see routes/security.js docs / the
+// NOPASSWD sudoers rule for exactly these tail/stat invocations (see routes/security.js docs / the
 // "Quản lý VM giám sát" panel for the exact line to add). `-n` means a VM without that rule just
 // silently produces no output here rather than hanging on a password prompt.
-const DETECT_SCRIPT = `
+//
+// Cursor is tracked by BYTE OFFSET (ssh_log_cursor.last_byte_offset), not line count — `wc -l` is
+// O(file size), reading the ENTIRE auth.log just to count lines on every ~45s poll, which caused
+// real, reported CPU load on busy/actively-scanned VMs (auth.log grows fast under a brute-force
+// attempt — exactly the situation this collector exists to catch). `stat -c %s` (O(1), inode
+// metadata only) + `tail -c +N` (seeks directly to a byte offset, no scan) read zero log content
+// when nothing new has been written since the last poll, and only the genuinely new bytes otherwise.
+// Mirrors the same fix already applied to nginx-waf-collector.js — see that file's header comment.
+const INITIAL_LOOKBACK_BYTES = 100000; // ~100KB bounded first-ever read — comfortably covers several hundred auth.log lines without scanning full history
+
+// offset === null means "never polled before": read a bounded recent chunk (tail -c N, seeks from
+// the end, still O(1)) instead of the whole file. Otherwise only tail if SIZE has actually grown
+// past offset — if the file was rotated/truncated since our last poll (SIZE <= offset), skip the
+// tail entirely this round rather than fetching a bounded lookback chunk just to discard it; the
+// caller (collectVm) detects rotation from SIZE alone and realigns nextOffset without reading
+// anything for that poll, matching nginx-waf-collector.js's buildBatchTailScript exactly. Both
+// branches live in the SAME script (guarded by one SIZE comparison) so detect+conditional-tail is
+// always one SSH round trip, not two.
+function buildDetectAndTailScript(offset) {
+  const isInitial = offset === null;
+  const tailCmd = isInitial
+    ? `sudo -n tail -c ${INITIAL_LOOKBACK_BYTES} "$f" 2>/dev/null || tail -c ${INITIAL_LOOKBACK_BYTES} "$f" 2>/dev/null`
+    : `sudo -n tail -c +$((${offset} + 1)) "$f" 2>/dev/null || tail -c +$((${offset} + 1)) "$f" 2>/dev/null`;
+  const minSize = isInitial ? 0 : offset;
+  return `
 for f in /var/log/auth.log /var/log/secure; do
-  if [ -f "$f" ]; then echo "LOGFILE:$f"; sudo -n wc -l "$f" 2>/dev/null | awk '{print $1}'; exit 0; fi
+  if [ -f "$f" ]; then
+    echo "LOGFILE:$f"
+    SIZE=$(sudo -n stat -c '%s' "$f" 2>/dev/null)
+    if [ -z "$SIZE" ]; then SIZE=$(stat -c '%s' "$f" 2>/dev/null); fi
+    if [ -z "$SIZE" ]; then echo "SIZE:error"; exit 0; fi
+    echo "SIZE:$SIZE"
+    if [ "$SIZE" -gt ${minSize} ]; then
+      ${tailCmd}
+    fi
+    exit 0
+  fi
 done
 echo "LOGFILE:none"
 `.trim();
+}
+
+// Pure, testable: splits buildDetectAndTailScript's combined stdout into { logfile, sizeToken, chunk }.
+function parseDetectAndTailOutput(stdout) {
+  const logfile = /^LOGFILE:(\S+)/m.exec(stdout || '')?.[1] || null;
+  if (!logfile || logfile === 'none') return { logfile, sizeToken: null, chunk: '' };
+  const lines = (stdout || '').split('\n');
+  const sizeLineIdx = lines.findIndex((l) => l.startsWith('SIZE:'));
+  if (sizeLineIdx === -1) return { logfile, sizeToken: null, chunk: '' };
+  return { logfile, sizeToken: lines[sizeLineIdx].slice(5).trim(), chunk: lines.slice(sizeLineIdx + 1).join('\n') };
+}
+
+// tail -c N (the bounded lookback read) cuts at an arbitrary BYTE position, not a line boundary —
+// its first "line" is very likely a partial fragment missing its own beginning. Strips that
+// fragment so it's never mis-parsed as a real (truncated) log line; the caller must advance its
+// offset bookkeeping by skippedBytes to stay accurate. Incremental reads (tail -c +N) never need
+// this — their offset is always exactly at a newline boundary carried over from the previous poll.
+// (Local copy of nginx-waf-collector.js's identical helper — not imported from there, since that
+// file already requires FROM this one (classifyIp), and importing back would be circular.)
+function stripPartialFirstLine(chunk) {
+  const firstNewlineIdx = chunk.indexOf('\n');
+  if (firstNewlineIdx === -1) return { skippedBytes: Buffer.byteLength(chunk, 'utf8'), cleanedChunk: '' };
+  const skipped = chunk.slice(0, firstNewlineIdx + 1);
+  return { skippedBytes: Buffer.byteLength(skipped, 'utf8'), cleanedChunk: chunk.slice(firstNewlineIdx + 1) };
+}
 
 const RE_ACCEPTED = /Accepted (?:password|publickey|keyboard-interactive\/pam) for (\S+) from ([0-9a-fA-F.:]+) port (\d+)/;
 // Some PAM/2FA setups fail via the keyboard-interactive prompt rather than plain password auth —
@@ -82,13 +141,11 @@ const insertEvent = db.prepare(`
   INSERT INTO ssh_login_events (source_type, source_id, source_name, event_type, username, src_ip, country, is_foreign, occurred_at)
   VALUES ('vm', ?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const getCursor = db.prepare('SELECT last_line_count FROM ssh_log_cursor WHERE source_type = ? AND source_id = ?');
+const getCursor = db.prepare('SELECT last_byte_offset FROM ssh_log_cursor WHERE source_type = ? AND source_id = ?');
 const upsertCursor = db.prepare(`
-  INSERT INTO ssh_log_cursor (source_type, source_id, last_line_count, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-  ON DUPLICATE KEY UPDATE last_line_count = VALUES(last_line_count), updated_at = CURRENT_TIMESTAMP
+  INSERT INTO ssh_log_cursor (source_type, source_id, last_byte_offset, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+  ON DUPLICATE KEY UPDATE last_byte_offset = VALUES(last_byte_offset), updated_at = CURRENT_TIMESTAMP
 `);
-
-const INITIAL_LOOKBACK_LINES = 200;
 // ssh_brute_force_window_sec/ssh_brute_force_threshold/ssh_block_foreign_immediately used to be
 // hardcoded here (60s/5/always-on) — now resolved per-VM via fail2ban-config.js's
 // getEffectiveConfig, editable from the "Cấu hình Fail2ban" admin page. Retuned once already against
@@ -197,44 +254,47 @@ async function collectVm(vm) {
   try {
     await ssh.connect(opts);
 
-    const detect = await ssh.execCommand(DETECT_SCRIPT);
-    const logfile = /^LOGFILE:(\S+)/m.exec(detect.stdout)?.[1];
+    const cursor = await getCursor.get('vm', vm.id);
+    const offset = cursor?.last_byte_offset ?? null;
+    const detect = await ssh.execCommand(buildDetectAndTailScript(offset));
+    const { logfile, sizeToken, chunk } = parseDetectAndTailOutput(detect.stdout);
     if (!logfile || logfile === 'none') return;
-    const lineCountRaw = detect.stdout.trim().split('\n')[1];
-    if (!/^\d+$/.test(lineCountRaw || '')) {
+    if (!sizeToken || sizeToken === 'error' || !/^\d+$/.test(sizeToken)) {
       // sudo -n failed silently (no NOPASSWD rule on this VM yet) — nothing to parse until it's
       // provisioned; log once so it's visible instead of quietly producing zero events forever.
       console.warn(`[ssh-security] ${vm.name}: không đọc được ${logfile} — cần cấu hình sudoers NOPASSWD cho user "${vm.ssh_user}" (xem trang Giám sát bất thường)`);
       return;
     }
-    const totalLines = Number(lineCountRaw);
+    const newSize = Number(sizeToken);
+    const isInitial = offset === null;
+    const rotated = !isInitial && newSize < offset; // logrotate truncated/renamed the file since last poll
+    let nextOffset = (isInitial || rotated) ? Math.max(0, newSize - INITIAL_LOOKBACK_BYTES) : offset;
 
-    const cursor = await getCursor.get('vm', vm.id);
-    let startLine;
-    if (!cursor) {
-      // First-ever collection for this VM: seed with a bounded recent lookback instead of the
-      // whole history, then only new lines are read from here on.
-      startLine = Math.max(0, totalLines - INITIAL_LOOKBACK_LINES);
-    } else if (totalLines < cursor.last_line_count) {
-      // Log rotated (logrotate truncates/renames auth.log) — current file is shorter than what
-      // we'd already read. Read the new file from the start rather than skipping the gap.
-      startLine = 0;
-    } else {
-      startLine = cursor.last_line_count;
-    }
-
-    if (totalLines > startLine) {
-      const tail = await ssh.execCommand(`sudo -n tail -n +$((${startLine} + 1)) "${logfile}"`);
-      for (const line of tail.stdout.split('\n').filter(Boolean)) {
-        const parsed = parseLine(line);
-        if (!parsed) continue;
-        const { country, isForeign } = classifyIp(parsed.ip);
-        await insertEvent.run(vm.id, vm.name, parsed.eventType, parsed.username, parsed.ip, country, isForeign, toSqlDatetime(parseSyslogTimestamp(line)));
-        if (parsed.eventType === 'accepted' && isForeign) await raiseForeignLoginAlert(vm, parsed, country);
+    if (!rotated && chunk) {
+      let effectiveChunk = chunk;
+      if (isInitial) {
+        const { skippedBytes, cleanedChunk } = stripPartialFirstLine(chunk);
+        nextOffset += skippedBytes;
+        effectiveChunk = cleanedChunk;
       }
-      await checkBruteForce(vm, ssh, await fail2banConfig.getEffectiveConfig(vm.id));
+      const lastNewlineIdx = effectiveChunk.lastIndexOf('\n');
+      if (lastNewlineIdx !== -1) {
+        // Only advance the cursor past COMPLETE lines — a trailing fragment with no newline yet is
+        // either the log mid-write or an unusually long single line; leave it for the next poll
+        // rather than risk splitting a line across two batches.
+        const consumedText = effectiveChunk.slice(0, lastNewlineIdx + 1);
+        nextOffset += Buffer.byteLength(consumedText, 'utf8');
+        for (const line of consumedText.split('\n').filter(Boolean)) {
+          const parsed = parseLine(line);
+          if (!parsed) continue;
+          const { country, isForeign } = classifyIp(parsed.ip);
+          await insertEvent.run(vm.id, vm.name, parsed.eventType, parsed.username, parsed.ip, country, isForeign, toSqlDatetime(parseSyslogTimestamp(line)));
+          if (parsed.eventType === 'accepted' && isForeign) await raiseForeignLoginAlert(vm, parsed, country);
+        }
+        await checkBruteForce(vm, ssh, await fail2banConfig.getEffectiveConfig(vm.id));
+      }
     }
-    await upsertCursor.run('vm', vm.id, totalLines);
+    await upsertCursor.run('vm', vm.id, nextOffset);
   } catch (e) {
     console.error(`[ssh-security] ${vm.name} (${vm.ip_address}): ${e.message}`);
   } finally {
@@ -261,4 +321,7 @@ function start(intervalMs = 45000) {
   return setInterval(tick, intervalMs);
 }
 
-module.exports = { start, collectAll, collectVm, parseLine, classifyIp, checkBruteForce };
+module.exports = {
+  start, collectAll, collectVm, parseLine, classifyIp, checkBruteForce,
+  buildDetectAndTailScript, parseDetectAndTailOutput, stripPartialFirstLine,
+};
