@@ -12,6 +12,7 @@ const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
 const vulnScanner = require('./vuln-scanner');
+const rebootStatus = require('./reboot-status');
 
 // Debian package-name policy (lowercase letters/digits, plus + . -, must start alnum) — real dpkg
 // names can never contain shell metacharacters, so this doubles as both a sanity check (rejects a
@@ -31,20 +32,15 @@ sudo -n apt-get update 2>&1
 echo "===UPGRADABLE==="
 apt list --upgradable 2>/dev/null | tail -n +2
 echo "===REBOOTREQUIRED==="
-if [ -f /var/run/reboot-required ]; then
-  echo "YES"
-  cat /var/run/reboot-required.pkgs 2>/dev/null | sort -u
-fi
+${rebootStatus.REBOOT_CHECK_CMD}
 `.trim();
 
 // Pure, testable: splits CHECK_SCRIPT's stdout into { family, aptUpdateOutput, packages,
 // rebootRequired, rebootPackages }. `apt list --upgradable` lines look like:
 //   pkgname/repo,repo2 newversion arch [upgradable from: oldversion]
-// A newly-installed kernel commonly does NOT show up as "upgradable" at all — apt already
-// considers the kernel package itself fully up to date (dpkg installed it), it's just not the
-// RUNNING kernel yet. Debian/Ubuntu track this separately via /var/run/reboot-required(.pkgs), not
-// via the package-upgrade mechanism at all — confirmed against a real VM where linux-image-* showed
-// no pending "upgradable" entry despite a newer kernel already being installed and waiting on reboot.
+// The REBOOTREQUIRED section is parsed via reboot-status.js's shared parser (same CHECK_SCRIPT
+// fragment, reboot-status.js's REBOOT_CHECK_CMD, produces it) — see that module's header comment for
+// why a newly-installed kernel doesn't show up as "upgradable" at all.
 function parseCheckOutput(stdout) {
   const family = /^FAMILY:(\S+)/m.exec(stdout || '')?.[1] || 'unknown';
   if (family !== 'debian') return { family, aptUpdateOutput: '', packages: [], rebootRequired: false, rebootPackages: [] };
@@ -64,13 +60,9 @@ function parseCheckOutput(stdout) {
       if (m) packages.push({ name: m[1], candidateVersion: m[2], currentVersion: m[3].trim() });
     }
   }
-  let rebootRequired = false;
-  let rebootPackages = [];
-  if (rebootIdx !== -1) {
-    const rebootLines = stdout.slice(rebootIdx + '===REBOOTREQUIRED==='.length).split('\n').map((l) => l.trim()).filter(Boolean);
-    rebootRequired = rebootLines[0] === 'YES';
-    if (rebootRequired) rebootPackages = rebootLines.slice(1);
-  }
+  const { rebootRequired, rebootPackages } = rebootIdx !== -1
+    ? rebootStatus.parseRebootCheckOutput(stdout.slice(rebootIdx + '===REBOOTREQUIRED==='.length))
+    : { rebootRequired: false, rebootPackages: [] };
   return { family, aptUpdateOutput, packages, rebootRequired, rebootPackages };
 }
 
@@ -133,9 +125,7 @@ const insertHistory = db.prepare(`
   INSERT INTO vuln_update_history (vm_id, vm_name, package_name, from_version, to_version, status, error, applied_by)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const setUpdateCheckedAt = db.prepare(`
-  UPDATE vcenter_vms SET update_checked_at = CURRENT_TIMESTAMP, reboot_required = ?, reboot_required_packages = ? WHERE id = ?
-`);
+const setUpdateCheckedAt = db.prepare('UPDATE vcenter_vms SET update_checked_at = CURRENT_TIMESTAMP WHERE id = ?');
 
 async function getExceptionSet() {
   const rows = await db.prepare('SELECT package_name FROM vuln_update_exceptions').all();
@@ -165,7 +155,8 @@ async function checkUpdates(vm) {
     for (const pkg of packages) {
       await insertPending.run(vm.id, vm.name, pkg.name, pkg.currentVersion, pkg.candidateVersion);
     }
-    await setUpdateCheckedAt.run(rebootRequired ? 1 : 0, rebootPackages.join(', ') || null, vm.id);
+    await setUpdateCheckedAt.run(vm.id);
+    await rebootStatus.recordRebootStatus(vm, rebootRequired, rebootPackages);
     return {
       packages: packages.map((p) => ({ ...p, excepted: exceptions.has(p.name) })),
       updateError,

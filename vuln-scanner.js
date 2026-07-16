@@ -9,6 +9,7 @@
 const { NodeSSH } = require('node-ssh');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
+const rebootStatus = require('./reboot-status');
 
 const OSV_API = 'https://api.osv.dev/v1';
 const OSV_BATCH_CHUNK = 500; // OSV's documented batch limit is 1000 queries/request — chunk well under that
@@ -194,6 +195,16 @@ async function scanVm(vm, detailCache) {
     if (family === 'unknown' || !packages.length) {
       await setVmStatus.run('error', 'Không xác định được trình quản lý gói (dpkg/rpm) trên VM này', 0, vm.id);
       return;
+    }
+    // Piggybacked on this same SSH session (one extra cheap command, no new connection) so
+    // reboot-required status stays fresh automatically every scan cycle (~12h for 'auto' VMs, or
+    // whenever scan-now/apply-updates runs) rather than only ever being discovered if an admin
+    // happens to click "Kiểm tra update" — see reboot-status.js for why this is checked separately
+    // from the package-upgrade list at all, and how it becomes a standing alert.
+    if (family === 'debian') {
+      const rebootResult = await ssh.execCommand(rebootStatus.REBOOT_CHECK_CMD);
+      const { rebootRequired, rebootPackages } = rebootStatus.parseRebootCheckOutput(rebootResult.stdout);
+      await rebootStatus.recordRebootStatus(vm, rebootRequired, rebootPackages);
     }
     const ecosystem = buildEcosystem(osId, osVersion);
     if (!ecosystem) {
