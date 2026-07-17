@@ -6881,7 +6881,7 @@ function renderVulnManageRows() {
   const rows = paginateRows(sorted, vulnManagePagination);
   const rowOffset = (vulnManagePagination.page - 1) * vulnManagePagination.pageSize;
   wrap.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('Tên VM', 'name', vulnManageSortState, 'toggleVulnManageSort')}<th>IP</th><th>Bật quét</th><th>Chế độ</th><th>Trạng thái</th><th>Số gói đã quét</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', vulnManageSortState, 'toggleVulnManageSort')}${thSort('IP', 'ip_address', vulnManageSortState, 'toggleVulnManageSort')}${thSort('Bật quét', 'vuln_scan_enabled', vulnManageSortState, 'toggleVulnManageSort')}${thSort('Chế độ', 'vuln_scan_mode', vulnManageSortState, 'toggleVulnManageSort')}${thSort('Trạng thái', 'vuln_scan_status', vulnManageSortState, 'toggleVulnManageSort')}${thSort('Số gói đã quét', 'vuln_package_count', vulnManageSortState, 'toggleVulnManageSort')}${thSort('Quét lần cuối', 'vuln_last_scanned_at', vulnManageSortState, 'toggleVulnManageSort')}<th>Hành động</th></tr></thead>
     <tbody>${rows.map((v, i) => {
       const eligible = !!v.ssh_credential_id;
       const status = v.vuln_scan_status || 'unknown';
