@@ -52,6 +52,22 @@ router.post('/vms/:id/install', requirePermission('trivy.scan.manage'), async (r
   res.json(result);
 });
 
+// Read-only listing (no DB write, no logActivity — same reasoning as GET /findings/:id/nvd) so the
+// path picker can suggest real directories under /opt and /data instead of making the admin type one.
+router.post('/vms/:id/discover-paths', requirePermission('trivy.scan.manage'), async (req, res) => {
+  const vm = await db.prepare('SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
+  if (!vm.ssh_credential_id || !vm.ip_address) {
+    return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
+  }
+  try {
+    const result = await trivyScanner.discoverPaths(vm);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/vms/:id/scan-now', requirePermission('trivy.scan.manage'), async (req, res) => {
   const vm = await db.prepare(`
     SELECT id, name, ip_address, ssh_credential_id, ssh_port, trivy_scan_path FROM vcenter_vms WHERE id = ?

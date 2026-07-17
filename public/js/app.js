@@ -7239,6 +7239,20 @@ let trivyVms = [];
 let trivySearch = '';
 let trivyPagination = newPagination();
 let trivySortState = { key: null, dir: 'asc' };
+// Most apps here live directly under /opt or /data (per admin) — offered as always-present fallback
+// options in the path picker even before "Dò tìm" has been run for a given VM.
+const TRIVY_PRESET_PATHS = ['/opt', '/data'];
+let trivyDiscoveredPaths = {}; // vmId -> string[] real subdirectories found via SSH, session-only cache
+
+function trivyPathOptions(v) {
+  const discovered = trivyDiscoveredPaths[v.id] || [];
+  const current = v.trivy_scan_path || '';
+  const known = new Set(TRIVY_PRESET_PATHS.concat(discovered));
+  if (current) known.add(current);
+  const sorted = [...known].sort();
+  return sorted.map(p => `<option value="${escAttr(p)}" ${p === current ? 'selected' : ''}>${escHtml(p)}</option>`).join('')
+    + `<option value="__custom__">Khác (nhập tay)...</option>`;
+}
 
 async function renderTrivyTab() {
   const body = document.getElementById('vulnTabBody');
@@ -7292,7 +7306,15 @@ function renderTrivyRows() {
       return `<tr data-vm-id="${v.id}">
         <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
         <td style="font-weight:600">${escHtml(v.name)}</td>
-        <td><input type="text" class="trivy-path" data-id="${v.id}" placeholder="/opt/myapp" value="${escAttr(v.trivy_scan_path || '')}" style="min-width:200px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:4px;min-width:200px">
+            <select class="trivy-path-select" data-id="${v.id}" onchange="onTrivyPathSelectChange(${v.id})" style="font-size:12px;padding:4px 8px;font-family:monospace" ${eligible ? '' : 'disabled'}>
+              ${trivyPathOptions(v)}
+            </select>
+            <input type="text" class="trivy-path-custom" data-id="${v.id}" placeholder="/duong/dan/tuy-chinh" style="display:none;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}>
+            <button type="button" onclick="discoverTrivyPaths(${v.id}, this)" style="font-size:11px;text-align:left;padding:0;background:none;border:none;color:var(--accent);cursor:pointer" ${eligible ? '' : 'disabled'}>Dò tìm thư mục trên VM (/opt, /data)</button>
+          </div>
+        </td>
         <td>
           <label class="toggle-switch" data-permission="trivy.scan.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}">
             <input type="checkbox" class="trivy-enabled" data-id="${v.id}" ${checked ? 'checked' : ''} ${eligible ? '' : 'disabled'}>
@@ -7326,13 +7348,44 @@ function renderTrivyRows() {
   applyPermissionVisibility();
 }
 
+function onTrivyPathSelectChange(id) {
+  const sel = document.querySelector(`.trivy-path-select[data-id="${id}"]`);
+  const custom = document.querySelector(`.trivy-path-custom[data-id="${id}"]`);
+  if (!sel || !custom) return;
+  const isCustom = sel.value === '__custom__';
+  custom.style.display = isCustom ? 'block' : 'none';
+  if (isCustom) custom.focus();
+}
+
+async function discoverTrivyPaths(id, btn) {
+  const sel = document.querySelector(`.trivy-path-select[data-id="${id}"]`);
+  const prevValue = sel?.value;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang dò tìm…';
+  try {
+    const result = await api(`/trivy/vms/${id}/discover-paths`, 'POST');
+    trivyDiscoveredPaths[id] = result.paths || [];
+    const vm = trivyVms.find(v => v.id === id);
+    if (sel && vm) {
+      sel.innerHTML = trivyPathOptions(vm);
+      if (prevValue && [...sel.options].some(o => o.value === prevValue)) sel.value = prevValue;
+      onTrivyPathSelectChange(id);
+    }
+    toast(trivyDiscoveredPaths[id].length ? `Tìm thấy ${trivyDiscoveredPaths[id].length} thư mục dưới /opt, /data` : 'Không tìm thấy thư mục con nào dưới /opt, /data', trivyDiscoveredPaths[id].length ? 'success' : 'info');
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false; btn.textContent = original;
+}
+
 async function saveTrivyConfig(id, btn) {
   const enabledCb = document.querySelector(`.trivy-enabled[data-id="${id}"]`);
-  const pathInput = document.querySelector(`.trivy-path[data-id="${id}"]`);
+  const sel = document.querySelector(`.trivy-path-select[data-id="${id}"]`);
+  const customInput = document.querySelector(`.trivy-path-custom[data-id="${id}"]`);
   const modeSelect = document.querySelector(`.trivy-mode[data-id="${id}"]`);
   const enabled = !!enabledCb?.checked;
-  const scanPath = pathInput?.value.trim() || '';
+  const scanPath = (sel?.value === '__custom__' ? customInput?.value : sel?.value)?.trim() || '';
   const mode = modeSelect?.value === 'manual' ? 'manual' : 'auto';
+  if (enabled && !scanPath) { toast('Cần chọn hoặc nhập đường dẫn thư mục mã nguồn', 'error'); return; }
   btn.disabled = true;
   try {
     await api(`/trivy/vms/${id}`, 'PATCH', { enabled, scanPath, mode });

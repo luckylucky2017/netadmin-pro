@@ -199,6 +199,36 @@ async function installTrivy(vm) {
   }
 }
 
+// Read-only reconnaissance for the "chọn đường dẫn" dropdown in the UI — most apps this admin runs
+// live directly under /opt or /data (confirmed by the user), so rather than making them type a path
+// from memory, list what's actually there and let them pick. No user input reaches this command (the
+// two base dirs are hardcoded), so no shell-escaping is needed the way buildScanScript needs it.
+const DISCOVER_PATHS_SCRIPT = `
+for base in /opt /data; do
+  if [ -d "$base" ]; then
+    find "$base" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
+  fi
+done
+`.trim();
+
+function parseDiscoverPathsOutput(stdout) {
+  const lines = String(stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  return [...new Set(lines)].sort();
+}
+
+async function discoverPaths(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) throw new Error('Chưa gán tài khoản kết nối SSH');
+  const ssh = new NodeSSH();
+  try {
+    await ssh.connect(opts);
+    const result = await ssh.execCommand(DISCOVER_PATHS_SCRIPT);
+    return { paths: parseDiscoverPathsOutput(result.stdout) };
+  } finally {
+    ssh.dispose();
+  }
+}
+
 async function collectAll() {
   // trivy_scan_mode = 'manual' VMs excluded here, same reasoning as vuln-scanner.js's collectAll —
   // only ever scanned via the explicit "Quét ngay" route.
@@ -220,6 +250,7 @@ function start(intervalMs = TICK_MS) {
 }
 
 module.exports = {
-  start, collectAll, scanVm, installTrivy,
-  parseTrivyScanOutput, buildScanScript, INSTALL_SCRIPT, SUDOERS_HINT,
+  start, collectAll, scanVm, installTrivy, discoverPaths,
+  parseTrivyScanOutput, buildScanScript, parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
+  INSTALL_SCRIPT, SUDOERS_HINT,
 };
