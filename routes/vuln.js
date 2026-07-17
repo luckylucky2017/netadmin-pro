@@ -119,6 +119,52 @@ router.post('/findings/:id/update-now', requirePermission('vuln.update.manage'),
   }
 });
 
+// Same one-click remediation as above, but for a batch of findings selected via checkboxes on the
+// findings table — can span multiple VMs at once. Groups by VM and runs ONE checkUpdates +
+// ONE applyUpdates per VM (covering every selected package on that VM together), not one round trip
+// per finding — a user selecting 5 findings on the same VM shouldn't trigger 5 separate apt-get
+// update runs. VMs are processed sequentially (not in parallel) — same reasoning as every other
+// multi-VM batch in this app (e.g. vuln-scanner.js's collectAll): several concurrent SSH+apt sessions
+// against different VMs is fine for reads, but piling up concurrent package-install actions has more
+// blast-radius if something goes wrong, and there's no time-sensitivity here that needs parallelism.
+router.post('/findings/bulk-update-now', requirePermission('vuln.update.manage'), async (req, res) => {
+  const findingIds = Array.isArray(req.body?.findingIds) ? req.body.findingIds.map(Number).filter(Number.isInteger) : [];
+  if (!findingIds.length) return res.status(400).json({ error: 'Chưa chọn lỗ hổng nào' });
+  const findings = await db.prepare(`
+    SELECT id, vm_id, package_name FROM vuln_findings WHERE id IN (${findingIds.map(() => '?').join(',')})
+  `).all(...findingIds);
+  if (!findings.length) return res.status(404).json({ error: 'Không tìm thấy lỗ hổng nào khớp' });
+
+  const packagesByVm = new Map();
+  for (const f of findings) {
+    if (!packagesByVm.has(f.vm_id)) packagesByVm.set(f.vm_id, new Set());
+    packagesByVm.get(f.vm_id).add(f.package_name);
+  }
+
+  const results = [];
+  const vmErrors = [];
+  for (const [vmId, packageSet] of packagesByVm) {
+    const vm = await db.prepare(`
+      SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?
+    `).get(vmId);
+    if (!vm) { vmErrors.push({ vmName: `VM #${vmId}`, error: 'Không tìm thấy VM' }); continue; }
+    if (!vm.ssh_credential_id || !vm.ip_address) {
+      vmErrors.push({ vmName: vm.name, error: 'Chưa có tài khoản kết nối SSH' });
+      continue;
+    }
+    try {
+      await aptUpdateManager.checkUpdates(vm);
+      const { results: vmResults, skipped } = await aptUpdateManager.applyUpdates(vm, [...packageSet], req.user);
+      results.push(...vmResults.map((r) => ({ ...r, vmName: vm.name, vmId: vm.id })));
+      if (skipped) vmErrors.push({ vmName: vm.name, error: `${skipped} gói bị loại vì nằm trong danh sách Ngoại lệ` });
+      await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Cập nhật hàng loạt ${vmResults.length} gói từ trang lỗ hổng`);
+    } catch (e) {
+      vmErrors.push({ vmName: vm.name, error: e.message });
+    }
+  }
+  res.json({ results, vmErrors });
+});
+
 // ── Package update management ("Cập nhật gói" tab) ──────────────────────────────────────────
 
 // Last check-updates snapshot for a VM — pure DB read, backs the tab on page load/refresh (never

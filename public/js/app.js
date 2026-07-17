@@ -6503,6 +6503,7 @@ let vulnFindingSortState = { key: null, dir: 'asc' };
 let vulnFindingPagination = newPagination();
 let vulnFindingFilter = { vmId: '', severity: '' };
 let vulnFindingVms = [];
+let vulnFindingSelectedIds = new Set();
 
 function renderVulnFindings(search = '') {
   document.getElementById('vulnTabBody').innerHTML = `
@@ -6528,6 +6529,11 @@ function renderVulnFindings(search = '') {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Xuất báo cáo CSV
         </button>
+      </div>
+      <div id="vulnFindingBulkToolbar" style="display:none;align-items:center;gap:12px;background:var(--surface2);border-bottom:1px solid var(--border);padding:10px 16px">
+        <span style="font-size:13px;color:var(--fg-muted)" id="vulnFindingBulkCount"></span>
+        <button class="btn btn-primary btn-sm" data-permission="vuln.update.manage" onclick="bulkUpdateSelectedFindings()">Cập nhật đã chọn</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearVulnFindingSelection()" style="margin-left:auto">Bỏ chọn</button>
       </div>
       <div id="vulnFindingsBody"><div class="loading"><div class="spinner"></div></div></div>
     </div>`;
@@ -6571,15 +6577,25 @@ function renderVulnFindingRows() {
   const body = document.getElementById('vulnFindingsBody');
   if (!vulnFindingRows.length) {
     body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><h3>Không có lỗ hổng nào</h3><p>Bật quét cho VM ở tab "Quản lý quét"</p></div>`;
+    updateVulnFindingBulkToolbar();
     return;
   }
   const sorted = applySort(vulnFindingRows, vulnFindingSortState, (row, key) => key === 'severity' ? (VULN_SEVERITY_RANK[row.severity] ?? 5) : row[key]);
   const rows = paginateRows(sorted, vulnFindingPagination);
   const rowOffset = (vulnFindingPagination.page - 1) * vulnFindingPagination.pageSize;
+  // "Chọn tất cả" only ever covers the current page's selectable (not-yet-resolved) rows — the
+  // findings list can hold up to 500 rows across many VMs, and each selected row becomes a real
+  // package-install action on a real VM, so scoping "select all" to one page at a time (same
+  // pattern as renderManageRows' manageSelectAll) keeps a single bulk action's blast radius sane.
+  const selectableIdsOnPage = rows.filter(f => !f.resolved_at).map(f => f.id);
+  const allOnPageSelected = selectableIdsOnPage.length > 0 && selectableIdsOnPage.every(id => vulnFindingSelectedIds.has(id));
   body.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('EPSS', 'epss_score', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th><th>Chi tiết</th></tr></thead>
+    <thead><tr>
+      <th style="width:32px"><input type="checkbox" id="vulnFindingSelectAll" data-permission="vuln.update.manage" ${allOnPageSelected ? 'checked' : ''} onchange="toggleSelectAllVulnFindings(this.checked)" title="Chọn tất cả trong trang này"></th>
+      <th>#</th>${thSort('VM', 'vm_name', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Package', 'package_name', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Phiên bản</th>${thSort('Mã CVE', 'vuln_id', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('Mức độ', 'severity', vulnFindingSortState, 'toggleVulnFindingSort')}${thSort('EPSS', 'epss_score', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Mô tả</th>${thSort('Lần cuối thấy', 'last_seen', vulnFindingSortState, 'toggleVulnFindingSort')}<th>Trạng thái</th><th>Chi tiết</th></tr></thead>
     <tbody>${rows.map((f, i) => `
-      <tr>
+      <tr data-finding-id="${f.id}">
+        <td><input type="checkbox" class="vuln-finding-select" data-permission="vuln.update.manage" ${f.resolved_at ? 'disabled' : ''} ${vulnFindingSelectedIds.has(f.id) ? 'checked' : ''} onchange="toggleVulnFindingSelect(${f.id}, this.checked)"></td>
         <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
         <td style="font-weight:600">${escHtml(f.vm_name)}</td>
         <td style="font-family:monospace">${escHtml(f.package_name)}</td>
@@ -6600,6 +6616,86 @@ function renderVulnFindingRows() {
       </tr>`).join('')}
     </tbody></table>${paginationBar(vulnFindingPagination, sorted.length, 'vulnFindingPagination', 'renderVulnFindingRows')}`;
   applyPermissionVisibility();
+  updateVulnFindingBulkToolbar();
+}
+
+function toggleVulnFindingSelect(id, checked) {
+  if (checked) vulnFindingSelectedIds.add(id); else vulnFindingSelectedIds.delete(id);
+  const selectAllBox = document.getElementById('vulnFindingSelectAll');
+  if (selectAllBox) {
+    const onPageIds = [...document.querySelectorAll('.vuln-finding-select:not(:disabled)')].map(cb => Number(cb.closest('tr').dataset.findingId));
+    selectAllBox.checked = onPageIds.length > 0 && onPageIds.every(fid => vulnFindingSelectedIds.has(fid));
+  }
+  updateVulnFindingBulkToolbar();
+}
+
+function toggleSelectAllVulnFindings(checked) {
+  document.querySelectorAll('.vuln-finding-select:not(:disabled)').forEach(cb => {
+    const id = Number(cb.closest('tr').dataset.findingId);
+    cb.checked = checked;
+    if (checked) vulnFindingSelectedIds.add(id); else vulnFindingSelectedIds.delete(id);
+  });
+  updateVulnFindingBulkToolbar();
+}
+
+function clearVulnFindingSelection() {
+  vulnFindingSelectedIds.clear();
+  document.querySelectorAll('.vuln-finding-select').forEach(cb => { cb.checked = false; });
+  const selectAllBox = document.getElementById('vulnFindingSelectAll');
+  if (selectAllBox) selectAllBox.checked = false;
+  updateVulnFindingBulkToolbar();
+}
+
+function updateVulnFindingBulkToolbar() {
+  const toolbar = document.getElementById('vulnFindingBulkToolbar');
+  if (!toolbar) return;
+  const n = vulnFindingSelectedIds.size;
+  toolbar.style.display = n ? 'flex' : 'none';
+  const countEl = document.getElementById('vulnFindingBulkCount');
+  if (countEl) {
+    const vmCount = new Set(vulnFindingRows.filter(f => vulnFindingSelectedIds.has(f.id)).map(f => f.vm_id)).size;
+    countEl.textContent = `Đã chọn ${n} gói trên ${vmCount} VM`;
+  }
+}
+
+async function bulkUpdateSelectedFindings() {
+  const findingIds = [...vulnFindingSelectedIds];
+  if (!findingIds.length) return;
+  const vmCount = new Set(vulnFindingRows.filter(f => findingIds.includes(f.id)).map(f => f.vm_id)).size;
+  if (!confirm(`Cập nhật ${findingIds.length} gói trên ${vmCount} VM ngay bây giờ?\n\nLưu ý: có thể mất vài phút (mỗi VM cần làm mới danh sách gói trước khi cài), có thể khởi động lại 1 số dịch vụ liên quan. Không thể hoàn tác.`)) return;
+  const body = document.getElementById('vulnFindingsBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang cập nhật trên ${vmCount} VM, có thể mất vài phút...</div>`;
+  try {
+    const { results, vmErrors } = await api('/vuln/findings/bulk-update-now', 'POST', { findingIds });
+    const okCount = results.filter(r => r.status === 'updated').length;
+    const hasRealFailure = results.some(r => r.status === 'failed') || vmErrors.length > 0;
+    toast(`Đã cập nhật ${okCount}/${results.length} gói thành công`, hasRealFailure ? 'error' : (okCount === results.length ? 'success' : 'info'));
+    openVulnBulkUpdateResultModal(results, vmErrors);
+    clearVulnFindingSelection();
+    await loadVulnFindings();
+  } catch (e) { toast(e.message, 'error'); await loadVulnFindings(); }
+}
+
+function openVulnBulkUpdateResultModal(results, vmErrors) {
+  openModal('Kết quả cập nhật hàng loạt', `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      ${vmErrors && vmErrors.length ? `
+        <div style="background:var(--red-dim);border:1px solid var(--red);border-radius:var(--radius);padding:10px 12px;font-size:13px">
+          ${vmErrors.map(e => `<div>${escHtml(e.vmName)}: ${escHtml(e.error)}</div>`).join('')}
+        </div>` : ''}
+      <table>
+        <thead><tr><th>VM</th><th>Package</th><th>Trước</th><th>Sau</th><th>Trạng thái</th></tr></thead>
+        <tbody>${results.map(r => `
+          <tr>
+            <td style="font-weight:600">${escHtml(r.vmName || '—')}</td>
+            <td style="font-family:monospace">${escHtml(r.package)}</td>
+            <td style="font-family:monospace;font-size:12px">${escHtml(r.fromVersion || '—')}</td>
+            <td style="font-family:monospace;font-size:12px">${escHtml(r.toVersion || '—')}</td>
+            <td>${vulnUpdateStatusBadge(r)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`, 'detail-modal');
 }
 
 // EPSS score is a 0-1 probability — shown as a percentage. epss_score comes back from MySQL as a
