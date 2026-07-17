@@ -10,7 +10,9 @@ router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id, ssh_user, ssh_port,
            trivy_scan_enabled, trivy_scan_path, trivy_scan_mode, trivy_last_scanned_at,
-           trivy_scan_status, trivy_scan_error, trivy_package_count
+           trivy_scan_status, trivy_scan_error, trivy_package_count,
+           trivy_docker_enabled, trivy_docker_mode, trivy_docker_last_scanned_at,
+           trivy_docker_scan_status, trivy_docker_scan_error, trivy_docker_image_count
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
@@ -36,6 +38,23 @@ router.patch('/vms/:id', requirePermission('trivy.scan.manage'), async (req, res
   if (!enabled) await db.prepare('UPDATE vcenter_vms SET trivy_scan_status = NULL, trivy_scan_error = NULL WHERE id = ?').run(vm.id);
   await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
     enabled ? `Bật quét mã nguồn (Trivy) — đường dẫn ${scanPath}, chế độ ${mode === 'manual' ? 'thủ công' : 'tự động'}` : 'Tắt quét mã nguồn (Trivy)');
+  res.json({ message: 'OK' });
+});
+
+// Separate config from the filesystem scan above — a VM may have containers without any app source
+// checked out on it, or vice versa, so these two scan types are independently toggled.
+router.patch('/vms/:id/docker', requirePermission('trivy.scan.manage'), async (req, res) => {
+  const vm = await db.prepare('SELECT id, name, ssh_credential_id, ip_address FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
+  const enabled = req.body?.enabled ? 1 : 0;
+  if (enabled && (!vm.ssh_credential_id || !vm.ip_address)) {
+    return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước (trang Giám sát bất thường → Quản lý VM giám sát)' });
+  }
+  const mode = req.body?.mode === 'manual' ? 'manual' : 'auto';
+  await db.prepare('UPDATE vcenter_vms SET trivy_docker_enabled = ?, trivy_docker_mode = ? WHERE id = ?').run(enabled, mode, vm.id);
+  if (!enabled) await db.prepare('UPDATE vcenter_vms SET trivy_docker_scan_status = NULL, trivy_docker_scan_error = NULL WHERE id = ?').run(vm.id);
+  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
+    enabled ? `Bật quét Docker image — chế độ ${mode === 'manual' ? 'thủ công' : 'tự động'}` : 'Tắt quét Docker image');
   res.json({ message: 'OK' });
 });
 
@@ -77,7 +96,7 @@ router.post('/vms/:id/scan-now', requirePermission('trivy.scan.manage'), async (
     return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
   }
   if (!vm.trivy_scan_path) return res.status(400).json({ error: 'Chưa cấu hình đường dẫn quét' });
-  await trivyScanner.scanVm(vm);
+  await trivyScanner.scanFilesystem(vm);
   await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, 'Quét mã nguồn (Trivy) ngay');
   const fresh = await db.prepare(`
     SELECT trivy_scan_status, trivy_scan_error, trivy_last_scanned_at, trivy_package_count FROM vcenter_vms WHERE id = ?
@@ -85,12 +104,29 @@ router.post('/vms/:id/scan-now', requirePermission('trivy.scan.manage'), async (
   res.json(fresh);
 });
 
+router.post('/vms/:id/scan-docker-now', requirePermission('trivy.scan.manage'), async (req, res) => {
+  const vm = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?
+  `).get(req.params.id);
+  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
+  if (!vm.ssh_credential_id || !vm.ip_address) {
+    return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
+  }
+  await trivyScanner.scanDocker(vm);
+  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, 'Quét Docker image ngay');
+  const fresh = await db.prepare(`
+    SELECT trivy_docker_scan_status, trivy_docker_scan_error, trivy_docker_last_scanned_at, trivy_docker_image_count FROM vcenter_vms WHERE id = ?
+  `).get(vm.id);
+  res.json(fresh);
+});
+
 router.get('/findings', async (req, res) => {
-  const { vmId, severity, search, includeResolved, limit } = req.query;
+  const { vmId, scanType, severity, search, includeResolved, limit } = req.query;
   let query = 'SELECT * FROM trivy_findings WHERE 1=1';
   const params = [];
   if (!includeResolved || includeResolved === 'false') query += ' AND resolved_at IS NULL';
   if (vmId) { query += ' AND vm_id = ?'; params.push(vmId); }
+  if (scanType) { query += ' AND scan_type = ?'; params.push(scanType); }
   if (severity) { query += ' AND severity = ?'; params.push(severity); }
   if (search) {
     query += ' AND (vm_name LIKE ? OR package_name LIKE ? OR vuln_id LIKE ? OR target_file LIKE ?)';
@@ -125,8 +161,11 @@ router.get('/stats', async (req, res) => {
   const counts = { critical: 0, high: 0, medium: 0, low: 0, negligible: 0, unknown: 0 };
   for (const row of bySeverity) if (row.severity in counts) counts[row.severity] = row.cnt;
   const totalOpen = bySeverity.reduce((sum, r) => sum + r.cnt, 0);
-  const vmsScanned = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1").get()).cnt;
-  const vmsWithError = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1 AND trivy_scan_status = 'error'").get()).cnt;
+  const vmsScanned = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1 OR trivy_docker_enabled = 1").get()).cnt;
+  const vmsWithError = (await db.prepare(`
+    SELECT COUNT(*) as cnt FROM vcenter_vms
+    WHERE (trivy_scan_enabled = 1 AND trivy_scan_status = 'error') OR (trivy_docker_enabled = 1 AND trivy_docker_scan_status = 'error')
+  `).get()).cnt;
   const inKevCount = (await db.prepare("SELECT COUNT(*) as cnt FROM trivy_findings WHERE resolved_at IS NULL AND in_kev = 1").get()).cnt;
   res.json({ totalOpen, counts, vmsScanned, vmsWithError, inKevCount });
 });

@@ -7371,11 +7371,50 @@ function renderTrivyRows() {
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="saveTrivyConfig(${v.id}, this)">Lưu</button>
           ${checked ? `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${trivyHostInstalled ? '' : 'disabled title="Cần cài Trivy trên máy chủ trước (xem thông báo ở đầu trang)"'} onclick="handleTrivyScanNow(${v.id}, this)">Quét ngay</button>` : ''}
-          ${v.trivy_package_count ? `<button class="btn-icon" title="Xem lỗ hổng" onclick="openTrivyFindingsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
+          ${v.trivy_package_count ? `<button class="btn-icon" title="Xem lỗ hổng" onclick="openTrivyFindingsModal(${v.id}, 'fs')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
         </td>
       </tr>`;
     }).join('')}</tbody>
-  </table>${paginationBar(trivyPagination, sorted.length, 'trivyPagination', 'renderTrivyRows')}`;
+  </table>${paginationBar(trivyPagination, sorted.length, 'trivyPagination', 'renderTrivyRows')}
+  <div style="padding:16px;border-top:1px solid var(--border)">
+    <h3 style="font-size:14px;margin-bottom:4px">Quét Docker image</h3>
+    <p style="font-size:12px;color:var(--fg-dim);margin-bottom:12px">Quét lỗ hổng trong image của các container đang chạy (docker ps) — bỏ qua image cũ/không dùng để tiết kiệm băng thông. Tài khoản SSH cần có quyền chạy docker (thuộc nhóm docker, hoặc cấu hình sudo -n docker).</p>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>Tên VM</th><th>Bật quét Docker</th><th>Chế độ</th><th>Kết quả quét</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
+    <tbody>${rows.map((v, i) => {
+      const eligible = !!(v.ssh_credential_id && v.ip_address);
+      const dockerStatus = v.trivy_docker_scan_status || 'unknown';
+      const dockerChecked = !!v.trivy_docker_enabled;
+      const dockerMode = v.trivy_docker_mode === 'manual' ? 'manual' : 'auto';
+      return `<tr data-docker-vm-id="${v.id}">
+        <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+        <td style="font-weight:600">${escHtml(v.name)}</td>
+        <td>
+          <label class="toggle-switch" data-permission="trivy.scan.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}">
+            <input type="checkbox" class="trivy-docker-enabled" data-id="${v.id}" ${dockerChecked ? 'checked' : ''} ${eligible ? '' : 'disabled'}>
+            <span class="toggle-slider"></span>
+          </label>
+        </td>
+        <td>
+          <select class="trivy-docker-mode filter-select" data-id="${v.id}" style="font-size:12px;padding:4px 8px" ${eligible ? '' : 'disabled'}>
+            <option value="auto" ${dockerMode === 'auto' ? 'selected' : ''}>Tự động (12h)</option>
+            <option value="manual" ${dockerMode === 'manual' ? 'selected' : ''}>Thủ công</option>
+          </select>
+        </td>
+        <td>
+          <span class="status ${TRIVY_SCAN_STATUS_CLASS[dockerStatus] || 'unknown'}" title="${escAttr(v.trivy_docker_scan_error || '')}"><span class="dot"></span>${TRIVY_SCAN_STATUS_LABEL[dockerStatus] || dockerStatus}</span>
+          ${v.trivy_docker_image_count != null ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">${v.trivy_docker_image_count} lỗ hổng</div>` : ''}
+        </td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${v.trivy_docker_last_scanned_at ? formatTime(v.trivy_docker_last_scanned_at) : '—'}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="saveTrivyDockerConfig(${v.id}, this)">Lưu</button>
+          ${dockerChecked ? `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${trivyHostInstalled ? '' : 'disabled title="Cần cài Trivy trên máy chủ trước (xem thông báo ở đầu trang)"'} onclick="handleTrivyDockerScanNow(${v.id}, this)">Quét ngay</button>` : ''}
+          ${v.trivy_docker_image_count ? `<button class="btn-icon" title="Xem lỗ hổng Docker" onclick="openTrivyFindingsModal(${v.id}, 'docker')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
+        </td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
   applyPermissionVisibility();
 }
 
@@ -7439,21 +7478,49 @@ async function handleTrivyScanNow(id, btn) {
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = original; }
 }
 
+async function saveTrivyDockerConfig(id, btn) {
+  const enabledCb = document.querySelector(`.trivy-docker-enabled[data-id="${id}"]`);
+  const modeSelect = document.querySelector(`.trivy-docker-mode[data-id="${id}"]`);
+  const enabled = !!enabledCb?.checked;
+  const mode = modeSelect?.value === 'manual' ? 'manual' : 'auto';
+  btn.disabled = true;
+  try {
+    await api(`/trivy/vms/${id}/docker`, 'PATCH', { enabled, mode });
+    toast(enabled ? 'Đã bật quét Docker image' : 'Đã lưu cấu hình', 'success');
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function handleTrivyDockerScanNow(id, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang quét… (có thể mất vài phút)';
+  try {
+    const result = await api(`/trivy/vms/${id}/scan-docker-now`, 'POST');
+    if (result.trivy_docker_scan_status === 'ok') toast(`Quét xong — tìm thấy ${result.trivy_docker_image_count} lỗ hổng`, 'success');
+    else toast(result.trivy_docker_scan_error || 'Quét gặp lỗi', 'error');
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = original; }
+}
+
 let trivyFindingRows = [];
 
-async function openTrivyFindingsModal(vmId) {
+async function openTrivyFindingsModal(vmId, scanType) {
   const vm = trivyVms.find(v => v.id === vmId);
   if (!vm) return;
-  openModal(`Lỗ hổng mã nguồn — ${vm.name}`, `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
+  const title = scanType === 'docker' ? `Lỗ hổng Docker image — ${vm.name}` : `Lỗ hổng mã nguồn — ${vm.name}`;
+  openModal(title, `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
   try {
-    trivyFindingRows = await api(`/trivy/findings?vmId=${vmId}&limit=500`);
+    trivyFindingRows = await api(`/trivy/findings?vmId=${vmId}&scanType=${scanType}&limit=500`);
     const body = document.getElementById('modalBody');
     if (!trivyFindingRows.length) {
       body.innerHTML = `<div class="empty-state"><h3>Không có lỗ hổng nào</h3></div>`;
       return;
     }
     body.innerHTML = `<div style="max-height:60vh;overflow:auto"><table>
-      <thead><tr><th>File</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
+      <thead><tr><th>${scanType === 'docker' ? 'Image / File' : 'File'}</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
       <tbody>${trivyFindingRows.map(f => `
         <tr>
           <td style="font-family:monospace;font-size:12px">${escHtml(f.target_file || '—')}<div style="color:var(--fg-dim)">${escHtml(f.ecosystem || '')}</div></td>
@@ -7475,9 +7542,20 @@ async function openTrivyFindingsModal(vmId) {
   }
 }
 
+// Trivy's OS-package scanner (used inside `trivy image`, never `trivy fs`) reports these as the
+// ecosystem/Type — distinguished from a docker-image finding's app-level deps (npm/pip/etc baked into
+// the image), which need the SAME per-ecosystem commands as a filesystem finding would.
+const TRIVY_OS_ECOSYSTEMS = new Set(['alpine', 'debian', 'ubuntu', 'centos', 'rocky linux', 'alma linux', 'amazon linux', 'photon linux', 'oracle linux', 'redhat', 'opensuse.leap', 'opensuse.tumbleweed', 'suse linux enterprise server']);
+
 // Unlike vulnRemediationText (apt-based OS packages, one uniform command), each language ecosystem
 // needs its own fix command — no single automatable action, so this only ever produces guidance text.
 function trivyRemediationText(f) {
+  if (f.scan_type === 'docker' && f.ecosystem && TRIVY_OS_ECOSYSTEMS.has(String(f.ecosystem).toLowerCase())) {
+    const imageName = String(f.target_file || '').split(' :: ')[0];
+    return f.fixed_version
+      ? `Cập nhật package "${f.package_name}" lên phiên bản ${f.fixed_version} trong Dockerfile/base image, build lại và deploy image mới (image hiện tại: ${imageName || '?'}).`
+      : `Chưa có bản vá cho "${f.package_name}" trong image hiện tại (${imageName || '?'}) — theo dõi cập nhật của base image hoặc nhà cung cấp gói.`;
+  }
   const cmdByEcosystem = {
     npm: `npm install ${f.package_name}@${f.fixed_version || 'latest'} (hoặc sửa package.json rồi npm install)`,
     yarn: `yarn upgrade ${f.package_name}@${f.fixed_version || 'latest'}`,
@@ -7489,7 +7567,8 @@ function trivyRemediationText(f) {
     bundler: `bundle update ${f.package_name}`,
   };
   if (f.fixed_version && cmdByEcosystem[f.ecosystem]) return cmdByEcosystem[f.ecosystem];
-  if (f.fixed_version) return `Nâng cấp "${f.package_name}" lên phiên bản ${f.fixed_version} trong file quản lý dependency (${f.target_file || '?'}) rồi cài đặt lại.`;
+  const suffix = f.scan_type === 'docker' ? ' rồi build lại và deploy image mới' : ' rồi cài đặt lại';
+  if (f.fixed_version) return `Nâng cấp "${f.package_name}" lên phiên bản ${f.fixed_version} trong file quản lý dependency (${f.target_file || '?'})${suffix}.`;
   return `Chưa có phiên bản vá cho "${f.package_name}" — theo dõi cập nhật từ nhà phát triển thư viện.`;
 }
 

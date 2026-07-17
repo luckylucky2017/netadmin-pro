@@ -1,18 +1,25 @@
-// Application-level dependency vulnerability scanning via Trivy (https://trivy.dev), per VM opted in
-// (vcenter_vms.trivy_scan_enabled) — complements vuln-scanner.js's OS-package scanning (dpkg/apt via
-// OSV.dev) with app-level dependency manifests (package-lock.json, requirements.txt, go.sum,
-// pom.xml, etc.).
+// Application-level vulnerability scanning via Trivy (https://trivy.dev), per VM opted in — two
+// independent scan types, both reusing the same central install (vcenter_vms.trivy_scan_enabled for
+// filesystem dependency manifests like package-lock.json/requirements.txt/go.sum, and
+// trivy_docker_enabled for Docker images) — complements vuln-scanner.js's OS-package scanning
+// (dpkg/apt via OSV.dev).
 //
 // Architecture: Trivy itself is installed ONCE, locally on the netadmin-pro host (into
 // LOCAL_TRIVY_DIR below — no sudo, since the app already owns that directory) — NOT on every target
-// VM. Trivy's `fs` scan needs local filesystem access, so for each VM this module: (1) SSHes in with
-// the credential already configured for that VM (the same one used for every other collector) and
-// `find`s just the dependency manifest files under vcenter_vms.trivy_scan_path, (2) pulls those files
-// (only the manifests — not node_modules/vendor/the whole tree) via SFTP into a local temp dir that
-// mirrors the remote relative structure, (3) runs the single centrally-installed trivy binary against
-// that temp dir, (4) deletes the temp dir. Net effect: target VMs need zero installation and zero
-// sudo for this feature — only ordinary read access to their own source tree, which the SSH
-// credential already has.
+// VM. Both `trivy fs` and `trivy image` need local filesystem access to what they scan, so for each
+// VM this module SSHes in with the credential already configured for that VM (the same one used for
+// every other collector) and PULLS just what's needed rather than running trivy remotely:
+//   - Filesystem scan: `find`s just the dependency manifest files under trivy_scan_path (never the
+//     whole tree/node_modules/vendor), pulls them via SFTP into a local temp dir mirroring the
+//     remote relative structure, scans that dir locally.
+//   - Docker scan: lists the images backing currently RUNNING containers only (not every image on
+//     the host — running images are what's actually exposed; scanning every unused/stale image would
+//     be slow and bandwidth-heavy for comparatively little value), `docker save`s each one to a
+//     remote tarball, pulls it via SFTP, scans it locally, deletes both the remote and local tarball.
+// Net effect either way: target VMs need zero Trivy installation. The filesystem scan needs zero sudo
+// too; the Docker scan needs the SSH user to have Docker access (docker group membership, or
+// passwordless sudo for the docker command — same NOPASSWD sudoers convention used elsewhere in this
+// app), since only root/the docker group can talk to the Docker socket.
 const { NodeSSH } = require('node-ssh');
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -94,12 +101,13 @@ function parseFindManifestsOutput(stdout) {
   return { status: 'ok', files: lines.slice(1).map((l) => l.trim()).filter(Boolean) };
 }
 
-function runLocalTrivyScan(dir) {
+// Shared by both `trivy fs <dir>` and `trivy image --input <tar>` — caller supplies the full argv
+// (subcommand onward) since the two scan types differ beyond just the target argument.
+function runLocalTrivyScan(args) {
   return new Promise((resolve) => {
     execFile(
-      LOCAL_TRIVY_BIN,
-      ['fs', '--cache-dir', LOCAL_TRIVY_CACHE_DIR, '--format', 'json', '--scanners', 'vuln', '--quiet', dir],
-      { timeout: 120000, maxBuffer: 20 * 1024 * 1024 },
+      LOCAL_TRIVY_BIN, args,
+      { timeout: 180000, maxBuffer: 20 * 1024 * 1024 },
       (err, stdout) => {
         if (err && !stdout) return resolve({ status: 'error', findings: [] });
         resolve(parseTrivyScanOutput(`STATUS:ok\n${stdout}`));
@@ -147,19 +155,28 @@ function toSqlDatetime(date) {
   return date.toLocaleString('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' });
 }
 
+// scan_type ('fs'|'docker') is part of the unique key (see database.js migration) so a filesystem
+// finding and a docker-image finding can't collide even if they happen to share vm_id/target_file/
+// package_name/vuln_id (e.g. an image containing a file at the same relative path already found via
+// the fs scan) — and so resolveStaleFindings below can resolve one scan type without touching the
+// other's findings when a VM has only one of the two enabled.
 const upsertFinding = db.prepare(`
-  INSERT INTO trivy_findings (vm_id, vm_name, target_file, ecosystem, package_name, package_version, vuln_id, summary, details, severity, reference_url, fixed_version, in_kev, epss_score, epss_percentile, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  INSERT INTO trivy_findings (vm_id, vm_name, scan_type, target_file, ecosystem, package_name, package_version, vuln_id, summary, details, severity, reference_url, fixed_version, in_kev, epss_score, epss_percentile, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   ON DUPLICATE KEY UPDATE package_version = VALUES(package_version), summary = VALUES(summary),
     details = VALUES(details), severity = VALUES(severity), reference_url = VALUES(reference_url),
     fixed_version = VALUES(fixed_version), in_kev = VALUES(in_kev), epss_score = VALUES(epss_score),
     epss_percentile = VALUES(epss_percentile), last_seen = CURRENT_TIMESTAMP, resolved_at = NULL
 `);
 const resolveStaleFindings = db.prepare(`
-  UPDATE trivy_findings SET resolved_at = CURRENT_TIMESTAMP WHERE vm_id = ? AND resolved_at IS NULL AND last_seen < ?
+  UPDATE trivy_findings SET resolved_at = CURRENT_TIMESTAMP WHERE vm_id = ? AND scan_type = ? AND resolved_at IS NULL AND last_seen < ?
 `);
 const setVmStatus = db.prepare(`
   UPDATE vcenter_vms SET trivy_scan_status = ?, trivy_scan_error = ?, trivy_last_scanned_at = CURRENT_TIMESTAMP, trivy_package_count = ?
+  WHERE id = ?
+`);
+const setDockerVmStatus = db.prepare(`
+  UPDATE vcenter_vms SET trivy_docker_scan_status = ?, trivy_docker_scan_error = ?, trivy_docker_last_scanned_at = CURRENT_TIMESTAMP, trivy_docker_image_count = ?
   WHERE id = ?
 `);
 async function raiseTrivyAlert(vm, finding) {
@@ -200,7 +217,32 @@ async function pullManifestFiles(ssh, scanPath, files, tempDir) {
   return pulled;
 }
 
-async function scanVm(vm) {
+// Shared by both scan types: enrich with KEV/EPSS, upsert, alert on critical/high/KEV findings.
+async function enrichAndStoreFindings(vm, scanType, findings) {
+  const cveIdsThisScan = findings.map((f) => f.vulnId).filter((id) => /^CVE-\d{4}-\d+/.test(id));
+  const [kevSet, epssScores] = await Promise.all([
+    vulnEnrichment.getKevSet(),
+    vulnEnrichment.queryEpssBatch(cveIdsThisScan),
+  ]);
+  for (const f of findings) {
+    const inKev = kevSet.has(f.vulnId);
+    const epss = epssScores.get(f.vulnId);
+    await upsertFinding.run(
+      vm.id, vm.name, scanType, f.targetFile, f.ecosystem, f.packageName, f.packageVersion, f.vulnId,
+      f.summary, f.details, f.severity, f.referenceUrl, f.fixedVersion,
+      inKev ? 1 : 0, epss?.score ?? null, epss?.percentile ?? null
+    );
+    if (ALERT_SEVERITIES.has(f.severity) || inKev) {
+      await raiseTrivyAlert(vm, {
+        package_name: f.packageName, package_version: f.packageVersion, vuln_id: f.vulnId,
+        summary: f.summary, severity: f.severity, ecosystem: f.ecosystem, target_file: f.targetFile,
+        fixed_version: f.fixedVersion, inKev,
+      });
+    }
+  }
+}
+
+async function scanFilesystem(vm) {
   const opts = await sshCredentials.buildConnectOptions(vm);
   if (!opts) { await setVmStatus.run('error', 'Chưa gán tài khoản kết nối SSH', null, vm.id); return; }
   if (!vm.trivy_scan_path) { await setVmStatus.run('error', 'Chưa cấu hình đường dẫn quét', null, vm.id); return; }
@@ -211,7 +253,7 @@ async function scanVm(vm) {
   const scanPath = vm.trivy_scan_path.replace(/\/+$/, '') || vm.trivy_scan_path;
   const ssh = new NodeSSH();
   const scanStartedAt = toSqlDatetime(new Date());
-  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'netadmin-trivy-'));
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'netadmin-trivy-fs-'));
   try {
     await ssh.connect(opts);
     const findResult = await ssh.execCommand(buildFindManifestsScript(scanPath));
@@ -219,44 +261,168 @@ async function scanVm(vm) {
     if (findStatus === 'path_not_found') { await setVmStatus.run('error', `Không tìm thấy thư mục "${vm.trivy_scan_path}" trên VM`, null, vm.id); return; }
     if (!files.length) {
       // No dependency manifest anywhere under scanPath — not an error, just nothing to report.
-      await resolveStaleFindings.run(vm.id, scanStartedAt);
+      await resolveStaleFindings.run(vm.id, 'fs', scanStartedAt);
       await setVmStatus.run('ok', null, 0, vm.id);
       return;
     }
 
     await pullManifestFiles(ssh, scanPath, files, tempDir);
     await fsp.mkdir(LOCAL_TRIVY_CACHE_DIR, { recursive: true });
-    const { status, findings } = await runLocalTrivyScan(tempDir);
+    const { status, findings } = await runLocalTrivyScan(['fs', '--cache-dir', LOCAL_TRIVY_CACHE_DIR, '--format', 'json', '--scanners', 'vuln', '--quiet', tempDir]);
     if (status !== 'ok') { await setVmStatus.run('error', `Lỗi khi Trivy quét cục bộ trên máy chủ (trạng thái: ${status})`, null, vm.id); return; }
     for (const f of findings) f.targetFile = f.targetFile ? path.posix.join(scanPath, f.targetFile) : scanPath;
 
-    const cveIdsThisScan = findings.map((f) => f.vulnId).filter((id) => /^CVE-\d{4}-\d+/.test(id));
-    const [kevSet, epssScores] = await Promise.all([
-      vulnEnrichment.getKevSet(),
-      vulnEnrichment.queryEpssBatch(cveIdsThisScan),
-    ]);
-
-    for (const f of findings) {
-      const inKev = kevSet.has(f.vulnId);
-      const epss = epssScores.get(f.vulnId);
-      await upsertFinding.run(
-        vm.id, vm.name, f.targetFile, f.ecosystem, f.packageName, f.packageVersion, f.vulnId,
-        f.summary, f.details, f.severity, f.referenceUrl, f.fixedVersion,
-        inKev ? 1 : 0, epss?.score ?? null, epss?.percentile ?? null
-      );
-      if (ALERT_SEVERITIES.has(f.severity) || inKev) {
-        await raiseTrivyAlert(vm, {
-          package_name: f.packageName, package_version: f.packageVersion, vuln_id: f.vulnId,
-          summary: f.summary, severity: f.severity, ecosystem: f.ecosystem, target_file: f.targetFile,
-          fixed_version: f.fixedVersion, inKev,
-        });
-      }
-    }
-    await resolveStaleFindings.run(vm.id, scanStartedAt);
+    await enrichAndStoreFindings(vm, 'fs', findings);
+    await resolveStaleFindings.run(vm.id, 'fs', scanStartedAt);
     await setVmStatus.run('ok', null, findings.length, vm.id);
   } catch (e) {
     await setVmStatus.run('error', e.message, null, vm.id);
     console.error(`[trivy-scanner] ${vm.name} (${vm.ip_address}): ${e.message}`);
+  } finally {
+    ssh.dispose();
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ── Docker image scanning ───────────────────────────────────────────────────────────────────────
+// Scope is deliberately fixed to images backing currently RUNNING containers — not every image on
+// the host (`docker images`) — per the admin's own call: unused/stale images cost real scan
+// time/bandwidth (image tarballs are MBs–GBs, not the KB-sized lockfiles the fs scan pulls) for
+// comparatively little security value versus what's actually exposed right now.
+const MAX_DOCKER_IMAGES_PER_SCAN = 30; // safety valve against a host with an unusually large fleet of distinct running images
+
+// Tries a plain `docker` command first, falls back to `sudo -n docker` (NOPASSWD) if the SSH user
+// isn't in the docker group — mirrors the try-then-sudo-fallback pattern used for reading logs
+// elsewhere in this app. Deliberately does NOT pipe through `sort`/other commands before checking the
+// exit code — piping would report the pipeline's LAST command's exit status, silently masking a
+// `docker` permission failure as success. Dedup happens in parseDockerListOutput instead.
+const DOCKER_LIST_SCRIPT = `
+if ! command -v docker >/dev/null 2>&1; then
+  echo "STATUS:not_installed"
+  exit 0
+fi
+OUT=$(docker ps --format '{{.Image}}' 2>&1)
+if [ $? -eq 0 ]; then
+  echo "STATUS:ok"
+  echo "$OUT"
+  exit 0
+fi
+OUT=$(sudo -n docker ps --format '{{.Image}}' 2>&1)
+if [ $? -eq 0 ]; then
+  echo "STATUS:ok"
+  echo "$OUT"
+  exit 0
+fi
+echo "STATUS:no_access"
+`.trim();
+
+function parseDockerListOutput(stdout) {
+  const lines = String(stdout || '').split('\n');
+  const status = /^STATUS:(\S+)/.exec(lines[0] || '')?.[1] || 'error';
+  if (status !== 'ok') return { status, images: [] };
+  const images = [...new Set(lines.slice(1).map((l) => l.trim()).filter(Boolean))];
+  return { status: 'ok', images };
+}
+
+// Permissive enough for repo/namespace/tag/digest characters (registry.example.com/team/app:1.2.3,
+// app@sha256:...) while rejecting shell metacharacters — image names come from our own `docker ps`
+// output (semi-trusted) but this still gets shell-interpolated into a remote command, so validate
+// defensively rather than assume.
+const DOCKER_IMAGE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.\-/:@]*$/;
+
+const REMOTE_DOCKER_TAR_PATH = '/tmp/.netadmin-trivy-docker-save.tar';
+
+function buildDockerSaveScript(imageName) {
+  const quotedImage = shellQuoteSingle(imageName);
+  const quotedTar = shellQuoteSingle(REMOTE_DOCKER_TAR_PATH);
+  return `
+docker save ${quotedImage} -o ${quotedTar} 2>&1 && echo "STATUS:ok" && exit 0
+sudo -n docker save ${quotedImage} -o ${quotedTar} 2>&1 && echo "STATUS:ok" && exit 0
+echo "STATUS:error"
+`.trim();
+}
+
+function parseDockerSaveOutput(stdout) {
+  return /STATUS:ok\s*$/.test(String(stdout || '').trim()) ? 'ok' : 'error';
+}
+
+const REMOTE_DOCKER_CLEANUP_SCRIPT = `rm -f ${shellQuoteSingle(REMOTE_DOCKER_TAR_PATH)}`;
+
+// Pulls one image's tarball, scans it locally, cleans up both the local and remote copy. Returns
+// { findings } on success or throws (caller decides how to record the per-image failure).
+async function pullAndScanDockerImage(ssh, imageName, tempDir) {
+  const saveResult = await ssh.execCommand(buildDockerSaveScript(imageName));
+  if (parseDockerSaveOutput(saveResult.stdout) !== 'ok') {
+    throw new Error(`Không thể xuất image "${imageName}" trên VM (cần quyền docker hoặc sudo -n docker) — ${(saveResult.stderr || saveResult.stdout || '').slice(0, 300)}`);
+  }
+  const localTar = path.join(tempDir, 'image.tar');
+  try {
+    await ssh.getFile(localTar, REMOTE_DOCKER_TAR_PATH);
+    const { status, findings } = await runLocalTrivyScan([
+      'image', '--input', localTar, '--cache-dir', LOCAL_TRIVY_CACHE_DIR,
+      '--format', 'json', '--scanners', 'vuln', '--quiet',
+    ]);
+    if (status !== 'ok') throw new Error(`Lỗi khi Trivy quét image cục bộ (trạng thái: ${status})`);
+    for (const f of findings) f.targetFile = f.targetFile ? `${imageName} :: ${f.targetFile}` : imageName;
+    return { findings };
+  } finally {
+    await ssh.execCommand(REMOTE_DOCKER_CLEANUP_SCRIPT).catch(() => {});
+    await fsp.rm(localTar, { force: true }).catch(() => {});
+  }
+}
+
+async function scanDocker(vm) {
+  const opts = await sshCredentials.buildConnectOptions(vm);
+  if (!opts) { await setDockerVmStatus.run('error', 'Chưa gán tài khoản kết nối SSH', null, vm.id); return; }
+  if (!(await isLocalTrivyInstalled())) {
+    await setDockerVmStatus.run('error', 'Trivy chưa được cài trên máy chủ netadmin-pro — vào đầu trang "Quét mã nguồn (Trivy)" để cài đặt', null, vm.id);
+    return;
+  }
+  const ssh = new NodeSSH();
+  const scanStartedAt = toSqlDatetime(new Date());
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'netadmin-trivy-docker-'));
+  try {
+    await ssh.connect(opts);
+    const listResult = await ssh.execCommand(DOCKER_LIST_SCRIPT);
+    const { status: listStatus, images } = parseDockerListOutput(listResult.stdout);
+    if (listStatus === 'not_installed') { await setDockerVmStatus.run('error', 'Docker chưa được cài đặt trên VM này', null, vm.id); return; }
+    if (listStatus === 'no_access') { await setDockerVmStatus.run('error', 'Tài khoản SSH không có quyền chạy docker (cần vào nhóm docker hoặc cấu hình sudo -n docker)', null, vm.id); return; }
+    if (listStatus !== 'ok') { await setDockerVmStatus.run('error', `Lỗi khi liệt kê container đang chạy (trạng thái: ${listStatus})`, null, vm.id); return; }
+    if (!images.length) {
+      // No running containers — not an error, just nothing to report.
+      await resolveStaleFindings.run(vm.id, 'docker', scanStartedAt);
+      await setDockerVmStatus.run('ok', null, 0, vm.id);
+      return;
+    }
+
+    const truncated = images.length > MAX_DOCKER_IMAGES_PER_SCAN;
+    const toScan = images.slice(0, MAX_DOCKER_IMAGES_PER_SCAN);
+    await fsp.mkdir(LOCAL_TRIVY_CACHE_DIR, { recursive: true });
+
+    const allFindings = [];
+    const errors = [];
+    for (const imageName of toScan) {
+      if (!DOCKER_IMAGE_NAME_RE.test(imageName)) { errors.push(`bỏ qua tên image không hợp lệ: ${imageName}`); continue; }
+      try {
+        const { findings } = await pullAndScanDockerImage(ssh, imageName, tempDir);
+        allFindings.push(...findings);
+      } catch (e) {
+        errors.push(e.message);
+        console.error(`[trivy-scanner] Docker image "${imageName}" trên ${vm.name}: ${e.message}`);
+      }
+    }
+
+    await enrichAndStoreFindings(vm, 'docker', allFindings);
+    await resolveStaleFindings.run(vm.id, 'docker', scanStartedAt);
+    const statusNote = [
+      truncated ? `Đã quét ${toScan.length}/${images.length} image đang chạy (giới hạn ${MAX_DOCKER_IMAGES_PER_SCAN} mỗi lần quét)` : null,
+      errors.length ? `${errors.length} image lỗi: ${errors.slice(0, 3).join('; ')}` : null,
+    ].filter(Boolean).join(' — ') || null;
+    const allImagesFailed = toScan.length > 0 && errors.length === toScan.length;
+    await setDockerVmStatus.run(allImagesFailed ? 'error' : 'ok', statusNote, allFindings.length, vm.id);
+  } catch (e) {
+    await setDockerVmStatus.run('error', e.message, null, vm.id);
+    console.error(`[trivy-scanner] Docker scan ${vm.name} (${vm.ip_address}): ${e.message}`);
   } finally {
     ssh.dispose();
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
@@ -293,7 +459,7 @@ async function discoverPaths(vm) {
   }
 }
 
-async function collectAll() {
+async function collectAllFilesystem() {
   // trivy_scan_mode = 'manual' VMs excluded here, same reasoning as vuln-scanner.js's collectAll —
   // only ever scanned via the explicit "Quét ngay" route.
   const due = await db.prepare(`
@@ -303,8 +469,23 @@ async function collectAll() {
       AND power_state = 'POWERED_ON' AND (guest_family IS NULL OR guest_family = 'LINUX')
       AND (trivy_last_scanned_at IS NULL OR trivy_last_scanned_at <= DATE_SUB(NOW(), INTERVAL ${SCAN_INTERVAL_HOURS} HOUR))
   `).all();
-  if (!due.length) return;
-  for (const vm of due) await scanVm(vm); // sequential — same reasoning as vuln-scanner.js's collectAll
+  for (const vm of due) await scanFilesystem(vm); // sequential — same reasoning as vuln-scanner.js's collectAll
+}
+
+async function collectAllDocker() {
+  const due = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE trivy_docker_enabled = 1 AND trivy_docker_mode = 'auto' AND ssh_credential_id IS NOT NULL
+      AND ip_address IS NOT NULL AND ip_address != ''
+      AND power_state = 'POWERED_ON' AND (guest_family IS NULL OR guest_family = 'LINUX')
+      AND (trivy_docker_last_scanned_at IS NULL OR trivy_docker_last_scanned_at <= DATE_SUB(NOW(), INTERVAL ${SCAN_INTERVAL_HOURS} HOUR))
+  `).all();
+  for (const vm of due) await scanDocker(vm); // sequential — same reasoning as vuln-scanner.js's collectAll
+}
+
+async function collectAll() {
+  await collectAllFilesystem();
+  await collectAllDocker();
 }
 
 function start(intervalMs = TICK_MS) {
@@ -314,9 +495,11 @@ function start(intervalMs = TICK_MS) {
 }
 
 module.exports = {
-  start, collectAll, scanVm, discoverPaths,
+  start, collectAll, collectAllFilesystem, collectAllDocker,
+  scanFilesystem, scanDocker, discoverPaths,
   isLocalTrivyInstalled, installLocalTrivy,
   parseTrivyScanOutput, buildFindManifestsScript, parseFindManifestsOutput,
   parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
+  parseDockerListOutput, buildDockerSaveScript, parseDockerSaveOutput, DOCKER_LIST_SCRIPT, DOCKER_IMAGE_NAME_RE,
   LOCAL_TRIVY_DIR, LOCAL_TRIVY_BIN, LOCAL_TRIVY_CACHE_DIR,
 };

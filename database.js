@@ -1093,6 +1093,23 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_status VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_package_count INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Docker image scanning (trivy image, not trivy fs) — a separate opt-in from the filesystem/
+  // dependency scan above, since a VM may run containers without having any app source checked out
+  // on it directly (or vice versa). No path to configure — scope is auto-discovered per scan (running
+  // containers' images only, by design; see trivy-scanner.js's DOCKER_LIST_SCRIPT).
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_enabled TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_mode VARCHAR(10) DEFAULT 'auto'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_last_scanned_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_scan_status VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_scan_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_docker_image_count INT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // Distinguishes filesystem-dependency findings from docker-image findings within the same table —
+  // a VM can have both scan types enabled, and without this a running container's image findings and
+  // the app-source findings could collide on (vm_id, target_file, package_name, vuln_id) if an image
+  // happens to contain a file at the same relative path as one already found via the fs scan.
+  try { await pool.query("ALTER TABLE trivy_findings ADD COLUMN scan_type VARCHAR(10) DEFAULT 'fs'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE trivy_findings DROP INDEX uq_trivy_finding"); } catch (e) { if (e.errno !== 1091) throw e; }
+  try { await pool.query("ALTER TABLE trivy_findings ADD UNIQUE KEY uq_trivy_finding (vm_id, scan_type, target_file, package_name, vuln_id)"); } catch (e) { if (e.errno !== 1061) throw e; }
 }
 
 async function seedIfEmpty() {
