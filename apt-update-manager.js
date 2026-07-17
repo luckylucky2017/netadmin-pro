@@ -104,10 +104,20 @@ function parseApplyOutput(stdout) {
 // check and apply can offer a newer version, which is still a real success); 'failed' when the
 // version is unchanged (apt silently refused: held package, dependency conflict, disk full, etc.) or
 // the package is no longer installed at all (shouldn't normally happen for --only-upgrade, handled
-// rather than left to crash on an undefined lookup).
+// rather than left to crash on an undefined lookup); 'not_upgradable' when fromVersion is null —
+// meaning the package was never in the upgradable list to begin with (apt already considers it
+// current) — distinct from 'updated'/'failed' specifically for "Cập nhật ngay" (update-now on one
+// finding, routes/vuln.js), which can target a package apt has NO tracked update for at all (common:
+// OSV/CVE tracks a security issue that apt's own metadata doesn't map to a clean "fixed" version —
+// see extractFixedVersion's comment in vuln-scanner.js). Without this branch, `fromVersion == null`
+// would fall through the strict equality check below and get misreported as 'updated' even though
+// nothing was actually installed.
 function evaluateApplyResult(fromVersion, installedVersion) {
   if (installedVersion === undefined) {
     return { status: 'failed', toVersion: null, error: 'Gói không còn được cài đặt trên VM sau khi chạy lệnh cập nhật' };
+  }
+  if (fromVersion == null) {
+    return { status: 'not_upgradable', toVersion: installedVersion, error: 'Gói này không có bản cập nhật nào theo apt (có thể đã là bản mới nhất, hoặc lỗ hổng này chưa có bản vá qua apt)' };
   }
   if (installedVersion === fromVersion) {
     return { status: 'failed', toVersion: installedVersion, error: 'Phiên bản không đổi — cập nhật có thể đã bị chặn (gói bị giữ/hold, xung đột phụ thuộc, hoặc apt từ chối)' };

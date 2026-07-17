@@ -6435,6 +6435,11 @@ let vulnTab = loadSavedTab(VULN_TAB_KEY, 'findings');
 let vulnStats = null;
 
 const VULN_SEVERITY_LABEL = { critical: 'Nghiêm trọng', high: 'Cao', medium: 'Trung bình', low: 'Thấp', negligible: 'Không đáng kể', unknown: 'Chưa rõ' };
+// Worst-first rank, mirrors routes/vuln.js's own ORDER BY CASE — needed because clicking the "Mức
+// độ" column header otherwise falls through to applySort's generic string compare, which sorts these
+// alphabetically ("critical" < "high" < "low" < "medium" < ...) rather than by actual severity, wrongly
+// putting "low" ahead of "medium".
+const VULN_SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, negligible: 4, unknown: 5 };
 const VULN_SEVERITY_CLASS = { critical: 'critical', high: 'high', medium: 'medium', low: 'low', negligible: 'low', unknown: 'low' };
 function vulnSeverityBadge(sev) {
   const s = sev || 'unknown';
@@ -6568,7 +6573,7 @@ function renderVulnFindingRows() {
     body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><h3>Không có lỗ hổng nào</h3><p>Bật quét cho VM ở tab "Quản lý quét"</p></div>`;
     return;
   }
-  const sorted = applySort(vulnFindingRows, vulnFindingSortState, (row, key) => row[key]);
+  const sorted = applySort(vulnFindingRows, vulnFindingSortState, (row, key) => key === 'severity' ? (VULN_SEVERITY_RANK[row.severity] ?? 5) : row[key]);
   const rows = paginateRows(sorted, vulnFindingPagination);
   const rowOffset = (vulnFindingPagination.page - 1) * vulnFindingPagination.pageSize;
   body.innerHTML = `<table>
@@ -6588,9 +6593,13 @@ function renderVulnFindingRows() {
         <td><span style="font-size:12px;color:var(--fg-muted)" title="${f.summary ? escAttr(f.summary) : ''}">${f.summary ? escHtml(f.summary).slice(0, 80) + (f.summary.length > 80 ? '…' : '') : '—'}</span></td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(f.last_seen)}</span></td>
         <td>${f.resolved_at ? '<span class="status online"><span class="dot"></span>Đã khắc phục</span>' : '<span class="status offline"><span class="dot"></span>Còn tồn tại</span>'}</td>
-        <td><button class="btn-icon" title="Xem chi tiết & giải pháp xử lý" onclick="openVulnFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button></td>
+        <td style="white-space:nowrap">
+          <button class="btn-icon" title="Xem chi tiết & giải pháp xử lý" onclick="openVulnFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>
+          ${!f.resolved_at ? `<button class="btn btn-secondary btn-sm" data-permission="vuln.update.manage" title="Cập nhật ngay gói này trên VM" onclick="handleVulnUpdateNow(${f.id}, this)">Cập nhật ngay</button>` : ''}
+        </td>
       </tr>`).join('')}
     </tbody></table>${paginationBar(vulnFindingPagination, sorted.length, 'vulnFindingPagination', 'renderVulnFindingRows')}`;
+  applyPermissionVisibility();
 }
 
 // EPSS score is a 0-1 probability — shown as a percentage. epss_score comes back from MySQL as a
@@ -6630,7 +6639,8 @@ function openVulnFindingDetail(id) {
       </div>
       <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
         <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Giải pháp xử lý</div>
-        <div style="font-size:13px;line-height:1.6">${escHtml(vulnRemediationText(f))}</div>
+        <div style="font-size:13px;line-height:1.6;margin-bottom:${f.resolved_at ? '0' : '10px'}">${escHtml(vulnRemediationText(f))}</div>
+        ${!f.resolved_at ? `<button class="btn btn-primary btn-sm" data-permission="vuln.update.manage" onclick="handleVulnUpdateNow(${f.id}, this)">Cập nhật ngay</button>` : ''}
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--fg-muted)">
         <div>Phát hiện lần đầu: ${formatTime(f.first_seen)}</div>
@@ -6644,6 +6654,7 @@ function openVulnFindingDetail(id) {
           : `<span style="font-size:12px;color:var(--fg-dim)">Không xác định được mã CVE gốc để tra thêm từ NVD.</span>`}
       </div>
     </div>`, 'detail-modal');
+  applyPermissionVisibility();
 }
 
 // Lazy/on-demand only — never fetched automatically when the modal opens, since NVD's public rate
@@ -6671,6 +6682,32 @@ async function loadVulnNvdDetail(id) {
       </div>`;
   } catch (e) {
     section.innerHTML = `<span style="font-size:12px;color:var(--red)">${escHtml(e.message)}</span>`;
+  }
+}
+
+// One-click remediation directly from a finding (table row or detail modal) — reuses the exact same
+// server-side check-then-apply flow as the "Cập nhật gói" tab (routes/vuln.js's POST
+// /findings/:id/update-now), just scoped to this one package so fixing a specific CVE doesn't
+// require manually navigating to that tab, reselecting the VM, and re-finding the same package.
+async function handleVulnUpdateNow(id, btn) {
+  if (!confirm('Cập nhật gói này ngay trên VM? Có thể khởi động lại 1 số dịch vụ liên quan. Không thể hoàn tác.')) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Đang cập nhật… (có thể mất 1-2 phút)';
+  try {
+    const { result } = await api(`/vuln/findings/${id}/update-now`, 'POST');
+    if (result?.status === 'updated') {
+      toast(`Đã cập nhật lên phiên bản ${result.toVersion}`, 'success');
+    } else if (result?.status === 'not_upgradable') {
+      toast(result.error || 'Gói này đã là bản mới nhất theo apt', 'info');
+    } else {
+      toast(result?.error || 'Cập nhật không thành công', 'error');
+    }
+    closeModal();
+    await loadVulnFindings();
+  } catch (e) {
+    toast(e.message, 'error');
+    if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = originalText; }
   }
 }
 
@@ -6985,11 +7022,22 @@ async function handleVulnApplyUpdates() {
   try {
     const { results } = await api(`/vuln/vms/${vulnUpdateSelectedVmId}/apply-updates`, 'POST', { packages });
     const okCount = results.filter(r => r.status === 'updated').length;
-    toast(`Đã cập nhật ${okCount}/${results.length} gói thành công`, okCount === results.length ? 'success' : 'error');
+    const hasRealFailure = results.some(r => r.status === 'failed');
+    toast(`Đã cập nhật ${okCount}/${results.length} gói thành công`, hasRealFailure ? 'error' : (okCount === results.length ? 'success' : 'info'));
     vulnUpdateSelectedPackages = new Set();
     openVulnUpdateResultModal(results);
     await loadVulnUpdateData();
   } catch (e) { toast(e.message, 'error'); await loadVulnUpdateData(); }
+}
+
+// Three distinct outcomes from apt-update-manager.js's evaluateApplyResult — 'updated' (version
+// genuinely changed), 'not_upgradable' (apt had no tracked update for this package at all — a
+// neutral/informational outcome, not a failure, common when "Cập nhật ngay" targets a CVE finding
+// apt doesn't map to a clean fixed version), 'failed' (apt refused/was blocked).
+function vulnUpdateStatusBadge(r) {
+  if (r.status === 'updated') return '<span class="status online"><span class="dot"></span>Đã cập nhật</span>';
+  if (r.status === 'not_upgradable') return `<span class="status warning" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Đã là bản mới nhất</span>`;
+  return `<span class="status offline" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Lỗi</span>`;
 }
 
 function openVulnUpdateResultModal(results) {
@@ -7001,7 +7049,7 @@ function openVulnUpdateResultModal(results) {
           <td style="font-family:monospace">${escHtml(r.package)}</td>
           <td style="font-family:monospace;font-size:12px">${escHtml(r.fromVersion || '—')}</td>
           <td style="font-family:monospace;font-size:12px">${escHtml(r.toVersion || '—')}</td>
-          <td>${r.status === 'updated' ? '<span class="status online"><span class="dot"></span>Đã cập nhật</span>' : `<span class="status offline" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Lỗi</span>`}</td>
+          <td>${vulnUpdateStatusBadge(r)}</td>
         </tr>`).join('')}
       </tbody>
     </table>`);
@@ -7021,7 +7069,7 @@ function renderVulnUpdateHistory() {
           <td style="font-family:monospace">${escHtml(r.package_name)}</td>
           <td style="font-family:monospace;font-size:12px">${escHtml(r.from_version || '—')}</td>
           <td style="font-family:monospace;font-size:12px">${escHtml(r.to_version || '—')}</td>
-          <td>${r.status === 'updated' ? '<span class="status online"><span class="dot"></span>Đã cập nhật</span>' : `<span class="status offline" title="${r.error ? escAttr(r.error) : ''}"><span class="dot"></span>Lỗi</span>`}</td>
+          <td>${vulnUpdateStatusBadge(r)}</td>
           <td style="font-size:12px;color:var(--fg-dim)">${escHtml(r.applied_by || '—')}</td>
         </tr>`).join('')}
       </tbody>

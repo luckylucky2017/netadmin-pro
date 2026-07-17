@@ -91,6 +91,34 @@ router.get('/findings/:id/nvd', async (req, res) => {
   res.json({ available: true, ...nvd });
 });
 
+// One-click remediation directly from a specific finding — fixing a CVE shouldn't require manually
+// navigating to the "Cập nhật gói" tab, reselecting the VM, and re-finding the same package there.
+// Reuses apt-update-manager.js's existing checkUpdates (refreshes the apt index so the install below
+// sees the real latest candidate, not a stale cached one) + applyUpdates (installs exactly this one
+// package) — no new SSH/apt logic, just the existing two-step flow scoped to one package.
+router.post('/findings/:id/update-now', requirePermission('vuln.update.manage'), async (req, res) => {
+  const finding = await db.prepare('SELECT vm_id, package_name FROM vuln_findings WHERE id = ?').get(req.params.id);
+  if (!finding) return res.status(404).json({ error: 'Không tìm thấy' });
+  const vm = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?
+  `).get(finding.vm_id);
+  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
+  if (!vm.ssh_credential_id || !vm.ip_address) {
+    return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
+  }
+  try {
+    await aptUpdateManager.checkUpdates(vm);
+    const { results, skipped } = await aptUpdateManager.applyUpdates(vm, [finding.package_name], req.user);
+    if (skipped) {
+      return res.status(400).json({ error: `Gói "${finding.package_name}" nằm trong danh sách Ngoại lệ cập nhật — xóa ngoại lệ trước nếu muốn cập nhật` });
+    }
+    await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Cập nhật ngay gói "${finding.package_name}" từ trang lỗ hổng`);
+    res.json({ result: results[0] || null });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // ── Package update management ("Cập nhật gói" tab) ──────────────────────────────────────────
 
 // Last check-updates snapshot for a VM — pure DB read, backs the tab on page load/refresh (never
