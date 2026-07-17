@@ -1,15 +1,24 @@
 // Application-level dependency vulnerability scanning via Trivy (https://trivy.dev), per VM opted in
 // (vcenter_vms.trivy_scan_enabled) — complements vuln-scanner.js's OS-package scanning (dpkg/apt via
 // OSV.dev) with app-level dependency manifests (package-lock.json, requirements.txt, go.sum,
-// pom.xml, etc.). Unlike OS packages, there's no single "list everything installed" for app
-// dependencies — the admin must say WHERE the app source/dependency files live on each VM
-// (vcenter_vms.trivy_scan_path), same reasoning as nginx-waf-collector.js needing a log path.
+// pom.xml, etc.).
 //
-// Trivy's own VulnerabilityID is already a canonical CVE directly (confirmed against a real scan —
-// no OSV-style advisory-ID remapping needed the way vuln-scanner.js's extractCanonicalCveId handles
-// for Ubuntu findings), so KEV/EPSS enrichment (vuln-enrichment.js, shared with vuln-scanner.js) can
-// use it as-is.
+// Architecture: Trivy itself is installed ONCE, locally on the netadmin-pro host (into
+// LOCAL_TRIVY_DIR below — no sudo, since the app already owns that directory) — NOT on every target
+// VM. Trivy's `fs` scan needs local filesystem access, so for each VM this module: (1) SSHes in with
+// the credential already configured for that VM (the same one used for every other collector) and
+// `find`s just the dependency manifest files under vcenter_vms.trivy_scan_path, (2) pulls those files
+// (only the manifests — not node_modules/vendor/the whole tree) via SFTP into a local temp dir that
+// mirrors the remote relative structure, (3) runs the single centrally-installed trivy binary against
+// that temp dir, (4) deletes the temp dir. Net effect: target VMs need zero installation and zero
+// sudo for this feature — only ordinary read access to their own source tree, which the SSH
+// credential already has.
 const { NodeSSH } = require('node-ssh');
+const { execFile } = require('child_process');
+const fs = require('fs');
+const fsp = fs.promises;
+const os = require('os');
+const path = require('path');
 const db = require('./database');
 const sshCredentials = require('./ssh-credentials');
 const vulnEnrichment = require('./vuln-enrichment');
@@ -18,42 +27,88 @@ const SCAN_INTERVAL_HOURS = 12;
 const TICK_MS = 30 * 60 * 1000;
 const ALERT_SEVERITIES = new Set(['critical', 'high']);
 
-// Official install method (trivy.dev/latest/getting-started/installation) — a single static binary,
-// no package-manager repo/GPG key to add. Downloaded to a fixed temp path first (no sudo needed, just
-// network) so the actual sudo'd command is an EXACT match sudoers can whitelist precisely, rather
-// than a wildcard-heavy `sudo sh -c "curl ... | sh"` that's awkward to scope safely.
-const INSTALL_SCRIPT = `
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh -o /tmp/.netadmin-trivy-install.sh 2>&1
-sudo -n sh /tmp/.netadmin-trivy-install.sh -b /usr/local/bin 2>&1 || sh /tmp/.netadmin-trivy-install.sh -b /usr/local/bin 2>&1
-rm -f /tmp/.netadmin-trivy-install.sh
-command -v trivy >/dev/null 2>&1 && echo "INSTALL_STATUS:ok" || echo "INSTALL_STATUS:failed"
-`.trim();
+// Both live inside the app's own directory (gitignored — see .gitignore) rather than a system path,
+// so install needs no sudo and the binary/DB survive a `git pull` without being tracked by git.
+// TRIVY_CACHE_DIR is set explicitly rather than left to trivy's own $HOME-based default because this
+// process may run as a system service account whose $HOME isn't guaranteed to be writable/set.
+const LOCAL_TRIVY_DIR = path.join(__dirname, '.trivy-bin');
+const LOCAL_TRIVY_BIN = path.join(LOCAL_TRIVY_DIR, 'trivy');
+const LOCAL_TRIVY_CACHE_DIR = path.join(__dirname, '.trivy-cache');
 
-const SUDOERS_HINT = '<ssh_user> ALL=(ALL) NOPASSWD: /usr/bin/sh /tmp/.netadmin-trivy-install.sh *';
+async function isLocalTrivyInstalled() {
+  try {
+    await fsp.access(LOCAL_TRIVY_BIN, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-// STATUS: line always comes first (plain echo, before any JSON) so it can be pulled out even when
-// trivy's own JSON payload follows on the same stdout stream — `--quiet` suppresses trivy's own
-// progress/log noise from stdout (confirmed against a real scan: with the DB already cached, stdout
-// is pure "STATUS:ok\n{...trivy json...}"), but message routing between stdout/stderr across trivy
-// versions isn't something to fully trust, so the JSON parser below locates the payload by its own
-// first "{" rather than assuming a fixed line count after STATUS.
-function buildScanScript(scanPath) {
-  const quotedPath = `'${String(scanPath).replace(/'/g, "'\\''")}'`;
+// Same official install method as before (trivy.dev/latest/getting-started/installation), just run
+// LOCALLY instead of over SSH — -b points at our own directory (fixed, never user input), so this
+// needs no sudo at all, unlike the old per-VM remote install.
+function installLocalTrivy() {
+  return new Promise((resolve) => {
+    const script = `mkdir -p '${LOCAL_TRIVY_DIR}' && curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b '${LOCAL_TRIVY_DIR}'`;
+    execFile('sh', ['-c', script], { timeout: 120000 }, (err, stdout, stderr) => {
+      if (err) return resolve({ ok: false, error: (stderr || err.message || 'Cài đặt Trivy thất bại').slice(0, 2000) });
+      resolve({ ok: true });
+    });
+  });
+}
+
+// Known dependency-manifest filenames across the ecosystems Trivy's fs scanner supports — only these
+// (never the full source tree/node_modules/vendor) get pulled from the VM, since Trivy parses lock
+// files directly and doesn't need installed packages present to determine versions.
+const MANIFEST_FILENAMES = [
+  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+  'requirements.txt', 'Pipfile.lock', 'poetry.lock',
+  'go.mod', 'go.sum',
+  'pom.xml', 'build.gradle', 'build.gradle.kts',
+  'Gemfile.lock', 'composer.lock',
+];
+const PRUNE_DIR_NAMES = ['node_modules', '.git', 'vendor', '.venv', 'venv', 'dist', 'build', '__pycache__', '.tox'];
+
+function shellQuoteSingle(str) {
+  return `'${String(str).replace(/'/g, "'\\''")}'`;
+}
+
+function buildFindManifestsScript(scanPath) {
+  const quotedPath = shellQuoteSingle(scanPath);
+  const pruneExpr = PRUNE_DIR_NAMES.map((d) => `-name ${shellQuoteSingle(d)}`).join(' -o ');
+  const nameExpr = MANIFEST_FILENAMES.map((n) => `-name ${shellQuoteSingle(n)}`).join(' -o ');
   return `
-if ! command -v trivy >/dev/null 2>&1; then
-  echo "STATUS:not_installed"
-  exit 0
-fi
 if [ ! -d ${quotedPath} ]; then
   echo "STATUS:path_not_found"
   exit 0
 fi
 echo "STATUS:ok"
-trivy fs --format json --scanners vuln --quiet ${quotedPath}
+find ${quotedPath} \\( -type d \\( ${pruneExpr} \\) -prune \\) -o -type f \\( ${nameExpr} \\) -print
 `.trim();
 }
 
-// Pure, testable: splits buildScanScript's stdout into { status, findings }. Real Trivy JSON
+function parseFindManifestsOutput(stdout) {
+  const lines = String(stdout || '').split('\n');
+  const status = /^STATUS:(\S+)/.exec(lines[0] || '')?.[1] || 'error';
+  if (status !== 'ok') return { status, files: [] };
+  return { status: 'ok', files: lines.slice(1).map((l) => l.trim()).filter(Boolean) };
+}
+
+function runLocalTrivyScan(dir) {
+  return new Promise((resolve) => {
+    execFile(
+      LOCAL_TRIVY_BIN,
+      ['fs', '--cache-dir', LOCAL_TRIVY_CACHE_DIR, '--format', 'json', '--scanners', 'vuln', '--quiet', dir],
+      { timeout: 120000, maxBuffer: 20 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err && !stdout) return resolve({ status: 'error', findings: [] });
+        resolve(parseTrivyScanOutput(`STATUS:ok\n${stdout}`));
+      }
+    );
+  });
+}
+
+// Pure, testable: splits a "STATUS:ok\n{...trivy json...}" string into { status, findings }. Real Trivy JSON
 // confirmed (live scan against a real npm project): top-level `Results` is entirely ABSENT (not an
 // empty array) when nothing scannable is found — every access below defaults defensively rather than
 // assuming the key exists.
@@ -107,8 +162,6 @@ const setVmStatus = db.prepare(`
   UPDATE vcenter_vms SET trivy_scan_status = ?, trivy_scan_error = ?, trivy_last_scanned_at = CURRENT_TIMESTAMP, trivy_package_count = ?
   WHERE id = ?
 `);
-const setInstallStatus = db.prepare('UPDATE vcenter_vms SET trivy_scan_status = ?, trivy_scan_error = ? WHERE id = ?');
-
 async function raiseTrivyAlert(vm, finding) {
   const already = await db.prepare(`
     SELECT id FROM alerts WHERE metric = 'trivy_finding' AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
@@ -129,19 +182,53 @@ async function raiseTrivyAlert(vm, finding) {
   );
 }
 
+// Downloads each found manifest file into tempDir, mirroring its path relative to scanPath (so
+// Trivy's own `Target` field in the JSON output, relative to the dir we hand it, lines up with the
+// real path on the VM once prefixed back in scanVm below). Skips anything find could report outside
+// scanPath (shouldn't happen — find is scoped under it — but defensive against writing outside tempDir).
+async function pullManifestFiles(ssh, scanPath, files, tempDir) {
+  const base = scanPath.replace(/\/+$/, '');
+  let pulled = 0;
+  for (const remoteFile of files) {
+    const rel = path.posix.relative(base, remoteFile);
+    if (rel.startsWith('..')) continue;
+    const localFile = path.join(tempDir, rel);
+    await fsp.mkdir(path.dirname(localFile), { recursive: true });
+    await ssh.getFile(localFile, remoteFile);
+    pulled++;
+  }
+  return pulled;
+}
+
 async function scanVm(vm) {
   const opts = await sshCredentials.buildConnectOptions(vm);
   if (!opts) { await setVmStatus.run('error', 'Chưa gán tài khoản kết nối SSH', null, vm.id); return; }
   if (!vm.trivy_scan_path) { await setVmStatus.run('error', 'Chưa cấu hình đường dẫn quét', null, vm.id); return; }
+  if (!(await isLocalTrivyInstalled())) {
+    await setVmStatus.run('error', 'Trivy chưa được cài trên máy chủ netadmin-pro — vào đầu trang "Quét mã nguồn (Trivy)" để cài đặt', null, vm.id);
+    return;
+  }
+  const scanPath = vm.trivy_scan_path.replace(/\/+$/, '') || vm.trivy_scan_path;
   const ssh = new NodeSSH();
   const scanStartedAt = toSqlDatetime(new Date());
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'netadmin-trivy-'));
   try {
     await ssh.connect(opts);
-    const result = await ssh.execCommand(buildScanScript(vm.trivy_scan_path));
-    const { status, findings } = parseTrivyScanOutput(result.stdout);
-    if (status === 'not_installed') { await setVmStatus.run('not_installed', 'Trivy chưa được cài đặt trên VM này', null, vm.id); return; }
-    if (status === 'path_not_found') { await setVmStatus.run('error', `Không tìm thấy thư mục "${vm.trivy_scan_path}"`, null, vm.id); return; }
-    if (status !== 'ok') { await setVmStatus.run('error', result.stderr || 'Lỗi không xác định khi chạy trivy', null, vm.id); return; }
+    const findResult = await ssh.execCommand(buildFindManifestsScript(scanPath));
+    const { status: findStatus, files } = parseFindManifestsOutput(findResult.stdout);
+    if (findStatus === 'path_not_found') { await setVmStatus.run('error', `Không tìm thấy thư mục "${vm.trivy_scan_path}" trên VM`, null, vm.id); return; }
+    if (!files.length) {
+      // No dependency manifest anywhere under scanPath — not an error, just nothing to report.
+      await resolveStaleFindings.run(vm.id, scanStartedAt);
+      await setVmStatus.run('ok', null, 0, vm.id);
+      return;
+    }
+
+    await pullManifestFiles(ssh, scanPath, files, tempDir);
+    await fsp.mkdir(LOCAL_TRIVY_CACHE_DIR, { recursive: true });
+    const { status, findings } = await runLocalTrivyScan(tempDir);
+    if (status !== 'ok') { await setVmStatus.run('error', `Lỗi khi Trivy quét cục bộ trên máy chủ (trạng thái: ${status})`, null, vm.id); return; }
+    for (const f of findings) f.targetFile = f.targetFile ? path.posix.join(scanPath, f.targetFile) : scanPath;
 
     const cveIdsThisScan = findings.map((f) => f.vulnId).filter((id) => /^CVE-\d{4}-\d+/.test(id));
     const [kevSet, epssScores] = await Promise.all([
@@ -172,37 +259,14 @@ async function scanVm(vm) {
     console.error(`[trivy-scanner] ${vm.name} (${vm.ip_address}): ${e.message}`);
   } finally {
     ssh.dispose();
-  }
-}
-
-async function installTrivy(vm) {
-  const opts = await sshCredentials.buildConnectOptions(vm);
-  if (!opts) throw new Error('Chưa gán tài khoản kết nối SSH');
-  await setInstallStatus.run('installing', null, vm.id);
-  const ssh = new NodeSSH();
-  try {
-    await ssh.connect(opts);
-    const result = await ssh.execCommand(INSTALL_SCRIPT);
-    const ok = /INSTALL_STATUS:ok/.test(result.stdout);
-    if (ok) {
-      await setInstallStatus.run('unknown', null, vm.id); // confirmed 'ok' only by the next real scan
-      return { ok: true };
-    }
-    const error = result.stderr || result.stdout || 'Cài đặt Trivy thất bại';
-    await setInstallStatus.run('error', error.slice(0, 2000), vm.id);
-    return { ok: false, error };
-  } catch (e) {
-    await setInstallStatus.run('error', e.message, vm.id);
-    return { ok: false, error: e.message };
-  } finally {
-    ssh.dispose();
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 // Read-only reconnaissance for the "chọn đường dẫn" dropdown in the UI — most apps this admin runs
 // live directly under /opt or /data (confirmed by the user), so rather than making them type a path
 // from memory, list what's actually there and let them pick. No user input reaches this command (the
-// two base dirs are hardcoded), so no shell-escaping is needed the way buildScanScript needs it.
+// two base dirs are hardcoded), so no shell-escaping is needed the way buildFindManifestsScript needs it.
 const DISCOVER_PATHS_SCRIPT = `
 for base in /opt /data; do
   if [ -d "$base" ]; then
@@ -250,7 +314,9 @@ function start(intervalMs = TICK_MS) {
 }
 
 module.exports = {
-  start, collectAll, scanVm, installTrivy, discoverPaths,
-  parseTrivyScanOutput, buildScanScript, parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
-  INSTALL_SCRIPT, SUDOERS_HINT,
+  start, collectAll, scanVm, discoverPaths,
+  isLocalTrivyInstalled, installLocalTrivy,
+  parseTrivyScanOutput, buildFindManifestsScript, parseFindManifestsOutput,
+  parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
+  LOCAL_TRIVY_DIR, LOCAL_TRIVY_BIN, LOCAL_TRIVY_CACHE_DIR,
 };

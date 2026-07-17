@@ -7233,12 +7233,15 @@ async function deleteVulnUpdateException(id) {
 // ── "Quét mã nguồn (Trivy)" tab — app-level dependency scanning, complements OS-package scanning
 // above. Unlike OS packages there's no single "list everything installed" — each VM needs its own
 // đường dẫn (trivy_scan_path) telling the scanner where the app's dependency manifests live.
-const TRIVY_SCAN_STATUS_LABEL = { unknown: 'Chưa quét', ok: 'Đã quét', error: 'Lỗi', not_installed: 'Chưa cài Trivy', installing: 'Đang cài...' };
-const TRIVY_SCAN_STATUS_CLASS = { ok: 'online', error: 'error', not_installed: 'warning', installing: 'installing' };
+const TRIVY_SCAN_STATUS_LABEL = { unknown: 'Chưa quét', ok: 'Đã quét', error: 'Lỗi' };
+const TRIVY_SCAN_STATUS_CLASS = { ok: 'online', error: 'error' };
 let trivyVms = [];
 let trivySearch = '';
 let trivyPagination = newPagination();
 let trivySortState = { key: null, dir: 'asc' };
+// Trivy is installed ONCE on the netadmin-pro host itself (see trivy-scanner.js) — this tracks that
+// host-level state, separate from each VM's own scan config/status. null = not checked yet.
+let trivyHostInstalled = null;
 // Most apps here live directly under /opt or /data (per admin) — offered as always-present fallback
 // options in the path picker even before "Dò tìm" has been run for a given VM.
 const TRIVY_PRESET_PATHS = ['/opt', '/data'];
@@ -7261,9 +7264,10 @@ async function renderTrivyTab() {
     body.innerHTML = `
       <div class="table-wrap">
         <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
-          <p style="margin-bottom:8px">Quét lỗ hổng trong thư viện/dependency của ứng dụng (package-lock.json, requirements.txt, go.sum, pom.xml...) bằng <a href="https://trivy.dev" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Trivy</a> — bổ sung cho phần quét gói hệ điều hành ở các tab trên. Nhập đường dẫn thư mục chứa mã nguồn/dependency trên VM rồi bấm Lưu, cài đặt Trivy nếu VM chưa có, sau đó bật quét.</p>
-          <p style="margin-bottom:0;font-size:12px">VM cần có mạng ra ngoài để Trivy tải cơ sở dữ liệu lỗ hổng lần đầu. Khác với gói hệ điều hành, sửa lỗ hổng dependency ứng dụng cần lệnh riêng theo từng ngôn ngữ (npm/pip/go/maven...) nên KHÔNG có nút tự động cập nhật — trang này chỉ phát hiện và gợi ý hướng xử lý.</p>
+          <p style="margin-bottom:8px">Quét lỗ hổng trong thư viện/dependency của ứng dụng (package-lock.json, requirements.txt, go.sum, pom.xml...) bằng <a href="https://trivy.dev" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Trivy</a> — bổ sung cho phần quét gói hệ điều hành ở các tab trên. Trivy chỉ cần cài <strong>1 lần duy nhất trên chính máy chủ netadmin-pro</strong> — các VM khác không cần cài gì, không cần quyền sudo: hệ thống tự lấy các file quản lý dependency qua kết nối SSH sẵn có rồi quét tập trung tại đây.</p>
+          <p style="margin-bottom:0;font-size:12px">Khác với gói hệ điều hành, sửa lỗ hổng dependency ứng dụng cần lệnh riêng theo từng ngôn ngữ (npm/pip/go/maven...) nên KHÔNG có nút tự động cập nhật — trang này chỉ phát hiện và gợi ý hướng xử lý.</p>
         </div>
+        <div id="trivyHostBanner"></div>
         <div class="table-toolbar">
           <div class="search-box">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -7276,9 +7280,42 @@ async function renderTrivyTab() {
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(() => { trivySearch = e.target.value; trivyPagination.page = 1; renderTrivyRows(); }, 300);
     });
-    trivyVms = await api('/trivy/vms');
+    const [vms, hostStatus] = await Promise.all([api('/trivy/vms'), api('/trivy/host-status')]);
+    trivyVms = vms;
+    trivyHostInstalled = !!hostStatus.installed;
+    renderTrivyHostBanner();
     renderTrivyRows();
   } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function renderTrivyHostBanner() {
+  const el = document.getElementById('trivyHostBanner');
+  if (!el) return;
+  if (trivyHostInstalled) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div data-permission="trivy.scan.manage" style="margin:0 16px 12px;padding:12px 14px;border-radius:var(--radius);background:var(--yellow-dim);border:1px solid var(--yellow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="font-size:13px;color:var(--yellow)"><strong>Trivy chưa được cài trên máy chủ netadmin-pro.</strong> Cần cài đặt trước khi có thể quét bất kỳ VM nào.</div>
+      <button class="btn btn-primary btn-sm" onclick="handleTrivyInstallHost(this)">Cài đặt Trivy trên máy chủ</button>
+    </div>`;
+  applyPermissionVisibility();
+}
+
+async function handleTrivyInstallHost(btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang cài đặt… (có thể mất 1 phút)';
+  try {
+    const result = await api('/trivy/install-host', 'POST');
+    if (result.ok) {
+      trivyHostInstalled = true;
+      toast('Đã cài đặt Trivy trên máy chủ thành công', 'success');
+      renderTrivyHostBanner();
+      renderTrivyRows();
+      return;
+    }
+    toast(result.error || 'Cài đặt thất bại', 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false; btn.textContent = original;
 }
 
 function toggleTrivySort(key) { toggleSortState(trivySortState, key); renderTrivyRows(); }
@@ -7296,13 +7333,12 @@ function renderTrivyRows() {
   const rows = paginateRows(sorted, trivyPagination);
   const rowOffset = (trivyPagination.page - 1) * trivyPagination.pageSize;
   wrap.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('Tên VM', 'name', trivySortState, 'toggleTrivySort')}<th>Đường dẫn quét</th><th>Bật quét</th><th>Chế độ</th><th>Trivy</th><th>Kết quả quét</th>${thSort('Quét lần cuối', 'trivy_last_scanned_at', trivySortState, 'toggleTrivySort')}<th>Hành động</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', trivySortState, 'toggleTrivySort')}<th>Đường dẫn quét</th><th>Bật quét</th><th>Chế độ</th><th>Kết quả quét</th>${thSort('Quét lần cuối', 'trivy_last_scanned_at', trivySortState, 'toggleTrivySort')}<th>Hành động</th></tr></thead>
     <tbody>${rows.map((v, i) => {
       const eligible = !!(v.ssh_credential_id && v.ip_address);
       const status = v.trivy_scan_status || 'unknown';
       const checked = !!v.trivy_scan_enabled;
       const mode = v.trivy_scan_mode === 'manual' ? 'manual' : 'auto';
-      const installed = status !== 'not_installed';
       return `<tr data-vm-id="${v.id}">
         <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
         <td style="font-weight:600">${escHtml(v.name)}</td>
@@ -7328,18 +7364,13 @@ function renderTrivyRows() {
           </select>
         </td>
         <td>
-          ${installed
-            ? '<span class="status online"><span class="dot"></span>Đã cài</span>'
-            : `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${eligible ? '' : 'disabled'} onclick="handleTrivyInstall(${v.id}, this)">Cài đặt Trivy</button>`}
-        </td>
-        <td>
           <span class="status ${TRIVY_SCAN_STATUS_CLASS[status] || 'unknown'}" title="${escAttr(v.trivy_scan_error || '')}"><span class="dot"></span>${TRIVY_SCAN_STATUS_LABEL[status] || status}</span>
           ${v.trivy_package_count != null ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">${v.trivy_package_count} lỗ hổng</div>` : ''}
         </td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${v.trivy_last_scanned_at ? formatTime(v.trivy_last_scanned_at) : '—'}</span></td>
         <td style="white-space:nowrap">
           <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="saveTrivyConfig(${v.id}, this)">Lưu</button>
-          ${checked ? `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="handleTrivyScanNow(${v.id}, this)">Quét ngay</button>` : ''}
+          ${checked ? `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${trivyHostInstalled ? '' : 'disabled title="Cần cài Trivy trên máy chủ trước (xem thông báo ở đầu trang)"'} onclick="handleTrivyScanNow(${v.id}, this)">Quét ngay</button>` : ''}
           ${v.trivy_package_count ? `<button class="btn-icon" title="Xem lỗ hổng" onclick="openTrivyFindingsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
         </td>
       </tr>`;
@@ -7393,17 +7424,6 @@ async function saveTrivyConfig(id, btn) {
     trivyVms = await api('/trivy/vms');
     renderTrivyRows();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
-}
-
-async function handleTrivyInstall(id, btn) {
-  btn.disabled = true;
-  btn.textContent = 'Đang cài đặt…';
-  try {
-    const result = await api(`/trivy/vms/${id}/install`, 'POST');
-    toast(result.ok ? 'Đã cài đặt Trivy thành công' : (result.error || 'Cài đặt thất bại'), result.ok ? 'success' : 'error');
-    trivyVms = await api('/trivy/vms');
-    renderTrivyRows();
-  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Cài đặt Trivy'; }
 }
 
 async function handleTrivyScanNow(id, btn) {

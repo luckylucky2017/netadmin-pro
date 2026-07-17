@@ -39,16 +39,16 @@ router.patch('/vms/:id', requirePermission('trivy.scan.manage'), async (req, res
   res.json({ message: 'OK' });
 });
 
-router.post('/vms/:id/install', requirePermission('trivy.scan.manage'), async (req, res) => {
-  const vm = await db.prepare(`
-    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?
-  `).get(req.params.id);
-  if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
-  if (!vm.ssh_credential_id || !vm.ip_address) {
-    return res.status(400).json({ error: 'VM này chưa có tài khoản kết nối SSH — cần cấu hình trước' });
-  }
-  const result = await trivyScanner.installTrivy(vm);
-  await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, result.ok ? 'Cài đặt Trivy thành công' : `Cài đặt Trivy thất bại: ${result.error}`);
+// Trivy is installed ONCE, locally on the netadmin-pro host itself — NOT per VM (see trivy-scanner.js
+// header comment for the full architecture). These two routes replace the old per-VM install/status.
+router.get('/host-status', requirePermission('trivy.scan.manage'), async (req, res) => {
+  res.json({ installed: await trivyScanner.isLocalTrivyInstalled() });
+});
+
+router.post('/install-host', requirePermission('trivy.scan.manage'), async (req, res) => {
+  const result = await trivyScanner.installLocalTrivy();
+  await logActivity(req.user, 'UPDATE', 'trivy_host', 1, 'Trivy (máy chủ netadmin-pro)',
+    result.ok ? 'Cài đặt Trivy trên máy chủ netadmin-pro thành công' : `Cài đặt Trivy trên máy chủ netadmin-pro thất bại: ${result.error}`);
   res.json(result);
 });
 
@@ -126,7 +126,7 @@ router.get('/stats', async (req, res) => {
   for (const row of bySeverity) if (row.severity in counts) counts[row.severity] = row.cnt;
   const totalOpen = bySeverity.reduce((sum, r) => sum + r.cnt, 0);
   const vmsScanned = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1").get()).cnt;
-  const vmsWithError = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1 AND trivy_scan_status IN ('error', 'not_installed')").get()).cnt;
+  const vmsWithError = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE trivy_scan_enabled = 1 AND trivy_scan_status = 'error'").get()).cnt;
   const inKevCount = (await db.prepare("SELECT COUNT(*) as cnt FROM trivy_findings WHERE resolved_at IS NULL AND in_kev = 1").get()).cnt;
   res.json({ totalOpen, counts, vmsScanned, vmsWithError, inKevCount });
 });
