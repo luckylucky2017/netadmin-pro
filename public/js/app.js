@@ -6475,6 +6475,7 @@ async function renderVuln(search = '') {
       <div class="filter-tab ${vulnTab === 'findings' ? 'active' : ''}" data-tab="findings" onclick="setVulnTab('findings')">Lỗ hổng phát hiện</div>
       <div class="filter-tab ${vulnTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setVulnTab('manage')">Quản lý quét</div>
       <div class="filter-tab ${vulnTab === 'updates' ? 'active' : ''}" data-tab="updates" onclick="setVulnTab('updates')">Cập nhật gói</div>
+      <div class="filter-tab ${vulnTab === 'trivy' ? 'active' : ''}" data-tab="trivy" onclick="setVulnTab('trivy')">Quét mã nguồn (Trivy)</div>
     </div>
     <div id="vulnTabBody"></div>`;
     renderVulnTabBody(search);
@@ -6491,6 +6492,7 @@ function setVulnTab(tab) {
 function renderVulnTabBody(search = '') {
   if (vulnTab === 'manage') renderVulnManage();
   else if (vulnTab === 'updates') renderVulnUpdates();
+  else if (vulnTab === 'trivy') renderTrivyTab();
   else renderVulnFindings(search);
 }
 
@@ -7226,6 +7228,251 @@ async function deleteVulnUpdateException(id) {
     renderVulnUpdateExceptionsList();
     await loadVulnUpdateData();
   } catch (err) { toast(err.message, 'error'); }
+}
+
+// ── "Quét mã nguồn (Trivy)" tab — app-level dependency scanning, complements OS-package scanning
+// above. Unlike OS packages there's no single "list everything installed" — each VM needs its own
+// đường dẫn (trivy_scan_path) telling the scanner where the app's dependency manifests live.
+const TRIVY_SCAN_STATUS_LABEL = { unknown: 'Chưa quét', ok: 'Đã quét', error: 'Lỗi', not_installed: 'Chưa cài Trivy', installing: 'Đang cài...' };
+const TRIVY_SCAN_STATUS_CLASS = { ok: 'online', error: 'error', not_installed: 'warning', installing: 'installing' };
+let trivyVms = [];
+let trivySearch = '';
+let trivyPagination = newPagination();
+let trivySortState = { key: null, dir: 'asc' };
+
+async function renderTrivyTab() {
+  const body = document.getElementById('vulnTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    body.innerHTML = `
+      <div class="table-wrap">
+        <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+          <p style="margin-bottom:8px">Quét lỗ hổng trong thư viện/dependency của ứng dụng (package-lock.json, requirements.txt, go.sum, pom.xml...) bằng <a href="https://trivy.dev" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Trivy</a> — bổ sung cho phần quét gói hệ điều hành ở các tab trên. Nhập đường dẫn thư mục chứa mã nguồn/dependency trên VM rồi bấm Lưu, cài đặt Trivy nếu VM chưa có, sau đó bật quét.</p>
+          <p style="margin-bottom:0;font-size:12px">VM cần có mạng ra ngoài để Trivy tải cơ sở dữ liệu lỗ hổng lần đầu. Khác với gói hệ điều hành, sửa lỗ hổng dependency ứng dụng cần lệnh riêng theo từng ngôn ngữ (npm/pip/go/maven...) nên KHÔNG có nút tự động cập nhật — trang này chỉ phát hiện và gợi ý hướng xử lý.</p>
+        </div>
+        <div class="table-toolbar">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="trivySearch" placeholder="Tìm theo tên VM, IP..." value="${escAttr(trivySearch)}">
+          </div>
+        </div>
+        <div id="trivyTableWrap"></div>
+      </div>`;
+    document.getElementById('trivySearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { trivySearch = e.target.value; trivyPagination.page = 1; renderTrivyRows(); }, 300);
+    });
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
+}
+
+function toggleTrivySort(key) { toggleSortState(trivySortState, key); renderTrivyRows(); }
+
+function renderTrivyRows() {
+  const wrap = document.getElementById('trivyTableWrap');
+  if (!wrap) return;
+  const q = trivySearch.trim().toLowerCase();
+  const filtered = q ? trivyVms.filter(v => (v.name || '').toLowerCase().includes(q) || (v.ip_address || '').toLowerCase().includes(q)) : trivyVms;
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không tìm thấy VM</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, trivySortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, trivyPagination);
+  const rowOffset = (trivyPagination.page - 1) * trivyPagination.pageSize;
+  wrap.innerHTML = `<table>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', trivySortState, 'toggleTrivySort')}<th>Đường dẫn quét</th><th>Bật quét</th><th>Chế độ</th><th>Trivy</th><th>Kết quả quét</th>${thSort('Quét lần cuối', 'trivy_last_scanned_at', trivySortState, 'toggleTrivySort')}<th>Hành động</th></tr></thead>
+    <tbody>${rows.map((v, i) => {
+      const eligible = !!(v.ssh_credential_id && v.ip_address);
+      const status = v.trivy_scan_status || 'unknown';
+      const checked = !!v.trivy_scan_enabled;
+      const mode = v.trivy_scan_mode === 'manual' ? 'manual' : 'auto';
+      const installed = status !== 'not_installed';
+      return `<tr data-vm-id="${v.id}">
+        <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
+        <td style="font-weight:600">${escHtml(v.name)}</td>
+        <td><input type="text" class="trivy-path" data-id="${v.id}" placeholder="/opt/myapp" value="${escAttr(v.trivy_scan_path || '')}" style="min-width:200px;font-family:monospace;font-size:12px" ${eligible ? '' : 'disabled'}></td>
+        <td>
+          <label class="toggle-switch" data-permission="trivy.scan.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}">
+            <input type="checkbox" class="trivy-enabled" data-id="${v.id}" ${checked ? 'checked' : ''} ${eligible ? '' : 'disabled'}>
+            <span class="toggle-slider"></span>
+          </label>
+        </td>
+        <td>
+          <select class="trivy-mode filter-select" data-id="${v.id}" style="font-size:12px;padding:4px 8px" ${eligible ? '' : 'disabled'}>
+            <option value="auto" ${mode === 'auto' ? 'selected' : ''}>Tự động (12h)</option>
+            <option value="manual" ${mode === 'manual' ? 'selected' : ''}>Thủ công</option>
+          </select>
+        </td>
+        <td>
+          ${installed
+            ? '<span class="status online"><span class="dot"></span>Đã cài</span>'
+            : `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${eligible ? '' : 'disabled'} onclick="handleTrivyInstall(${v.id}, this)">Cài đặt Trivy</button>`}
+        </td>
+        <td>
+          <span class="status ${TRIVY_SCAN_STATUS_CLASS[status] || 'unknown'}" title="${escAttr(v.trivy_scan_error || '')}"><span class="dot"></span>${TRIVY_SCAN_STATUS_LABEL[status] || status}</span>
+          ${v.trivy_package_count != null ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">${v.trivy_package_count} lỗ hổng</div>` : ''}
+        </td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${v.trivy_last_scanned_at ? formatTime(v.trivy_last_scanned_at) : '—'}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="saveTrivyConfig(${v.id}, this)">Lưu</button>
+          ${checked ? `<button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="handleTrivyScanNow(${v.id}, this)">Quét ngay</button>` : ''}
+          ${v.trivy_package_count ? `<button class="btn-icon" title="Xem lỗ hổng" onclick="openTrivyFindingsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
+        </td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>${paginationBar(trivyPagination, sorted.length, 'trivyPagination', 'renderTrivyRows')}`;
+  applyPermissionVisibility();
+}
+
+async function saveTrivyConfig(id, btn) {
+  const enabledCb = document.querySelector(`.trivy-enabled[data-id="${id}"]`);
+  const pathInput = document.querySelector(`.trivy-path[data-id="${id}"]`);
+  const modeSelect = document.querySelector(`.trivy-mode[data-id="${id}"]`);
+  const enabled = !!enabledCb?.checked;
+  const scanPath = pathInput?.value.trim() || '';
+  const mode = modeSelect?.value === 'manual' ? 'manual' : 'auto';
+  btn.disabled = true;
+  try {
+    await api(`/trivy/vms/${id}`, 'PATCH', { enabled, scanPath, mode });
+    toast(enabled ? 'Đã bật quét mã nguồn' : 'Đã lưu cấu hình', 'success');
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function handleTrivyInstall(id, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Đang cài đặt…';
+  try {
+    const result = await api(`/trivy/vms/${id}/install`, 'POST');
+    toast(result.ok ? 'Đã cài đặt Trivy thành công' : (result.error || 'Cài đặt thất bại'), result.ok ? 'success' : 'error');
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Cài đặt Trivy'; }
+}
+
+async function handleTrivyScanNow(id, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang quét… (có thể mất 1-2 phút)';
+  try {
+    const result = await api(`/trivy/vms/${id}/scan-now`, 'POST');
+    if (result.trivy_scan_status === 'ok') toast(`Quét xong — tìm thấy ${result.trivy_package_count} lỗ hổng`, 'success');
+    else toast(result.trivy_scan_error || 'Quét gặp lỗi', 'error');
+    trivyVms = await api('/trivy/vms');
+    renderTrivyRows();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = original; }
+}
+
+let trivyFindingRows = [];
+
+async function openTrivyFindingsModal(vmId) {
+  const vm = trivyVms.find(v => v.id === vmId);
+  if (!vm) return;
+  openModal(`Lỗ hổng mã nguồn — ${vm.name}`, `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
+  try {
+    trivyFindingRows = await api(`/trivy/findings?vmId=${vmId}&limit=500`);
+    const body = document.getElementById('modalBody');
+    if (!trivyFindingRows.length) {
+      body.innerHTML = `<div class="empty-state"><h3>Không có lỗ hổng nào</h3></div>`;
+      return;
+    }
+    body.innerHTML = `<div style="max-height:60vh;overflow:auto"><table>
+      <thead><tr><th>File</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
+      <tbody>${trivyFindingRows.map(f => `
+        <tr>
+          <td style="font-family:monospace;font-size:12px">${escHtml(f.target_file || '—')}<div style="color:var(--fg-dim)">${escHtml(f.ecosystem || '')}</div></td>
+          <td style="font-family:monospace">${escHtml(f.package_name)}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(f.package_version)}</td>
+          <td>
+            ${f.reference_url ? `<a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${escHtml(f.vuln_id)}</a>` : escHtml(f.vuln_id)}
+            ${f.in_kev ? `<span class="severity critical" title="CISA KEV: đang bị khai thác thực tế ngoài đời" style="margin-left:4px">KEV</span>` : ''}
+          </td>
+          <td>${vulnSeverityBadge(f.severity)}</td>
+          <td>${vulnEpssCell(f)}</td>
+          <td style="font-size:12px;max-width:260px">${escHtml(trivyRemediationText(f))}</td>
+          <td><button class="btn-icon" title="Xem chi tiết" onclick="openTrivyFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table></div>`;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+  }
+}
+
+// Unlike vulnRemediationText (apt-based OS packages, one uniform command), each language ecosystem
+// needs its own fix command — no single automatable action, so this only ever produces guidance text.
+function trivyRemediationText(f) {
+  const cmdByEcosystem = {
+    npm: `npm install ${f.package_name}@${f.fixed_version || 'latest'} (hoặc sửa package.json rồi npm install)`,
+    yarn: `yarn upgrade ${f.package_name}@${f.fixed_version || 'latest'}`,
+    pip: `pip install --upgrade ${f.package_name}${f.fixed_version ? `==${f.fixed_version}` : ''}`,
+    poetry: `poetry add ${f.package_name}${f.fixed_version ? `@${f.fixed_version}` : ''}`,
+    gomod: `go get ${f.package_name}${f.fixed_version ? `@${f.fixed_version}` : ''} && go mod tidy`,
+    maven: `Cập nhật version của ${f.package_name} trong pom.xml lên ${f.fixed_version || 'bản mới nhất'} rồi build lại`,
+    gradle: `Cập nhật version của ${f.package_name} trong build.gradle lên ${f.fixed_version || 'bản mới nhất'} rồi build lại`,
+    bundler: `bundle update ${f.package_name}`,
+  };
+  if (f.fixed_version && cmdByEcosystem[f.ecosystem]) return cmdByEcosystem[f.ecosystem];
+  if (f.fixed_version) return `Nâng cấp "${f.package_name}" lên phiên bản ${f.fixed_version} trong file quản lý dependency (${f.target_file || '?'}) rồi cài đặt lại.`;
+  return `Chưa có phiên bản vá cho "${f.package_name}" — theo dõi cập nhật từ nhà phát triển thư viện.`;
+}
+
+function openTrivyFindingDetail(id) {
+  const f = trivyFindingRows.find(r => r.id === id);
+  if (!f) return;
+  openModal(`${f.package_name} — ${f.vuln_id}`, `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      ${f.in_kev ? `<div style="background:var(--red-dim);border:1px solid var(--red);border-radius:var(--radius);padding:10px 12px;font-size:13px;color:var(--red);font-weight:600">CISA KEV — CVE này đang bị khai thác thực tế ngoài đời, cần ưu tiên xử lý trước bất kể mức độ.</div>` : ''}
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">File</div><div style="font-family:monospace">${escHtml(f.target_file || '—')}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Package</div><div style="font-family:monospace">${escHtml(f.package_name)}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Phiên bản hiện tại</div><div style="font-family:monospace">${escHtml(f.package_version)}</div></div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">Mức độ</div>${vulnSeverityBadge(f.severity)}</div>
+        <div><div style="font-size:11px;color:var(--fg-dim);margin-bottom:2px">EPSS</div>${vulnEpssCell(f)}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Mô tả</div>
+        <div style="font-size:13px;line-height:1.6;white-space:pre-wrap">${escHtml(f.details || f.summary || 'Không có mô tả')}</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px">Giải pháp xử lý</div>
+        <div style="font-size:13px;line-height:1.6">${escHtml(trivyRemediationText(f))}</div>
+      </div>
+      ${f.reference_url ? `<div><a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:13px">Xem chi tiết tham khảo →</a></div>` : ''}
+      <div id="trivyNvdSection">
+        ${/^CVE-\d{4}-\d+/.test(f.vuln_id)
+          ? `<button class="btn btn-secondary btn-sm" onclick="loadTrivyNvdDetail(${f.id})">Xem thêm CVSS/CWE từ NVD (${escHtml(f.vuln_id)})</button>`
+          : `<span style="font-size:12px;color:var(--fg-dim)">Mã lỗ hổng này không phải định dạng CVE chuẩn.</span>`}
+      </div>
+    </div>`, 'detail-modal');
+}
+
+async function loadTrivyNvdDetail(id) {
+  const section = document.getElementById('trivyNvdSection');
+  if (!section) return;
+  section.innerHTML = `<div style="font-size:12px;color:var(--fg-dim)">Đang tải từ NVD...</div>`;
+  try {
+    const r = await api(`/trivy/findings/${id}/nvd`);
+    if (!r.available) {
+      section.innerHTML = `<span style="font-size:12px;color:var(--fg-dim)">${escHtml(r.reason || 'Không có dữ liệu')}</span>`;
+      return;
+    }
+    section.innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;color:var(--fg-dim);margin-bottom:6px">Dữ liệu bổ sung từ NVD</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px">
+          ${r.cvssScore != null ? `<div><span style="color:var(--fg-dim)">CVSS v${escHtml(r.cvssVersion || '?')}:</span> <strong>${r.cvssScore}</strong> (${escHtml(r.cvssSeverity || '')})</div>` : '<div style="color:var(--fg-dim)">Chưa có điểm CVSS trên NVD</div>'}
+          ${r.cwes && r.cwes.length ? `<div><span style="color:var(--fg-dim)">CWE:</span> ${r.cwes.map(escHtml).join(', ')}</div>` : ''}
+        </div>
+        ${r.cvssVector ? `<div style="font-family:monospace;font-size:11px;color:var(--fg-muted);margin-top:6px">${escHtml(r.cvssVector)}</div>` : ''}
+        <div style="margin-top:8px"><a href="${escAttr(r.nvdUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:12px">Xem trên NVD →</a></div>
+      </div>`;
+  } catch (e) {
+    section.innerHTML = `<span style="font-size:12px;color:var(--red)">${escHtml(e.message)}</span>`;
+  }
 }
 
 // ─── ACTIVITY ─────────────────────────────────────────────────────────────────

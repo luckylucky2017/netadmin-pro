@@ -95,6 +95,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/reports', requireAuth, require('./routes/reports'));
   app.use('/api/fail2ban-config', requireAuth, require('./routes/fail2ban-config'));
   app.use('/api/vuln', requireAuth, require('./routes/vuln'));
+  app.use('/api/trivy', requireAuth, require('./routes/trivy'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([
@@ -167,6 +168,7 @@ if (!process.env.SESSION_SECRET) {
     require('./pfsense-collector').start();
     require('./nginx-waf-collector').start();
     require('./vuln-scanner').start();
+    require('./trivy-scanner').start();
   } else {
     console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');
   }

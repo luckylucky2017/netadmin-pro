@@ -634,6 +634,43 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_vuln_finding (vm_id, package_name, vuln_id)
   );
 
+  -- Application-level dependency vulnerabilities (package-lock.json, requirements.txt, go.sum, etc.)
+  -- found by Trivy (trivy-scanner.js) — a separate table from vuln_findings (OS packages via OSV.dev)
+  -- rather than reusing it: Trivy's VulnerabilityID is already a canonical CVE directly usable for
+  -- KEV/EPSS/NVD lookups (no OSV-style advisory-ID remapping needed — confirmed against a real scan),
+  -- and critically, fixing an app dependency needs an entirely different action per ecosystem
+  -- (npm/pip/go/maven each have their own install command, editing a manifest file, possibly a
+  -- rebuild) — nothing like the single uniform "apt-get install --only-upgrade" this app already
+  -- automates for OS packages, so these findings deliberately do NOT get a one-click "Cập nhật ngay"
+  -- the way vuln_findings does.
+  CREATE TABLE IF NOT EXISTS trivy_findings (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    vm_name VARCHAR(255),
+    -- VARCHAR(255), not longer — this column is part of uq_trivy_finding below, and combined with
+    -- package_name+vuln_id at utf8mb4 (4 bytes/char) a longer size blows past InnoDB's 3072-byte
+    -- max index length (confirmed the hard way: VARCHAR(500) here failed CREATE TABLE with
+    -- ER_TOO_LONG_KEY on a real boot) — matches this app's existing path-column convention
+    -- (waf_log_path is also VARCHAR(255)).
+    target_file VARCHAR(255),
+    ecosystem VARCHAR(30),
+    package_name VARCHAR(255) NOT NULL,
+    package_version VARCHAR(150) NOT NULL,
+    vuln_id VARCHAR(100) NOT NULL,
+    summary TEXT,
+    details TEXT,
+    severity VARCHAR(20) DEFAULT 'unknown',
+    reference_url TEXT,
+    fixed_version VARCHAR(150),
+    in_kev TINYINT DEFAULT 0,
+    epss_score DECIMAL(6,5),
+    epss_percentile DECIMAL(6,5),
+    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    UNIQUE KEY uq_trivy_finding (vm_id, target_file, package_name, vuln_id)
+  );
+
   -- Snapshot of "what apt currently reports as upgradable" for a VM, from the last "Kiểm tra update"
   -- click — see apt-update-manager.js. Wholesale-replaced on every check (DELETE+INSERT), not an
   -- accumulating log — this reflects CURRENT reality only, so a package that's no longer upgradable
@@ -1045,6 +1082,17 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN in_kev TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN epss_score DECIMAL(6,5)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vuln_findings ADD COLUMN epss_percentile DECIMAL(6,5)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  // App-source dependency scanning (Trivy) opt-in and status, per VM — mirrors the vuln_scan_* triplet
+  // pattern already used for OS-package scanning. trivy_scan_path is required before enabling (unlike
+  // OS packages, there's no single "list every installed thing" — the admin has to say where the app
+  // source/dependency manifests actually live on this VM). See trivy-scanner.js.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_enabled TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_path VARCHAR(500)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_mode VARCHAR(10) DEFAULT 'auto'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_last_scanned_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_status VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_scan_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN trivy_package_count INT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {
