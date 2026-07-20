@@ -82,15 +82,20 @@ router.get('/:id/history', async (req, res) => {
   const bucketSeconds = Math.max(60, Math.floor(rangeSeconds / 150));
   // severity aggregate mirrors severityOf() above but as a SQL CASE/MAX — worst-case wins per bucket
   // (same reasoning as the pre-existing MIN(status='up'): one 5xx in a bucket should show the bucket
-  // as down, not get averaged away).
+  // as down, not get averaged away). worst_code (MAX of any 4xx/5xx seen) lets the tooltip show a
+  // real status code even at coarse zoom levels, not just the category — deliberately never
+  // fabricated: stays NULL if nothing in the bucket had an actual HTTP code (e.g. every failure was
+  // a connection-level timeout), so the frontend correctly falls back to a plain "Down" instead of
+  // implying a code that was never actually returned.
   const rows = await db.prepare(`
     SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(checked_at)/?)*?) as t, AVG(response_ms) as response_ms, MIN(status='up') as up,
       MAX(CASE WHEN status_code >= 500 THEN 3 WHEN status_code >= 400 THEN 2 WHEN status_code IS NULL AND status != 'up' THEN 3 ELSE 1 END) as severity,
+      MAX(CASE WHEN status_code >= 400 THEN status_code END) as worst_code,
       COUNT(*) as cnt
     FROM monitor_checks WHERE monitor_id=? AND checked_at >= ?
     GROUP BY t ORDER BY t ASC
   `).all(bucketSeconds, bucketSeconds, req.params.id, fromSql);
-  res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms != null ? Math.round(r.response_ms) : null, up: r.up, severity: r.severity })), uptime_pct, bucketed: true });
+  res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms != null ? Math.round(r.response_ms) : null, up: r.up, severity: r.severity, status_code: r.worst_code })), uptime_pct, bucketed: true });
 });
 
 // Hostnames, IPv4, IPv6 only — rejects shell metacharacters as defense-in-depth. Not strictly

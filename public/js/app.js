@@ -6307,20 +6307,29 @@ async function loadMonitorChart(id, hours, from, to) {
 // pre-computed from routes/monitors.js (1=up/2xx-3xx, 2=warn/4xx, 3=down/5xx or no response at all,
 // which covers tcp/ping monitors too since they have no status_code and fall back to their up/down).
 const SEVERITY_COLOR = { 1: 'var(--accent)', 2: 'var(--yellow)', 3: 'var(--red)' };
+// Set by renderStatusCodeChart, read by handleStatusChartHover via a plain integer data-idx — an
+// index lookup into the real point objects, rather than re-serializing free-text error messages
+// into an HTML attribute (this codebase's escAttr()/escHtml() are each suited to a different
+// context — a JS-string-inside-onclick and HTML text content respectively — neither is a correct
+// generic double-quoted-attribute escaper, so sidestepping the question entirely is simplest).
+let statusChartPoints = [];
 
 function renderStatusCodeChart(points) {
   if (!points || !points.length) return `<div style="padding:40px 0;text-align:center;color:var(--fg-dim);font-size:13px">Chưa có dữ liệu trong khoảng này</div>`;
+  statusChartPoints = points;
   const W = 760, H = 140, padL = 10, padR = 10, padT = 10, padB = 24;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const n = points.length;
   const x = i => padL + (n <= 1 ? 0 : (i / n) * plotW);
   const segW = n <= 1 ? plotW : plotW / n;
 
+  // data-idx instead of a native SVG <title> child — native title tooltips are slow (~1s delay in
+  // most browsers) and unstyled; handleStatusChartHover below looks the point back up by index to
+  // show a custom tooltip immediately on hover, which is what an admin actually needs when trying
+  // to pin down exactly when a 5xx happened.
   const bars = points.map((p, i) => {
     const color = SEVERITY_COLOR[p.severity] || SEVERITY_COLOR[3];
-    const codeText = p.status_code != null ? `HTTP ${p.status_code}` : (p.severity === 1 ? 'Up' : 'Down');
-    const title = `${formatTime(p.t)} — ${codeText}${p.error ? ': ' + p.error : ''}`;
-    return `<rect x="${x(i).toFixed(1)}" y="${padT}" width="${Math.max(1, segW - 1).toFixed(1)}" height="${plotH}" fill="${color}" rx="1"><title>${escHtml(title)}</title></rect>`;
+    return `<rect x="${x(i).toFixed(1)}" y="${padT}" width="${Math.max(1, segW - 1).toFixed(1)}" height="${plotH}" fill="${color}" rx="1" style="cursor:pointer" data-idx="${i}"/>`;
   }).join('');
 
   const tickIdxs = [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
@@ -6332,9 +6341,44 @@ function renderStatusCodeChart(points) {
       <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--yellow);margin-right:4px;vertical-align:middle"></span>Cảnh báo (4xx)</span>
       <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--red);margin-right:4px;vertical-align:middle"></span>Chết (5xx / không phản hồi)</span>
     </div>
-    <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;overflow:visible">
-      ${bars}${xLabels}
-    </svg>`;
+    <div class="status-chart-wrap" style="position:relative">
+      <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;overflow:visible" onmousemove="handleStatusChartHover(event)" onmouseleave="hideStatusChartTooltip(event)">
+        ${bars}${xLabels}
+      </svg>
+      <div class="status-chart-tooltip" style="display:none;position:absolute;pointer-events:none;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,0.2);z-index:20;max-width:280px"></div>
+    </div>`;
+}
+
+// Custom hover tooltip for renderStatusCodeChart — reads the data-* attrs set on each bar and
+// positions a floating div near the cursor, immediately (no native-title delay). event.currentTarget
+// is the <svg> the handler is bound to (inline onmousemove), so mousemove anywhere over it — bars or
+// the gaps between them — still resolves via elementFromPoint to whichever bar is under the cursor.
+function handleStatusChartHover(e) {
+  const wrap = e.currentTarget.closest('.status-chart-wrap');
+  const tip = wrap?.querySelector('.status-chart-tooltip');
+  if (!tip) return;
+  const rectEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('rect[data-idx]');
+  const p = rectEl ? statusChartPoints[Number(rectEl.dataset.idx)] : null;
+  if (!p) { tip.style.display = 'none'; return; }
+  const label = p.severity === 1 ? 'Sống' : p.severity === 2 ? 'Cảnh báo' : 'Chết';
+  const color = SEVERITY_COLOR[p.severity] || SEVERITY_COLOR[3];
+  const codeText = p.status_code != null ? `HTTP ${p.status_code}` : (p.severity === 1 ? 'Up' : 'Down');
+  tip.innerHTML = `
+    <div style="font-weight:600;color:${color}">${escHtml(label)} — ${escHtml(codeText)}</div>
+    <div style="color:var(--fg-muted);margin-top:2px;white-space:nowrap">${escHtml(formatTime(p.t))}</div>
+    ${p.error ? `<div style="color:var(--fg-dim);margin-top:4px;white-space:normal">${escHtml(p.error)}</div>` : ''}
+  `;
+  const wrapRect = wrap.getBoundingClientRect();
+  let left = e.clientX - wrapRect.left + 14;
+  // Flip to the left side once the tooltip would overflow the chart's right edge — a plain +14px
+  // offset works for most of the chart but clips off-screen for bars near the end of the range.
+  if (left + 260 > wrapRect.width) left = e.clientX - wrapRect.left - 274;
+  tip.style.left = `${Math.max(0, left)}px`;
+  tip.style.top = `${e.clientY - wrapRect.top - 8}px`;
+  tip.style.display = 'block';
+}
+function hideStatusChartTooltip(e) {
+  e.currentTarget.closest('.status-chart-wrap')?.querySelector('.status-chart-tooltip')?.style.setProperty('display', 'none');
 }
 
 // Detailed SSL/TLS certificate panel for the monitor detail modal — the card-view certBadge() stays
