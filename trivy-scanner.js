@@ -179,10 +179,13 @@ const setDockerVmStatus = db.prepare(`
   UPDATE vcenter_vms SET trivy_docker_scan_status = ?, trivy_docker_scan_error = ?, trivy_docker_last_scanned_at = CURRENT_TIMESTAMP, trivy_docker_image_count = ?
   WHERE id = ?
 `);
-async function raiseTrivyAlert(vm, finding) {
+// sourceType defaults to 'vcenter_vm' for this module's own fs/docker scans; harbor-scanner.js
+// passes 'harbor_repo' explicitly and a {id, name} shaped like a harbor_repos row instead of a real
+// VM — this function only ever reads .id/.name off `source`, so it works unmodified either way.
+async function raiseTrivyAlert(source, finding, sourceType = 'vcenter_vm') {
   const already = await db.prepare(`
-    SELECT id FROM alerts WHERE metric = 'trivy_finding' AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
-  `).get(vm.id, `${finding.package_name}:${finding.vuln_id}`);
+    SELECT id FROM alerts WHERE metric = 'trivy_finding' AND source_type = ? AND source_id = ? AND metric_value = ? AND status = 'open'
+  `).get(sourceType, source.id, `${finding.package_name}:${finding.vuln_id}`);
   if (already) return;
   // Same reasoning as vuln-scanner.js's raiseVulnAlert: a CISA KEV listing forces 'critical'
   // regardless of Trivy's own severity, since active exploitation trumps any static rating.
@@ -190,12 +193,12 @@ async function raiseTrivyAlert(vm, finding) {
   const kevPrefix = finding.inKev ? '[CISA KEV — đang bị khai thác thực tế] ' : '';
   await db.prepare(`
     INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
-    VALUES ('security', ?, ?, ?, 'vcenter_vm', ?, ?, 'trivy_finding', ?, 'open')
+    VALUES ('security', ?, ?, ?, ?, ?, ?, 'trivy_finding', ?, 'open')
   `).run(
     alertSeverity,
     `${kevPrefix}Phát hiện lỗ hổng trong mã nguồn ứng dụng (${finding.severity})`,
-    `Package "${finding.package_name}" (${finding.package_version}, ${finding.ecosystem || '?'} — ${finding.target_file || '?'}) trên VM "${vm.name}" dính lỗ hổng ${finding.vuln_id}${finding.summary ? `: ${finding.summary.slice(0, 200)}` : ''}${finding.fixed_version ? ` — nâng cấp lên phiên bản ${finding.fixed_version}` : ''}`,
-    vm.id, vm.name, `${finding.package_name}:${finding.vuln_id}`
+    `Package "${finding.package_name}" (${finding.package_version}, ${finding.ecosystem || '?'} — ${finding.target_file || '?'}) trên "${source.name}" dính lỗ hổng ${finding.vuln_id}${finding.summary ? `: ${finding.summary.slice(0, 200)}` : ''}${finding.fixed_version ? ` — nâng cấp lên phiên bản ${finding.fixed_version}` : ''}`,
+    sourceType, source.id, source.name, `${finding.package_name}:${finding.vuln_id}`
   );
 }
 
@@ -217,8 +220,10 @@ async function pullManifestFiles(ssh, scanPath, files, tempDir) {
   return pulled;
 }
 
-// Shared by both scan types: enrich with KEV/EPSS, upsert, alert on critical/high/KEV findings.
-async function enrichAndStoreFindings(vm, scanType, findings) {
+// Shared by all scan types (fs/docker here, harbor-scanner.js's registry scan too): enrich with
+// KEV/EPSS, upsert, alert on critical/high/KEV findings. `source` just needs {id, name} — see
+// raiseTrivyAlert's comment on why a harbor_repos row works here unmodified.
+async function enrichAndStoreFindings(source, scanType, findings, sourceType = 'vcenter_vm') {
   const cveIdsThisScan = findings.map((f) => f.vulnId).filter((id) => /^CVE-\d{4}-\d+/.test(id));
   const [kevSet, epssScores] = await Promise.all([
     vulnEnrichment.getKevSet(),
@@ -228,16 +233,16 @@ async function enrichAndStoreFindings(vm, scanType, findings) {
     const inKev = kevSet.has(f.vulnId);
     const epss = epssScores.get(f.vulnId);
     await upsertFinding.run(
-      vm.id, vm.name, scanType, f.targetFile, f.ecosystem, f.packageName, f.packageVersion, f.vulnId,
+      source.id, source.name, scanType, f.targetFile, f.ecosystem, f.packageName, f.packageVersion, f.vulnId,
       f.summary, f.details, f.severity, f.referenceUrl, f.fixedVersion,
       inKev ? 1 : 0, epss?.score ?? null, epss?.percentile ?? null
     );
     if (ALERT_SEVERITIES.has(f.severity) || inKev) {
-      await raiseTrivyAlert(vm, {
+      await raiseTrivyAlert(source, {
         package_name: f.packageName, package_version: f.packageVersion, vuln_id: f.vulnId,
         summary: f.summary, severity: f.severity, ecosystem: f.ecosystem, target_file: f.targetFile,
         fixed_version: f.fixedVersion, inKev,
-      });
+      }, sourceType);
     }
   }
 }
@@ -502,4 +507,7 @@ module.exports = {
   parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
   parseDockerListOutput, buildDockerSaveScript, parseDockerSaveOutput, DOCKER_LIST_SCRIPT, DOCKER_IMAGE_NAME_RE,
   LOCAL_TRIVY_DIR, LOCAL_TRIVY_BIN, LOCAL_TRIVY_CACHE_DIR,
+  // Shared with harbor-scanner.js — see enrichAndStoreFindings/raiseTrivyAlert's own comments on why
+  // a harbor_repos row works here unmodified (both only ever need {id, name} off the "source").
+  runLocalTrivyScan, enrichAndStoreFindings, resolveStaleFindings,
 };

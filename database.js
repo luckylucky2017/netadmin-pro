@@ -1135,6 +1135,36 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_san TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE monitors ADD COLUMN tls_protocol VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE monitors ADD COLUMN tls_cipher VARCHAR(100)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Harbor registry connection (harbor-scanner.js) — same singleton-row/plaintext-secret treatment
+  // as LDAP/SAML above (see routes/settings.js's sanitizeSettings for the has_* boolean pattern
+  // that keeps the password from ever round-tripping to the client). Only one Harbor instance is
+  // configured at a time — no per-registry CRUD table, matching the actual ask (a single
+  // harbor.fds.vn), not a hypothetical multi-registry future.
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN harbor_url TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN harbor_username TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN harbor_password TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN harbor_insecure TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Which Harbor project/repository pairs are opted into scanning — chosen manually per the admin's
+  // own call (Harbor can host far more images than are worth tracking), not auto-discovered wholesale
+  // like the running-containers Docker scan. Findings land in trivy_findings with scan_type='harbor'
+  // (that column already supports arbitrary scan-type strings, no schema change needed there).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS harbor_repos (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      project_name VARCHAR(255) NOT NULL,
+      repo_name VARCHAR(500) NOT NULL,
+      scan_mode VARCHAR(10) DEFAULT 'auto',
+      last_scanned_at DATETIME,
+      last_tag VARCHAR(255),
+      scan_status VARCHAR(20),
+      scan_error TEXT,
+      package_count INT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_harbor_repo (project_name, repo_name)
+    )
+  `);
 }
 
 async function seedIfEmpty() {

@@ -7352,6 +7352,7 @@ async function renderTrivyTab() {
           </div>
         </div>
         <div id="trivyTableWrap"></div>
+        <div id="trivyHarborSection"></div>
       </div>`;
     document.getElementById('trivySearch').addEventListener('input', (e) => {
       clearTimeout(searchTimeout);
@@ -7362,6 +7363,7 @@ async function renderTrivyTab() {
     trivyHostInstalled = !!hostStatus.installed;
     renderTrivyHostBanner();
     renderTrivyRows();
+    loadHarborSection();
   } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
@@ -7493,6 +7495,247 @@ function renderTrivyRows() {
     }).join('')}</tbody>
   </table>`;
   applyPermissionVisibility();
+}
+
+// ── Harbor registry scanning — a 3rd Trivy scan type, alongside the filesystem/Docker sections
+// above. Unlike those, this needs neither SSH nor any per-VM config: Trivy talks to Harbor directly
+// over the network (its own registry client, same as `docker pull` would), authenticating with the
+// registry credentials saved here. Scope is manually picked per project/repository (see the "Dò
+// tìm" picker below), not auto-discovered wholesale — a Harbor instance can host far more images
+// than are worth tracking.
+let harborSettings = null;
+let harborRepos = [];
+
+async function loadHarborSection() {
+  const el = document.getElementById('trivyHarborSection');
+  if (!el) return;
+  el.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const [settings, repos] = await Promise.all([api('/harbor/settings'), api('/harbor/repos')]);
+    harborSettings = settings;
+    harborRepos = repos;
+    renderHarborSection();
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu Harbor</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function renderHarborSection() {
+  const el = document.getElementById('trivyHarborSection');
+  if (!el) return;
+  const s = harborSettings || {};
+  el.innerHTML = `
+    <div style="padding:16px;border-top:1px solid var(--border)">
+      <h3 style="font-size:14px;margin-bottom:4px">Quét Harbor Registry</h3>
+      <p style="font-size:12px;color:var(--fg-dim);margin-bottom:12px">Quét lỗ hổng trong image lưu trên Harbor — kết nối trực tiếp qua mạng bằng chính Trivy đã cài trên máy chủ này, không cần SSH vào máy nào cả. Chọn thủ công project/repository muốn theo dõi bên dưới.</p>
+    </div>
+    <div data-permission="trivy.scan.manage" style="padding:0 16px 16px">
+      <div class="form-grid" style="margin-bottom:10px">
+        <div class="form-group"><label>URL Harbor</label><input type="text" id="harborUrl" value="${escAttr(s.url || '')}" placeholder="https://harbor.fds.vn"></div>
+        <div class="form-group"><label>Username</label><input type="text" id="harborUsername" value="${escAttr(s.username || '')}" placeholder="admin"></div>
+        <div class="form-group"><label>Password${s.has_password ? ' (để trống nếu không đổi)' : ''}</label><input type="password" id="harborPassword" placeholder="${s.has_password ? '••••••••' : ''}" autocomplete="new-password"></div>
+        <div class="form-group" style="display:flex;align-items:flex-end">
+          <label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px"><input type="checkbox" id="harborInsecure" ${s.insecure ? 'checked' : ''} style="width:auto"> Bỏ qua lỗi chứng chỉ TLS (self-signed)</label>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="saveHarborSettings(this)">Lưu cấu hình</button>
+        <button class="btn btn-secondary btn-sm" onclick="testHarborConnectionUi(this)">Kiểm tra kết nối</button>
+        <button class="btn btn-secondary btn-sm" ${s.url ? '' : 'disabled title="Cần lưu URL Harbor trước"'} onclick="openHarborDiscoverModal()">Dò tìm project/repository</button>
+      </div>
+      <div id="harborConnectionResult" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div id="harborReposTableWrap"></div>
+  `;
+  renderHarborReposTable();
+  applyPermissionVisibility();
+}
+
+async function saveHarborSettings(btn) {
+  const url = document.getElementById('harborUrl')?.value.trim() || '';
+  const username = document.getElementById('harborUsername')?.value.trim() || '';
+  const password = document.getElementById('harborPassword')?.value || '';
+  const insecure = !!document.getElementById('harborInsecure')?.checked;
+  btn.disabled = true;
+  try {
+    await api('/harbor/settings', 'PUT', { url, username, password, insecure });
+    toast('Đã lưu cấu hình Harbor', 'success');
+    harborSettings = await api('/harbor/settings');
+    renderHarborSection();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+async function testHarborConnectionUi(btn) {
+  const resultEl = document.getElementById('harborConnectionResult');
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang kiểm tra…';
+  if (resultEl) resultEl.textContent = '';
+  try {
+    const r = await api('/harbor/test-connection', 'POST');
+    if (resultEl) resultEl.innerHTML = r.ok
+      ? `<span style="color:var(--accent)">✓ Kết nối thành công</span>`
+      : `<span style="color:var(--red)">✗ ${escHtml(r.error || 'Kết nối thất bại')}</span>`;
+  } catch (e) { if (resultEl) resultEl.innerHTML = `<span style="color:var(--red)">✗ ${escHtml(e.message)}</span>`; }
+  btn.disabled = false; btn.textContent = original;
+}
+
+function renderHarborReposTable() {
+  const wrap = document.getElementById('harborReposTableWrap');
+  if (!wrap) return;
+  if (!harborRepos.length) {
+    wrap.innerHTML = `<div class="empty-state" style="padding:24px 16px"><h3>Chưa theo dõi repository nào</h3><p>Bấm "Dò tìm project/repository" ở trên để chọn</p></div>`;
+    return;
+  }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>#</th><th>Project</th><th>Repository</th><th>Chế độ</th><th>Kết quả quét</th><th>Tag quét gần nhất</th><th>Quét lần cuối</th><th>Hành động</th></tr></thead>
+    <tbody>${harborRepos.map((r, i) => {
+      const status = r.scan_status || 'unknown';
+      const mode = r.scan_mode === 'manual' ? 'manual' : 'auto';
+      return `<tr data-harbor-repo-id="${r.id}">
+        <td style="color:var(--fg-dim)">${i + 1}</td>
+        <td style="font-weight:600">${escHtml(r.project_name)}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(r.repo_name)}</td>
+        <td>
+          <select class="harbor-repo-mode filter-select" data-id="${r.id}" style="font-size:12px;padding:4px 8px" data-permission="trivy.scan.manage">
+            <option value="auto" ${mode === 'auto' ? 'selected' : ''}>Tự động (12h)</option>
+            <option value="manual" ${mode === 'manual' ? 'selected' : ''}>Thủ công</option>
+          </select>
+        </td>
+        <td>
+          <span class="status ${TRIVY_SCAN_STATUS_CLASS[status] || 'unknown'}" title="${escAttr(r.scan_error || '')}"><span class="dot"></span>${TRIVY_SCAN_STATUS_LABEL[status] || status}</span>
+          ${r.package_count != null ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:2px">${r.package_count} lỗ hổng</div>` : ''}
+        </td>
+        <td><span style="font-size:12px;color:var(--fg-muted);font-family:monospace">${escHtml(r.last_tag || '—')}</span></td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${r.last_scanned_at ? formatTime(r.last_scanned_at) : '—'}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" onclick="saveHarborRepoMode(${r.id}, this)">Lưu</button>
+          <button class="btn btn-secondary btn-sm" data-permission="trivy.scan.manage" ${trivyHostInstalled ? '' : 'disabled title="Cần cài Trivy trên máy chủ trước (xem thông báo ở đầu trang)"'} onclick="handleHarborScanNow(${r.id}, this)">Quét ngay</button>
+          ${r.package_count ? `<button class="btn-icon" title="Xem lỗ hổng" onclick="openHarborFindingsModal(${r.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>` : ''}
+          <button class="btn-icon delete" title="Ngừng theo dõi" data-permission="trivy.scan.manage" onclick="removeHarborRepo(${r.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table>`;
+  applyPermissionVisibility();
+}
+
+async function saveHarborRepoMode(id, btn) {
+  const mode = document.querySelector(`.harbor-repo-mode[data-id="${id}"]`)?.value === 'manual' ? 'manual' : 'auto';
+  btn.disabled = true;
+  try {
+    await api(`/harbor/repos/${id}`, 'PATCH', { mode });
+    toast('Đã lưu', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false;
+}
+
+async function handleHarborScanNow(id, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang quét… (có thể mất 1-2 phút)';
+  try {
+    const result = await api(`/harbor/repos/${id}/scan-now`, 'POST');
+    if (result.scan_status === 'ok') toast(`Quét xong — tìm thấy ${result.package_count} lỗ hổng`, 'success');
+    else toast(result.scan_error || 'Quét gặp lỗi', 'error');
+    harborRepos = await api('/harbor/repos');
+    renderHarborReposTable();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = original; }
+}
+
+async function removeHarborRepo(id) {
+  const repo = harborRepos.find(r => r.id === id);
+  if (!confirm(`Ngừng theo dõi "${repo ? repo.project_name + '/' + repo.repo_name : 'repository này'}"? Các lỗ hổng đã ghi nhận cho repo này cũng sẽ bị xóa.`)) return;
+  try {
+    await api(`/harbor/repos/${id}`, 'DELETE');
+    toast('Đã ngừng theo dõi', 'success');
+    harborRepos = await api('/harbor/repos');
+    renderHarborReposTable();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function openHarborDiscoverModal() {
+  openModal('Dò tìm project/repository trên Harbor', `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
+  try {
+    const repos = await api('/harbor/discover');
+    const body = document.getElementById('modalBody');
+    if (!repos.length) {
+      body.innerHTML = `<div class="empty-state"><h3>Không tìm thấy project/repository nào trên Harbor</h3></div>`;
+      return;
+    }
+    body.innerHTML = `
+      <p style="font-size:12px;color:var(--fg-dim);margin-bottom:10px">Chọn repository muốn quét — bật/tắt sẽ lưu ngay.</p>
+      <div style="max-height:60vh;overflow:auto">
+        <table>
+          <thead><tr><th>Project</th><th>Repository</th><th>Số artifact</th><th>Theo dõi</th></tr></thead>
+          <tbody>${repos.map(r => `
+            <tr>
+              <td style="font-weight:600">${escHtml(r.project_name)}</td>
+              <td style="font-family:monospace;font-size:12px">${escHtml(r.repo_name)}</td>
+              <td style="font-size:12px;color:var(--fg-muted)">${r.artifact_count ?? '—'}</td>
+              <td><label class="toggle-switch"><input type="checkbox" class="harbor-discover-toggle" data-project="${escAttr(r.project_name)}" data-repo="${escAttr(r.repo_name)}" ${r.tracked ? 'checked' : ''} onchange="toggleHarborRepoTracked(this)"><span class="toggle-slider"></span></label></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+async function toggleHarborRepoTracked(checkboxEl) {
+  const project_name = checkboxEl.dataset.project;
+  const repo_name = checkboxEl.dataset.repo;
+  checkboxEl.disabled = true;
+  try {
+    if (checkboxEl.checked) {
+      await api('/harbor/repos', 'POST', { project_name, repo_name });
+    } else {
+      const existing = harborRepos.find(r => r.project_name === project_name && r.repo_name === repo_name);
+      if (existing) await api(`/harbor/repos/${existing.id}`, 'DELETE');
+    }
+    harborRepos = await api('/harbor/repos');
+    renderHarborReposTable();
+  } catch (e) {
+    toast(e.message, 'error');
+    checkboxEl.checked = !checkboxEl.checked; // revert on failure
+  }
+  checkboxEl.disabled = false;
+}
+
+async function openHarborFindingsModal(repoId) {
+  const repo = harborRepos.find(r => r.id === repoId);
+  if (!repo) return;
+  const fullName = `${repo.project_name}/${repo.repo_name}`;
+  openModal(`Lỗ hổng Harbor — ${fullName}`, `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
+  try {
+    trivyFindingRows = await api(`/harbor/findings?repoId=${repoId}&limit=500`);
+    const body = document.getElementById('modalBody');
+    if (!trivyFindingRows.length) {
+      body.innerHTML = `<div class="empty-state"><h3>Không có lỗ hổng nào</h3></div>`;
+      return;
+    }
+    body.innerHTML = `<div style="max-height:60vh;overflow:auto"><table>
+      <thead><tr><th>Image / File</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
+      <tbody>${trivyFindingRows.map(f => `
+        <tr>
+          <td style="font-family:monospace;font-size:12px">${escHtml(f.target_file || '—')}<div style="color:var(--fg-dim)">${escHtml(f.ecosystem || '')}</div></td>
+          <td style="font-family:monospace">${escHtml(f.package_name)}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml(f.package_version)}</td>
+          <td>
+            ${f.reference_url ? `<a href="${escAttr(f.reference_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${escHtml(f.vuln_id)}</a>` : escHtml(f.vuln_id)}
+            ${f.in_kev ? `<span class="severity critical" title="CISA KEV: đang bị khai thác thực tế ngoài đời" style="margin-left:4px">KEV</span>` : ''}
+          </td>
+          <td>${vulnSeverityBadge(f.severity)}</td>
+          <td>${vulnEpssCell(f)}</td>
+          <td style="font-size:12px;max-width:260px">${escHtml(trivyRemediationText(f))}</td>
+          <td><button class="btn-icon" title="Xem chi tiết" onclick="openTrivyFindingDetail(${f.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button></td>
+        </tr>`).join('')}
+      </tbody>
+    </table></div>`;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
 }
 
 function onTrivyPathSelectChange(id) {
@@ -7627,10 +7870,12 @@ const TRIVY_OS_ECOSYSTEMS = new Set(['alpine', 'debian', 'ubuntu', 'centos', 'ro
 // Unlike vulnRemediationText (apt-based OS packages, one uniform command), each language ecosystem
 // needs its own fix command — no single automatable action, so this only ever produces guidance text.
 function trivyRemediationText(f) {
-  if (f.scan_type === 'docker' && f.ecosystem && TRIVY_OS_ECOSYSTEMS.has(String(f.ecosystem).toLowerCase())) {
+  const isImageScan = f.scan_type === 'docker' || f.scan_type === 'harbor';
+  if (isImageScan && f.ecosystem && TRIVY_OS_ECOSYSTEMS.has(String(f.ecosystem).toLowerCase())) {
     const imageName = String(f.target_file || '').split(' :: ')[0];
+    const deployHint = f.scan_type === 'harbor' ? 'build lại, đẩy (push) image mới lên Harbor' : 'build lại và deploy image mới';
     return f.fixed_version
-      ? `Cập nhật package "${f.package_name}" lên phiên bản ${f.fixed_version} trong Dockerfile/base image, build lại và deploy image mới (image hiện tại: ${imageName || '?'}).`
+      ? `Cập nhật package "${f.package_name}" lên phiên bản ${f.fixed_version} trong Dockerfile/base image, ${deployHint} (image hiện tại: ${imageName || '?'}).`
       : `Chưa có bản vá cho "${f.package_name}" trong image hiện tại (${imageName || '?'}) — theo dõi cập nhật của base image hoặc nhà cung cấp gói.`;
   }
   const cmdByEcosystem = {
@@ -7644,7 +7889,7 @@ function trivyRemediationText(f) {
     bundler: `bundle update ${f.package_name}`,
   };
   if (f.fixed_version && cmdByEcosystem[f.ecosystem]) return cmdByEcosystem[f.ecosystem];
-  const suffix = f.scan_type === 'docker' ? ' rồi build lại và deploy image mới' : ' rồi cài đặt lại';
+  const suffix = f.scan_type === 'harbor' ? ' rồi build lại, đẩy (push) image mới lên Harbor' : f.scan_type === 'docker' ? ' rồi build lại và deploy image mới' : ' rồi cài đặt lại';
   if (f.fixed_version) return `Nâng cấp "${f.package_name}" lên phiên bản ${f.fixed_version} trong file quản lý dependency (${f.target_file || '?'})${suffix}.`;
   return `Chưa có phiên bản vá cho "${f.package_name}" — theo dõi cập nhật từ nhà phát triển thư viện.`;
 }
@@ -7683,8 +7928,12 @@ async function loadTrivyNvdDetail(id) {
   const section = document.getElementById('trivyNvdSection');
   if (!section) return;
   section.innerHTML = `<div style="font-size:12px;color:var(--fg-dim)">Đang tải từ NVD...</div>`;
+  // trivyFindingRows is shared between the Trivy fs/docker findings modal and the Harbor one — pick
+  // the matching API route by scan_type rather than duplicating this whole function for Harbor.
+  const f = trivyFindingRows.find(r => r.id === id);
+  const apiBase = f?.scan_type === 'harbor' ? '/harbor' : '/trivy';
   try {
-    const r = await api(`/trivy/findings/${id}/nvd`);
+    const r = await api(`${apiBase}/findings/${id}/nvd`);
     if (!r.available) {
       section.innerHTML = `<span style="font-size:12px;color:var(--fg-dim)">${escHtml(r.reason || 'Không có dữ liệu')}</span>`;
       return;
