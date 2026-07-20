@@ -22,6 +22,7 @@
 // app), since only root/the docker group can talk to the Docker socket.
 const { NodeSSH } = require('node-ssh');
 const { execFile } = require('child_process');
+const https = require('https');
 const fs = require('fs');
 const fsp = fs.promises;
 const os = require('os');
@@ -61,6 +62,59 @@ function installLocalTrivy() {
       if (err) return resolve({ ok: false, error: (stderr || err.message || 'Cài đặt Trivy thất bại').slice(0, 2000) });
       resolve({ ok: true });
     });
+  });
+}
+
+// `trivy --version --format json` reports both the binary version AND the locally cached
+// vulnerability DB's UpdatedAt/DownloadedAt/NextUpdate — no separate metadata.json parsing needed.
+// Every fs/image scan already runs without --skip-db-update, so Trivy re-downloads the DB itself
+// whenever it's stale; this is read-only, just for surfacing that state in the UI.
+function getLocalTrivyVersionInfo() {
+  return new Promise((resolve) => {
+    execFile(LOCAL_TRIVY_BIN, ['--version', '--format', 'json'], { timeout: 15000 }, (err, stdout) => {
+      if (err || !stdout) return resolve(null);
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve({
+          version: parsed.Version || null,
+          dbVersion: parsed.VulnerabilityDB?.Version ?? null,
+          dbUpdatedAt: parsed.VulnerabilityDB?.UpdatedAt || null,
+          dbNextUpdate: parsed.VulnerabilityDB?.NextUpdate || null,
+          dbDownloadedAt: parsed.VulnerabilityDB?.DownloadedAt || null,
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+// Cached — this is called on every "Quét mã nguồn Trivy" tab load (via GET /trivy/host-status), and
+// there's no reason to hit GitHub's API that often; a release lands at most a few times a month.
+// Failure (offline netadmin-pro host, GitHub rate limit) resolves null rather than throwing, so a
+// flaky/absent outbound connection never blocks the rest of the host-status response.
+let latestReleaseCache = { checkedAt: 0, tag: null };
+const LATEST_RELEASE_CACHE_MS = 6 * 60 * 60 * 1000;
+function getLatestTrivyRelease() {
+  if (Date.now() - latestReleaseCache.checkedAt < LATEST_RELEASE_CACHE_MS) return Promise.resolve(latestReleaseCache.tag);
+  return new Promise((resolve) => {
+    const req = https.get('https://api.github.com/repos/aquasecurity/trivy/releases/latest', {
+      headers: { 'User-Agent': 'netadmin-pro' }, timeout: 8000,
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try {
+          const tag = JSON.parse(data).tag_name || null;
+          latestReleaseCache = { checkedAt: Date.now(), tag };
+          resolve(tag);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
   });
 }
 
@@ -518,7 +572,7 @@ function start(intervalMs = TICK_MS) {
 module.exports = {
   start, collectAll, collectAllFilesystem, collectAllDocker,
   scanFilesystem, scanDocker, discoverPaths,
-  isLocalTrivyInstalled, installLocalTrivy,
+  isLocalTrivyInstalled, installLocalTrivy, getLocalTrivyVersionInfo, getLatestTrivyRelease,
   parseTrivyScanOutput, buildFindManifestsScript, parseFindManifestsOutput,
   parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
   parseDockerListOutput, buildDockerSaveScript, parseDockerSaveOutput, DOCKER_LIST_SCRIPT, DOCKER_IMAGE_NAME_RE,

@@ -7319,6 +7319,7 @@ let trivySortState = { key: null, dir: 'asc' };
 // Trivy is installed ONCE on the netadmin-pro host itself (see trivy-scanner.js) — this tracks that
 // host-level state, separate from each VM's own scan config/status. null = not checked yet.
 let trivyHostInstalled = null;
+let trivyHostStatus = null;
 // Most apps here live directly under /opt or /data (per admin) — offered as always-present fallback
 // options in the path picker even before "Dò tìm" has been run for a given VM.
 const TRIVY_PRESET_PATHS = ['/opt', '/data'];
@@ -7361,6 +7362,7 @@ async function renderTrivyTab() {
     const [vms, hostStatus] = await Promise.all([api('/trivy/vms'), api('/trivy/host-status')]);
     trivyVms = vms;
     trivyHostInstalled = !!hostStatus.installed;
+    trivyHostStatus = hostStatus;
     renderTrivyHostBanner();
     renderTrivyRows();
     loadHarborSection();
@@ -7370,11 +7372,28 @@ async function renderTrivyTab() {
 function renderTrivyHostBanner() {
   const el = document.getElementById('trivyHostBanner');
   if (!el) return;
-  if (trivyHostInstalled) { el.innerHTML = ''; return; }
+  if (!trivyHostInstalled) {
+    el.innerHTML = `
+      <div data-permission="trivy.scan.manage" style="margin:0 16px 12px;padding:12px 14px;border-radius:var(--radius);background:var(--yellow-dim);border:1px solid var(--yellow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="font-size:13px;color:var(--yellow)"><strong>Trivy chưa được cài trên máy chủ netadmin-pro.</strong> Cần cài đặt trước khi có thể quét bất kỳ VM nào.</div>
+        <button class="btn btn-primary btn-sm" onclick="handleTrivyInstallHost(this)">Cài đặt Trivy trên máy chủ</button>
+      </div>`;
+    applyPermissionVisibility();
+    return;
+  }
+  const s = trivyHostStatus || {};
+  const upToDate = s.isLatest === true;
+  const outdated = s.isLatest === false;
   el.innerHTML = `
-    <div data-permission="trivy.scan.manage" style="margin:0 16px 12px;padding:12px 14px;border-radius:var(--radius);background:var(--yellow-dim);border:1px solid var(--yellow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
-      <div style="font-size:13px;color:var(--yellow)"><strong>Trivy chưa được cài trên máy chủ netadmin-pro.</strong> Cần cài đặt trước khi có thể quét bất kỳ VM nào.</div>
-      <button class="btn btn-primary btn-sm" onclick="handleTrivyInstallHost(this)">Cài đặt Trivy trên máy chủ</button>
+    <div data-permission="trivy.scan.manage" style="margin:0 16px 12px;padding:10px 14px;border-radius:var(--radius);background:${outdated ? 'var(--yellow-dim)' : 'var(--surface2)'};border:1px solid ${outdated ? 'var(--yellow)' : 'var(--border)'};display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="font-size:12px;color:${outdated ? 'var(--yellow)' : 'var(--fg-muted)'}">
+        Trivy <strong>v${escHtml(s.version || '?')}</strong>
+        ${upToDate ? ' — đã là bản mới nhất' : outdated ? ` — <strong>đã có bản mới v${escHtml(s.latestVersion)}</strong>` : ' — chưa xác định được bản mới nhất (không kết nối được GitHub)'}
+        <span style="margin:0 6px;color:var(--border)">|</span>
+        CSDL lỗ hổng cập nhật lúc <strong>${s.dbUpdatedAt ? formatTime(s.dbUpdatedAt) : '—'}</strong>
+        ${s.dbNextUpdate ? ` (lần cập nhật tiếp theo: ${formatTime(s.dbNextUpdate)})` : ''}
+      </div>
+      ${outdated ? `<button class="btn btn-secondary btn-sm" onclick="handleTrivyInstallHost(this)">Cập nhật lên v${escHtml(s.latestVersion)}</button>` : ''}
     </div>`;
   applyPermissionVisibility();
 }
@@ -7387,6 +7406,7 @@ async function handleTrivyInstallHost(btn) {
     const result = await api('/trivy/install-host', 'POST');
     if (result.ok) {
       trivyHostInstalled = true;
+      trivyHostStatus = await api('/trivy/host-status');
       toast('Đã cài đặt Trivy trên máy chủ thành công', 'success');
       renderTrivyHostBanner();
       renderTrivyRows();
