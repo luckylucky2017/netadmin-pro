@@ -71,7 +71,10 @@ function installLocalTrivy() {
 // whenever it's stale; this is read-only, just for surfacing that state in the UI.
 function getLocalTrivyVersionInfo() {
   return new Promise((resolve) => {
-    execFile(LOCAL_TRIVY_BIN, ['--version', '--format', 'json'], { timeout: 15000 }, (err, stdout) => {
+    // Must pass --cache-dir explicitly — without it trivy reports the DB metadata from its own
+    // default cache path ($HOME/.cache/trivy), not LOCAL_TRIVY_CACHE_DIR where every actual scan
+    // writes, so VulnerabilityDB comes back empty even though a real, current DB exists.
+    execFile(LOCAL_TRIVY_BIN, ['--cache-dir', LOCAL_TRIVY_CACHE_DIR, '--version', '--format', 'json'], { timeout: 15000 }, (err, stdout) => {
       if (err || !stdout) return resolve(null);
       try {
         const parsed = JSON.parse(stdout);
