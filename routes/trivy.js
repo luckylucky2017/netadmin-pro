@@ -60,15 +60,15 @@ router.patch('/vms/:id/docker', requirePermission('trivy.scan.manage'), async (r
 
 // Trivy is installed ONCE, locally on the netadmin-pro host itself — NOT per VM (see trivy-scanner.js
 // header comment for the full architecture). These two routes replace the old per-VM install/status.
-router.get('/host-status', requirePermission('trivy.scan.manage'), async (req, res) => {
+async function buildHostStatus(forceLatestCheck) {
   const installed = await trivyScanner.isLocalTrivyInstalled();
-  if (!installed) return res.json({ installed: false });
+  if (!installed) return { installed: false };
   const [versionInfo, latestTag] = await Promise.all([
     trivyScanner.getLocalTrivyVersionInfo(),
-    trivyScanner.getLatestTrivyRelease(),
+    trivyScanner.getLatestTrivyRelease(forceLatestCheck),
   ]);
   const latestVersion = latestTag ? latestTag.replace(/^v/, '') : null;
-  res.json({
+  return {
     installed: true,
     version: versionInfo?.version || null,
     dbVersion: versionInfo?.dbVersion ?? null,
@@ -77,7 +77,17 @@ router.get('/host-status', requirePermission('trivy.scan.manage'), async (req, r
     latestVersion,
     // null (not false) when we couldn't reach GitHub or read the local version — "unknown", not "outdated".
     isLatest: latestVersion && versionInfo?.version ? latestVersion === versionInfo.version : null,
-  });
+  };
+}
+
+router.get('/host-status', requirePermission('trivy.scan.manage'), async (req, res) => {
+  res.json(await buildHostStatus(false));
+});
+
+// Manual "Kiểm tra cập nhật" button — bypasses the 6h GitHub-release cache so a click always reflects
+// the true current latest release, unlike the passive check every host-status/tab-load does.
+router.post('/check-update', requirePermission('trivy.scan.manage'), async (req, res) => {
+  res.json(await buildHostStatus(true));
 });
 
 router.post('/install-host', requirePermission('trivy.scan.manage'), async (req, res) => {

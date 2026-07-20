@@ -98,8 +98,10 @@ function getLocalTrivyVersionInfo() {
 // flaky/absent outbound connection never blocks the rest of the host-status response.
 let latestReleaseCache = { checkedAt: 0, tag: null };
 const LATEST_RELEASE_CACHE_MS = 6 * 60 * 60 * 1000;
-function getLatestTrivyRelease() {
-  if (Date.now() - latestReleaseCache.checkedAt < LATEST_RELEASE_CACHE_MS) return Promise.resolve(latestReleaseCache.tag);
+// force=true bypasses the cache entirely — used by the manual "Kiểm tra cập nhật" button, where a
+// stale cached answer would defeat the point of clicking it.
+function getLatestTrivyRelease(force = false) {
+  if (!force && Date.now() - latestReleaseCache.checkedAt < LATEST_RELEASE_CACHE_MS) return Promise.resolve(latestReleaseCache.tag);
   return new Promise((resolve) => {
     const req = https.get('https://api.github.com/repos/aquasecurity/trivy/releases/latest', {
       headers: { 'User-Agent': 'netadmin-pro' }, timeout: 8000,

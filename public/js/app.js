@@ -7393,9 +7393,28 @@ function renderTrivyHostBanner() {
         CSDL lỗ hổng cập nhật lúc <strong>${s.dbUpdatedAt ? formatTime(s.dbUpdatedAt) : '—'}</strong>
         ${s.dbNextUpdate ? ` (lần cập nhật tiếp theo: ${formatTime(s.dbNextUpdate)})` : ''}
       </div>
-      ${outdated ? `<button class="btn btn-secondary btn-sm" onclick="handleTrivyInstallHost(this)">Cập nhật lên v${escHtml(s.latestVersion)}</button>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="handleTrivyCheckUpdate(this)">Kiểm tra cập nhật</button>
+        <button class="btn ${outdated ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="handleTrivyInstallHost(this)">Cập nhật lên bản mới nhất</button>
+      </div>
     </div>`;
   applyPermissionVisibility();
+}
+
+async function handleTrivyCheckUpdate(btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang kiểm tra…';
+  try {
+    trivyHostStatus = await api('/trivy/check-update', 'POST');
+    trivyHostInstalled = !!trivyHostStatus.installed;
+    renderTrivyHostBanner();
+    if (trivyHostStatus.isLatest === true) toast('Trivy đã là bản mới nhất', 'success');
+    else if (trivyHostStatus.isLatest === false) toast(`Đã có bản mới v${trivyHostStatus.latestVersion}`, 'info');
+    else toast('Không kiểm tra được bản mới nhất (không kết nối được GitHub)', 'error');
+    return;
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false; btn.textContent = original;
 }
 
 async function handleTrivyInstallHost(btn) {
