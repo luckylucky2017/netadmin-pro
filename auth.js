@@ -17,6 +17,14 @@ function verifyPassword(plain, hash) {
   return bcrypt.compareSync(plain, hash);
 }
 
+// Used by routes/auth.js's /login when the email doesn't exist, so a bcrypt compare of the same
+// cost still runs either way — without this, the nonexistent-user path returns in ~1ms (skips
+// bcrypt entirely) versus ~150-250ms for a real account with a wrong password, a timing
+// side-channel that lets an attacker enumerate valid emails (found during a pentest: a consistent,
+// measurable gap). The plaintext compared against is irrelevant — it always fails, only the elapsed
+// time needs to match.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('netadmin-pro-timing-safety-dummy', 10);
+
 // Drops password_hash AND the legacy `role` TEXT column (superseded by role_id/roleName/permissions
 // below) — role is never updated once a user is on a custom role, so forwarding it would show a
 // stale/misleading label anywhere the frontend reads it.
@@ -185,5 +193,6 @@ async function findOrCreateSsoUser({ provider, externalId, email, name }) {
 
 module.exports = {
   hashPassword, verifyPassword, sanitizeUser, requireAuth, requirePermission, attachPermissions,
-  wouldOrphanPermission, ldapAuthenticate, getSamlClient, findOrCreateSsoUser, logActivity
+  wouldOrphanPermission, ldapAuthenticate, getSamlClient, findOrCreateSsoUser, logActivity,
+  DUMMY_PASSWORD_HASH,
 };

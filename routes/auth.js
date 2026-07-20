@@ -2,19 +2,37 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../database');
-const { verifyPassword, sanitizeUser, requireAuth, attachPermissions, ldapAuthenticate, getSamlClient, findOrCreateSsoUser } = require('../auth');
+const { verifyPassword, sanitizeUser, requireAuth, attachPermissions, ldapAuthenticate, getSamlClient, findOrCreateSsoUser, DUMMY_PASSWORD_HASH } = require('../auth');
 
 // Chống brute-force vào chính app này — cùng tinh thần với fail2ban đang bảo vệ SSH ở các VM khác.
 const loginLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Thử đăng nhập quá nhiều lần, vui lòng thử lại sau ít phút' } });
+
+// Per-account lockout — the IP-based limiter above doesn't slow an attacker who rotates source IPs
+// against one specific target account.
+const MAX_FAILED_LOGINS = 5;
+const LOCKOUT_MINUTES = 15;
 
 router.post('/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Thiếu email hoặc mật khẩu' });
   const user = await db.prepare('SELECT * FROM users WHERE email = ? AND auth_provider = ?').get(String(email).toLowerCase(), 'local');
-  if (!user || user.status !== 'active' || !verifyPassword(password, user.password_hash)) {
+  if (user && user.locked_until && new Date(user.locked_until) > new Date()) {
+    return res.status(401).json({ error: 'Tài khoản tạm khóa do đăng nhập sai nhiều lần, vui lòng thử lại sau' });
+  }
+  // Always run a bcrypt compare of the same cost, whether or not the account exists — otherwise the
+  // nonexistent-email path returns near-instantly (skipping bcrypt) while a real account with a
+  // wrong password takes ~150-250ms, a timing side-channel letting an attacker enumerate valid
+  // emails (found during a pentest: a consistent, measurable gap between the two).
+  const passwordOk = verifyPassword(password, user ? user.password_hash : DUMMY_PASSWORD_HASH);
+  if (!user || user.status !== 'active' || !passwordOk) {
+    if (user) {
+      const failedCount = user.failed_login_count + 1;
+      const lockedUntil = failedCount >= MAX_FAILED_LOGINS ? new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000) : null;
+      await db.prepare('UPDATE users SET failed_login_count = ?, locked_until = ? WHERE id = ?').run(failedCount, lockedUntil, user.id);
+    }
     return res.status(401).json({ error: 'Email hoặc mật khẩu không đúng' });
   }
-  await db.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?').run(user.id);
+  await db.prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP, failed_login_count = 0, locked_until = NULL WHERE id = ?').run(user.id);
   req.session.userId = user.id;
   res.json({ user: sanitizeUser(await attachPermissions(user)) });
 });

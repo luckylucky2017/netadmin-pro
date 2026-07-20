@@ -57,7 +57,15 @@ if (!process.env.SESSION_SECRET) {
   // Reuses database.js's own pool rather than opening a second one just for sessions.
   const sessionStore = new MySQLStore({}, db.getPool());
 
-  app.use(cors());
+  // This is a single-origin app (the SPA in public/ and the API are served by this same Express
+  // instance), so there's no legitimate need for cross-origin API access — the previous open
+  // `cors()` (Access-Control-Allow-Origin: *, found during a pentest) is removed by default rather
+  // than scoped down, closing off unneeded attack surface entirely. Set CORS_ALLOWED_ORIGIN in .env
+  // only if a separate frontend (e.g. a local dev server on another port) genuinely needs
+  // cross-origin access.
+  if (process.env.CORS_ALLOWED_ORIGIN) {
+    app.use(cors({ origin: process.env.CORS_ALLOWED_ORIGIN, credentials: true }));
+  }
   // CSP tắt vì toàn bộ frontend dùng inline onclick="..." (không phải Content-Security-Policy
   // friendly) — vẫn giữ các header bảo vệ khác của helmet (X-Frame-Options chống clickjacking...).
   app.use(helmet({ contentSecurityPolicy: false }));
@@ -68,7 +76,14 @@ if (!process.env.SESSION_SECRET) {
     secret: process.env.SESSION_SECRET || 'dev-only-insecure-secret-set-SESSION_SECRET-in-env',
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000 } // secure:true khi chạy sau HTTPS/reverse proxy
+    cookie: {
+      httpOnly: true, sameSite: 'lax', maxAge: 7 * 24 * 60 * 60 * 1000,
+      // Off by default since this deployment currently runs over plain HTTP (found during a pentest
+      // — credentials/session cookie transmitted in cleartext). Set COOKIE_SECURE=true in .env once
+      // this is served over HTTPS (directly or via a TLS-terminating reverse proxy) — until then, a
+      // Secure cookie would never reach the browser at all and no one could log in.
+      secure: process.env.COOKIE_SECURE === 'true',
+    }
   }));
   app.use(express.static(path.join(__dirname, 'public')));
 

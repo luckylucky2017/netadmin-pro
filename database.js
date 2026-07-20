@@ -1110,6 +1110,20 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE trivy_findings ADD COLUMN scan_type VARCHAR(10) DEFAULT 'fs'"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE trivy_findings DROP INDEX uq_trivy_finding"); } catch (e) { if (e.errno !== 1091) throw e; }
   try { await pool.query("ALTER TABLE trivy_findings ADD UNIQUE KEY uq_trivy_finding (vm_id, scan_type, target_file, package_name, vuln_id)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
+  // servers.hostname was originally NOT NULL, but the create/edit form never marked it required
+  // (unlike name/ip_address) — an admin leaving it blank got an INSERT that violated the constraint,
+  // which routes/servers.js didn't catch, silently hanging the request forever (found during a
+  // pentest; also the likely cause of unexplained "Add Server" hangs before this fix). network_devices'
+  // own hostname column was already nullable — this just brings servers in line with it. MODIFY
+  // COLUMN to the same nullable type is idempotent, safe to run on every boot.
+  await pool.query("ALTER TABLE servers MODIFY COLUMN hostname TEXT NULL");
+
+  // Per-account login lockout — defense-in-depth alongside the existing IP-based rate limit on
+  // /api/auth/login (found during a pentest: IP rate limiting alone doesn't slow an attacker who
+  // rotates source IPs against one specific target account). See routes/auth.js.
+  try { await pool.query("ALTER TABLE users ADD COLUMN failed_login_count INT NOT NULL DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE users ADD COLUMN locked_until DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

@@ -28,7 +28,9 @@ function toast(msg, type = 'success') {
   const icons = { success: '✓', error: '✗', info: 'ℹ' };
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.innerHTML = `<span>${icons[type]}</span><span>${msg}</span>`;
+  // msg is frequently built from user-editable data (entity names, server-returned error text) —
+  // no call site in this app needs real markup here, so always escape rather than trust each caller.
+  el.innerHTML = `<span>${icons[type]}</span><span>${escHtml(msg)}</span>`;
   document.getElementById('toastContainer').appendChild(el);
   setTimeout(() => el.remove(), 4000);
 }
@@ -748,7 +750,7 @@ async function loadServerTable(search) {
     serverRows = await api(`/servers?${params}`);
     serverPagination.page = 1; // fresh fetch (new filter/search, or reload after create/edit/delete) — don't leave the user stranded on a now-out-of-range page
     renderServerRows();
-  } catch (e) { document.getElementById('serverTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { document.getElementById('serverTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 function toggleServerSort(key) {
@@ -822,22 +824,22 @@ function renderServerRows() {
       <tbody>${servers.map((s, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td><div style="font-weight:600;cursor:pointer" onclick="openServerDetail(${s.id})" title="Xem chi tiết">${s.name}</div><div class="hostname-cell">${s.hostname || ''}</div></td>
-          <td><span class="ip-cell">${s.ip_address}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)">${s.type || 'server'}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)">${s.os || '—'}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)">${s.location || '—'}${s.rack ? ' / '+s.rack : ''}</span></td>
-          <td><span class="status ${s.status}"><span class="dot"></span>${s.status}</span></td>
+          <td><div style="font-weight:600;cursor:pointer" onclick="openServerDetail(${s.id})" title="Xem chi tiết">${escHtml(s.name)}</div><div class="hostname-cell">${escHtml(s.hostname || '')}</div></td>
+          <td><span class="ip-cell">${escHtml(s.ip_address)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(s.type || 'server')}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(s.os || '—')}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(s.location || '—')}${s.rack ? ' / '+escHtml(s.rack) : ''}</span></td>
+          <td><span class="status ${escHtml(s.status)}"><span class="dot"></span>${escHtml(s.status)}</span></td>
           <td><span class="ping-ms ${pingColor(s.ping_ms)}">${s.ping_ms ? s.ping_ms+'ms' : '—'}</span></td>
           <td>${ipmiBadge(s)}</td>
           <td>${snmpBadge(s)}</td>
-          <td><div class="tags">${(s.tags||[]).map(t => `<span class="tag">${t}</span>`).join('')}</div></td>
+          <td><div class="tags">${(s.tags||[]).map(t => `<span class="tag">${escHtml(t)}</span>`).join('')}</div></td>
           <td><div class="actions">
             <button class="btn-icon ping" title="Ping" data-permission="ping.write" onclick="pingServer(${s.id}, this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
             <button class="btn-icon ping" title="Kiểm tra IPMI" data-permission="ping.write" ${s.ipmi_host ? '' : 'disabled'} onclick="checkServerIpmi(${s.id}, this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
             <button class="btn-icon ping" title="Kiểm tra SNMP" data-permission="ping.write" ${s.snmp_enabled ? '' : 'disabled'} onclick="checkServerSnmp(${s.id}, this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
             <button class="btn-icon edit" title="Sửa" data-permission="servers.write" onclick="openServerForm(${JSON.stringify(s).replace(/"/g,'&quot;')})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-            <button class="btn-icon delete" title="Xóa" data-permission="servers.delete" onclick="deleteServer(${s.id}, '${s.name}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+            <button class="btn-icon delete" title="Xóa" data-permission="servers.delete" onclick="deleteServer(${s.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
           </div></td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(serverPagination, sortedServers.length, 'serverPagination', 'renderServerRows')}`;
@@ -960,7 +962,7 @@ function renderIpmiDetail(s) {
 async function openServerDetail(id) {
   openModal('Chi tiết máy chủ', `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
   let s;
-  try { s = await api(`/servers/${id}`); } catch (e) { document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; return; }
+  try { s = await api(`/servers/${id}`); } catch (e) { document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; return; }
 
   document.getElementById('modalTitle').textContent = s.name;
 
@@ -979,11 +981,11 @@ async function openServerDetail(id) {
       const ifaces = JSON.parse(s.snmp_interfaces || '[]');
       if (ifaces.length) {
         ifaceRows = `<table style="width:100%;margin-top:8px;font-size:12px"><thead><tr><th style="text-align:left;color:var(--fg-muted)">Interface</th><th style="text-align:right;color:var(--fg-muted)">Download</th><th style="text-align:right;color:var(--fg-muted)">Upload</th></tr></thead><tbody>${
-          ifaces.map(i => `<tr><td>${i.name}</td><td style="text-align:right">${fmtBps(i.in_bps)}</td><td style="text-align:right">${fmtBps(i.out_bps)}</td></tr>`).join('')
+          ifaces.map(i => `<tr><td>${escHtml(i.name)}</td><td style="text-align:right">${fmtBps(i.in_bps)}</td><td style="text-align:right">${fmtBps(i.out_bps)}</td></tr>`).join('')
         }</tbody></table>`;
       }
     } catch {}
-    snmpHTML = `${snmpBadge(s)}<div style="font-size:12px;color:var(--fg-muted);margin-top:6px">Uptime: ${formatUptimeSec(s.snmp_uptime_sec)}${s.snmp_checked_at ? ' — kiểm tra lúc ' + formatTime(s.snmp_checked_at) : ''}${s.snmp_error ? ' — ' + s.snmp_error : ''}</div>${ifaceRows}`;
+    snmpHTML = `${snmpBadge(s)}<div style="font-size:12px;color:var(--fg-muted);margin-top:6px">Uptime: ${formatUptimeSec(s.snmp_uptime_sec)}${s.snmp_checked_at ? ' — kiểm tra lúc ' + formatTime(s.snmp_checked_at) : ''}${s.snmp_error ? ' — ' + escHtml(s.snmp_error) : ''}</div>${ifaceRows}`;
   } else {
     snmpHTML = `<div style="font-size:13px;color:var(--fg-dim)">Chưa bật giám sát SNMP</div>`;
   }
@@ -1102,7 +1104,11 @@ async function saveServer(e, id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function deleteServer(id, name) {
+async function deleteServer(id) {
+  // Looked up from already-loaded data rather than passed through the onclick attribute — avoids
+  // ever needing to interpolate a free-text server name into a JS-string-literal context, where a
+  // name containing a quote could break out and inject arbitrary script (found during a pentest).
+  const name = serverRows.find(s => s.id === id)?.name || '';
   if (!confirm(`Xóa máy chủ "${name}"?`)) return;
   try {
     await api(`/servers/${id}`, 'DELETE');
@@ -1177,7 +1183,7 @@ async function loadDeviceTable(search) {
     deviceRows = await api(`/devices?${params}`);
     devicePagination.page = 1;
     renderDeviceRows();
-  } catch (e) { document.getElementById('deviceTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { document.getElementById('deviceTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 function toggleDeviceSort(key) {
@@ -1199,20 +1205,20 @@ function renderDeviceRows() {
       <tbody>${devices.map((d, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td><div style="font-weight:600">${d.name}</div><div class="hostname-cell">${d.hostname||''}</div></td>
-          <td><span class="ip-cell">${d.ip_address}</span></td>
-          <td><span style="font-size:11px;font-family:'Fira Code',monospace;color:var(--fg-dim)">${d.mac_address||'—'}</span></td>
-          <td><span style="font-size:12px;padding:2px 8px;border-radius:4px;background:var(--blue-dim);color:var(--blue)">${deviceTypeLabel(d.type)}</span></td>
-          <td><span style="font-size:13px">${d.brand||''}${d.model ? ' '+d.model : ''}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)">${d.location||'—'}${d.vlan ? ' / VLAN '+d.vlan : ''}</span></td>
-          <td><span class="status ${d.status}"><span class="dot"></span>${d.status}</span></td>
+          <td><div style="font-weight:600">${escHtml(d.name)}</div><div class="hostname-cell">${escHtml(d.hostname||'')}</div></td>
+          <td><span class="ip-cell">${escHtml(d.ip_address)}</span></td>
+          <td><span style="font-size:11px;font-family:'Fira Code',monospace;color:var(--fg-dim)">${escHtml(d.mac_address||'—')}</span></td>
+          <td><span style="font-size:12px;padding:2px 8px;border-radius:4px;background:var(--blue-dim);color:var(--blue)">${escHtml(deviceTypeLabel(d.type))}</span></td>
+          <td><span style="font-size:13px">${escHtml(d.brand||'')}${d.model ? ' '+escHtml(d.model) : ''}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(d.location||'—')}${d.vlan ? ' / VLAN '+escHtml(d.vlan) : ''}</span></td>
+          <td><span class="status ${escHtml(d.status)}"><span class="dot"></span>${escHtml(d.status)}</span></td>
           <td><span class="ping-ms ${pingColor(d.ping_ms)}">${d.ping_ms ? d.ping_ms+'ms' : '—'}</span></td>
           <td>${snmpBadge(d)}</td>
           <td><div class="actions">
             <button class="btn-icon ping" title="Ping" data-permission="ping.write" onclick="pingDevice(${d.id}, this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
             <button class="btn-icon ping" title="Kiểm tra SNMP" data-permission="ping.write" ${d.snmp_enabled ? '' : 'disabled'} onclick="checkDeviceSnmp(${d.id}, this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
             <button class="btn-icon edit" title="Sửa" data-permission="devices.write" onclick="openDeviceForm(${JSON.stringify(d).replace(/"/g,'&quot;')})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-            <button class="btn-icon delete" title="Xóa" data-permission="devices.delete" onclick="deleteDevice(${d.id}, '${d.name}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+            <button class="btn-icon delete" title="Xóa" data-permission="devices.delete" onclick="deleteDevice(${d.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
           </div></td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(devicePagination, sortedDevices.length, 'devicePagination', 'renderDeviceRows')}`;
@@ -1299,7 +1305,8 @@ async function saveDevice(e, id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function deleteDevice(id, name) {
+async function deleteDevice(id) {
+  const name = deviceRows.find(d => d.id === id)?.name || '';
   if (!confirm(`Xóa thiết bị "${name}"?`)) return;
   try {
     await api(`/devices/${id}`, 'DELETE');
@@ -1458,7 +1465,7 @@ async function loadAlertList(search) {
     renderAlertRows();
   } catch (e) {
     const el = document.getElementById('alertListBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -1499,12 +1506,12 @@ function alertCard(a) {
       <div class="alert-top">
         <span class="severity ${a.severity}"><span class="dot"></span>${severityLabel(a.severity)}</span>
         <span class="alert-status ${displayStatus}">${alertStatusLabel(displayStatus)}</span>
-        <span class="alert-title">${a.title}</span>
+        <span class="alert-title">${escHtml(a.title)}</span>
       </div>
-      <div class="alert-message">${a.message || ''}</div>
+      <div class="alert-message">${escHtml(a.message || '')}</div>
       <div class="alert-meta">
         <span>${categoryLabel(a.category)}</span>
-        <span>Nguồn: <strong>${a.source_name || '—'}</strong></span>
+        <span>Nguồn: <strong>${escHtml(a.source_name || '—')}</strong></span>
         ${a.metric_value ? `<span>${a.metric}: <strong>${a.metric_value}</strong></span>` : ''}
         <span>${timeAgo(a.created_at)}</span>
       </div>
@@ -1676,14 +1683,14 @@ function renderRulesTable(rules) {
     <thead><tr><th>Tên</th><th>Phạm vi</th><th>Điều kiện</th><th>Mức độ</th><th>Bật/Tắt</th><th>Hành động</th></tr></thead>
     <tbody>${paged.map(r => `
       <tr>
-        <td style="font-weight:600">${r.name}</td>
+        <td style="font-weight:600">${escHtml(r.name)}</td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${scopeLabel(r)}</span></td>
         <td><span class="ping-ms" style="font-size:13px">${metricLabel(r.metric)} ${r.operator} ${r.threshold}%</span> <span style="font-size:12px;color:var(--fg-dim)">liên tục ${r.duration_sec}s</span></td>
         <td><span class="severity ${r.severity}"><span class="dot"></span>${severityLabel(r.severity)}</span></td>
         <td><label class="switch"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleRule(${r.id})"><span class="slider"></span></label></td>
         <td><div class="actions">
           <button class="btn-icon edit" title="Sửa" data-permission="rules.write" onclick='openRuleForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-          <button class="btn-icon delete" title="Xóa" data-permission="rules.delete" onclick="deleteRule(${r.id}, '${r.name.replace(/'/g, "\\'")}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="rules.delete" onclick="deleteRule(${r.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div></td>
       </tr>`).join('')}
     </tbody></table>${paginationBar(rulesPagination, rulesRows.length, 'rulesPagination', 'renderRulesTable')}`;
@@ -1700,7 +1707,8 @@ async function toggleRule(id) {
   catch (e) { toast(e.message, 'error'); }
 }
 
-async function deleteRule(id, name) {
+async function deleteRule(id) {
+  const name = rulesRows.find(r => r.id === id)?.name || '';
   if (!confirm(`Xóa ngưỡng "${name}"?`)) return;
   try { await api(`/rules/${id}`, 'DELETE'); toast(`Đã xóa "${name}"`); reloadRulesTable(); }
   catch (e) { toast(e.message, 'error'); }
@@ -1947,7 +1955,7 @@ async function loadVcenterTable(search) {
     renderVcenterRows();
   } catch (e) {
     const el = document.getElementById('vcenterTableBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -1971,8 +1979,8 @@ function renderVcenterRows() {
       <tbody>${vms.map((v, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td style="font-weight:600">${v.name}</td>
-          <td><span class="tag">${v.cluster_name || '—'}</span></td>
+          <td style="font-weight:600">${escHtml(v.name)}</td>
+          <td><span class="tag">${escHtml(v.cluster_name || '—')}</span></td>
           <td>${vcPowerBadge(v.power_state)}</td>
           <td><span class="ping-ms" style="font-size:13px">${v.cpu_count ?? '—'}</span></td>
           <td><span class="ping-ms" style="font-size:13px">${v.memory_mib ? (v.memory_mib / 1024).toFixed(0) + ' GB' : '—'}</span></td>
@@ -2272,7 +2280,7 @@ async function openCreateVmForm() {
       renderCreateVmClusterPicker(clusters);
     }
   } catch (e) {
-    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -2304,7 +2312,7 @@ async function loadCreateVmPlacementData() {
     createVmState = { placement, templates, guestOsGroups };
     renderCreateVmForm('empty');
   } catch (e) {
-    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -2873,7 +2881,7 @@ async function loadSecurityEvents(search) {
     renderSecurityEventRows();
   } catch (e) {
     const el = document.getElementById('securityEventsBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -2964,7 +2972,7 @@ async function loadOutboundConnections(search) {
     renderOutboundRows();
   } catch (e) {
     const el = document.getElementById('outboundBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -3207,7 +3215,7 @@ async function loadSecurityBanned(search) {
     renderSecurityBannedRows();
   } catch (e) {
     const el = document.getElementById('securityBannedBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -3317,7 +3325,7 @@ async function loadSecurityExceptions() {
     </table>`;
     applyPermissionVisibility();
   } catch (e) {
-    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -3664,7 +3672,7 @@ async function loadWafEvents(search) {
     renderWafEventRows();
   } catch (e) {
     const el = document.getElementById('wafEventsBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -3788,7 +3796,7 @@ async function loadWafBanned(search) {
     renderWafBannedRows();
   } catch (e) {
     const el = document.getElementById('wafBannedBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -3983,7 +3991,7 @@ async function openWafDomainsModal(vmId) {
       </tbody>
     </table>`;
   } catch (e) {
-    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -4005,7 +4013,7 @@ async function openWafBannedIpsModal(vmId) {
     </table>`;
     applyPermissionVisibility();
   } catch (e) {
-    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -4058,7 +4066,7 @@ async function loadWafExceptions() {
     </table>`;
     applyPermissionVisibility();
   } catch (e) {
-    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -4687,7 +4695,7 @@ async function loadUserTable() {
     [userRows, cachedRoles] = await Promise.all([api('/users'), api('/roles')]);
     userPagination.page = 1;
     renderUserRows();
-  } catch (e) { document.getElementById('userTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { document.getElementById('userTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 function toggleUserSort(key) {
@@ -4709,8 +4717,8 @@ function renderUserRows() {
       <tbody>${users.map((u, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td style="font-weight:600">${u.name}${u.id === currentUser.id ? ' <span style="font-size:11px;color:var(--fg-dim)">(bạn)</span>' : ''}</td>
-          <td><span style="font-size:13px;color:var(--fg-muted)">${u.email}</span></td>
+          <td style="font-weight:600">${escHtml(u.name)}${u.id === currentUser.id ? ' <span style="font-size:11px;color:var(--fg-dim)">(bạn)</span>' : ''}</td>
+          <td><span style="font-size:13px;color:var(--fg-muted)">${escHtml(u.email)}</span></td>
           <td><span class="user-role-badge">${u.roleName || '—'}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${u.auth_provider.toUpperCase()}</span></td>
           <td>${u.status === 'active' ? '<span class="status online"><span class="dot"></span>Hoạt động</span>' : '<span class="status offline"><span class="dot"></span>Vô hiệu hóa</span>'}</td>
@@ -4814,7 +4822,7 @@ async function loadRoleTable() {
     cachedRoles = roleRows; // keep the Users page's role <select> in sync with the latest edits
     rolePagination.page = 1;
     renderRoleRows();
-  } catch (e) { document.getElementById('roleTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { document.getElementById('roleTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 function renderRoleRows() {
@@ -4826,7 +4834,7 @@ function renderRoleRows() {
       <tbody>${roles.map((r, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td style="font-weight:600">${r.name}</td>
+          <td style="font-weight:600">${escHtml(r.name)}</td>
           <td>${r.permissions.length} / ${permissionCatalog.length}</td>
           <td>${r.userCount}</td>
           <td>${r.is_system ? '<span class="status unknown"><span class="dot"></span>Hệ thống</span>' : '<span class="status online"><span class="dot"></span>Tùy biến</span>'}</td>
@@ -4933,12 +4941,12 @@ function renderCredentialRows() {
       <tbody>${rows.map((cr, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
-          <td style="font-weight:600">${cr.name}</td>
+          <td style="font-weight:600">${escHtml(cr.name)}</td>
           <td>${credentialAuthBadge(cr.auth_type)}</td>
-          <td style="font-family:'Fira Code',monospace;font-size:13px">${cr.username}</td>
+          <td style="font-family:'Fira Code',monospace;font-size:13px">${escHtml(cr.username)}</td>
           <td>${cr.is_default ? '<span class="status online"><span class="dot"></span>Mặc định</span>' : ''}</td>
           <td>${cr.usage_count} máy</td>
-          <td style="font-size:12px;color:var(--fg-muted)">${cr.notes || ''}</td>
+          <td style="font-size:12px;color:var(--fg-muted)">${escHtml(cr.notes || '')}</td>
           <td><div class="actions">
             <button class="btn-icon edit" title="Sửa" onclick='openCredentialForm(${JSON.stringify(cr).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
             <button class="btn-icon delete" title="Xóa" onclick="deleteCredentialEntry(${cr.id}, '${escAttr(cr.name)}', ${cr.usage_count})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
@@ -5972,9 +5980,9 @@ function renderPfsenseFirewallsTable(firewalls) {
     <thead><tr><th>Tên</th><th>Host</th><th>Xác thực</th><th>Trạng thái</th><th>Đồng bộ lần cuối</th><th>Bật</th><th>Hành động</th></tr></thead>
     <tbody>${firewalls.map(f => `
       <tr>
-        <td style="font-weight:600">${f.name}</td>
-        <td style="font-family:'Fira Code',monospace;font-size:13px">${f.host}:${f.port}</td>
-        <td style="font-size:13px">${f.auth_type === 'api_key' ? 'API Key' : `Basic (${f.username})`}</td>
+        <td style="font-weight:600">${escHtml(f.name)}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:13px">${escHtml(f.host)}:${escHtml(String(f.port))}</td>
+        <td style="font-size:13px">${f.auth_type === 'api_key' ? 'API Key' : `Basic (${escHtml(f.username)})`}</td>
         <td>${clusterStatusBadge(f.status, f.last_error)}</td>
         <td><span style="font-size:12px;color:var(--fg-muted)">${f.last_synced_at ? formatTime(f.last_synced_at) : 'chưa đồng bộ'}</span></td>
         <td>${f.enabled ? '<span class="status online"><span class="dot"></span>Bật</span>' : '<span class="status offline"><span class="dot"></span>Tắt</span>'}</td>
@@ -6181,7 +6189,7 @@ function renderMonitorList() {
     <div class="card monitor-card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
         <div>
-          <div style="font-weight:600;font-size:15px;cursor:pointer" onclick="openMonitorDetail(${m.id})" title="Xem chi tiết">${m.name}${m.enabled ? '' : ' <span style="font-size:11px;color:var(--fg-dim);font-weight:400">(đã tắt)</span>'}</div>
+          <div style="font-weight:600;font-size:15px;cursor:pointer" onclick="openMonitorDetail(${m.id})" title="Xem chi tiết">${escHtml(m.name)}${m.enabled ? '' : ' <span style="font-size:11px;color:var(--fg-dim);font-weight:400">(đã tắt)</span>'}</div>
           <div style="font-size:12px;color:var(--fg-dim);font-family:'Fira Code',monospace">${escHtml(monitorTargetLabel(m))}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -6287,7 +6295,7 @@ async function loadMonitorChart(id, hours, from, to) {
       : 'Chưa có dữ liệu trong khoảng này';
     chartEl.innerHTML = renderTimeSeriesChart(points);
   } catch (e) {
-    chartEl.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    chartEl.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -6569,7 +6577,7 @@ async function loadVulnFindings(search) {
     renderVulnFindingRows();
   } catch (e) {
     const el = document.getElementById('vulnFindingsBody');
-    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -6998,7 +7006,7 @@ async function renderVulnUpdates() {
     if (vulnUpdateSelectedVmId) await loadVulnUpdateData();
     else document.getElementById('vulnUpdatePendingBody').innerHTML = `<div class="empty-state"><h3>Chưa có VM nào bật giám sát CVE</h3><p>Bật ở tab "Quản lý quét" trước</p></div>`;
     applyPermissionVisibility();
-  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 function onVulnUpdateVmChange(id) {
@@ -7031,7 +7039,7 @@ async function loadVulnUpdateData() {
     renderVulnUpdatePendingRows();
     renderVulnUpdateHistory();
     applyPermissionVisibility();
-  } catch (e) { wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`; }
+  } catch (e) { wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 // A newly-installed kernel (or libc, etc.) commonly never appears in the pending-updates table at
@@ -7538,7 +7546,7 @@ async function openTrivyFindingsModal(vmId, scanType) {
       </tbody>
     </table></div>`;
   } catch (e) {
-    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -7697,7 +7705,7 @@ async function loadActivityRows() {
     activityTotal = total;
     renderActivityRows();
   } catch (e) {
-    document.getElementById('activityTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${e.message}</p></div>`;
+    document.getElementById('activityTableBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 

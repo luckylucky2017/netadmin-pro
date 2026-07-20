@@ -84,16 +84,26 @@ router.post('/', requirePermission('servers.write'), async (req, res) => {
   const snmp_enabled = canConfigSnmp && req.body.snmp_enabled ? 1 : 0;
   const snmp_port = canConfigSnmp ? (req.body.snmp_port || 161) : 161;
   const snmp_community = canConfigSnmp ? (req.body.snmp_community || 'public') : 'public';
-  const result = await db.prepare(`
-    INSERT INTO servers (name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, ssh_credential_id, tags, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, hostname, ip_address, type || 'server', os, cpu, ram, storage, location, rack, ssh_port || 22, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community);
+  // Any DB error here (a constraint violation, etc.) used to reject with nothing catching it —
+  // the request just hung forever instead of returning an error, since an unhandled rejection in an
+  // async route handler doesn't send a response (server.js's process-level handler only logs it).
+  // Caught explicitly here so the client always gets a response, whatever goes wrong.
+  let result;
+  try {
+    result = await db.prepare(`
+      INSERT INTO servers (name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, ssh_user, ssh_credential_id, tags, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, hostname || null, ip_address, type || 'server', os, cpu, ram, storage, location, rack, ssh_port || 22, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ipmi_host, ipmi_username, ipmi_password, snmp_enabled, snmp_port, snmp_community);
+  } catch (e) {
+    return res.status(400).json({ error: `Không thể tạo máy chủ: ${e.message}` });
+  }
   await logActivity(req.user, 'CREATE', 'server', result.lastInsertRowid, name);
   res.status(201).json({ id: result.lastInsertRowid, message: 'Server created' });
 });
 
 router.put('/:id', requirePermission('servers.write'), async (req, res) => {
   const { name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, credentialId, tags, notes } = req.body;
+  if (!name || !ip_address) return res.status(400).json({ error: 'Name and IP address are required' });
   const tagsJson = JSON.stringify(Array.isArray(tags) ? tags : (tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : []));
   let sshCred;
   try { sshCred = await resolveSshCredential(credentialId); } catch (e) { return res.status(400).json({ error: e.message }); }
@@ -116,9 +126,13 @@ router.put('/:id', requirePermission('servers.write'), async (req, res) => {
     snmpParams.push(req.body.snmp_enabled ? 1 : 0, req.body.snmp_port || 161, req.body.snmp_community || 'public');
   }
 
-  await db.prepare(`
-    UPDATE servers SET name=?, hostname=?, ip_address=?, type=?, os=?, cpu=?, ram=?, storage=?, location=?, rack=?, ssh_port=?, ssh_user=?, ssh_credential_id=?, tags=?, notes=?, updated_at=CURRENT_TIMESTAMP${ipmiSet}${snmpSet} WHERE id=?
-  `).run(name, hostname, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ...ipmiParams, ...snmpParams, req.params.id);
+  try {
+    await db.prepare(`
+      UPDATE servers SET name=?, hostname=?, ip_address=?, type=?, os=?, cpu=?, ram=?, storage=?, location=?, rack=?, ssh_port=?, ssh_user=?, ssh_credential_id=?, tags=?, notes=?, updated_at=CURRENT_TIMESTAMP${ipmiSet}${snmpSet} WHERE id=?
+    `).run(name, hostname || null, ip_address, type, os, cpu, ram, storage, location, rack, ssh_port, sshCred.ssh_user, sshCred.ssh_credential_id, tagsJson, notes, ...ipmiParams, ...snmpParams, req.params.id);
+  } catch (e) {
+    return res.status(400).json({ error: `Không thể cập nhật máy chủ: ${e.message}` });
+  }
   await logActivity(req.user, 'UPDATE', 'server', req.params.id, name);
   res.json({ message: 'Updated' });
 });
