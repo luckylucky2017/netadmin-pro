@@ -38,6 +38,15 @@ function toSqlDatetime(date) {
 // Single HTTP(S) request: measures response time, reads the peer TLS certificate (https only), and
 // applies keyword matching if configured. Never throws — network/timeout failures resolve as 'down'
 // with an error string, same contract as fail2ban-manager.js/ipmi-collector.js's check functions.
+// Fields every performXCheck resolves with, beyond the base {status, status_code, response_ms,
+// error} — kept as one constant so every early-return/error path (tcp, ping, malformed URL,
+// connection error) fills them in as null instead of silently omitting keys, which would leave
+// stale values in updateMonitorCache's positional bind on a check that used to succeed and now fails.
+const EMPTY_CERT_FIELDS = {
+  cert_expires_at: null, cert_issuer: null, cert_valid_from: null, cert_subject: null,
+  cert_serial: null, cert_fingerprint: null, cert_san: null, tls_protocol: null, tls_cipher: null,
+};
+
 function performHttpCheck(monitor) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -45,7 +54,7 @@ function performHttpCheck(monitor) {
     try {
       target = new URL(monitor.url);
     } catch {
-      return resolve({ status: 'down', status_code: null, response_ms: null, error: 'URL không hợp lệ', cert_expires_at: null, cert_issuer: null });
+      return resolve({ status: 'down', status_code: null, response_ms: null, error: 'URL không hợp lệ', ...EMPTY_CERT_FIELDS });
     }
     const isHttps = target.protocol === 'https:';
     const lib = isHttps ? https : http;
@@ -69,12 +78,29 @@ function performHttpCheck(monitor) {
       // Read the peer certificate as soon as headers arrive, NOT in the 'end' handler — by the time
       // the body finishes streaming, res.socket can already be null (Node may detach/recycle it,
       // especially on short responses or keep-alive), which threw here during real-domain testing.
-      let cert_expires_at = null, cert_issuer = null;
-      if (isHttps && res.socket && typeof res.socket.getPeerCertificate === 'function') {
-        const cert = res.socket.getPeerCertificate();
-        if (cert && cert.valid_to) {
-          cert_expires_at = toSqlDatetime(new Date(cert.valid_to));
-          cert_issuer = cert.issuer?.O || cert.issuer?.CN || null;
+      const certFields = { ...EMPTY_CERT_FIELDS };
+      if (isHttps && res.socket) {
+        // getProtocol/getCipher describe the negotiated TLS session itself — available whenever the
+        // handshake completed, independent of whether the peer certificate below parses cleanly.
+        if (typeof res.socket.getProtocol === 'function') certFields.tls_protocol = res.socket.getProtocol() || null;
+        if (typeof res.socket.getCipher === 'function') certFields.tls_cipher = res.socket.getCipher()?.standardName || res.socket.getCipher()?.name || null;
+        if (typeof res.socket.getPeerCertificate === 'function') {
+          // detailed=true unlocks subjectaltname and the full issuer/subject objects — without it,
+          // Node's default only returns C/O/CN, dropping most of what an admin actually wants here.
+          const cert = res.socket.getPeerCertificate(true);
+          if (cert && cert.valid_to) {
+            certFields.cert_expires_at = toSqlDatetime(new Date(cert.valid_to));
+            certFields.cert_issuer = cert.issuer?.O || cert.issuer?.CN || null;
+            certFields.cert_valid_from = toSqlDatetime(new Date(cert.valid_from));
+            certFields.cert_subject = cert.subject?.CN || cert.subject?.O || null;
+            certFields.cert_serial = cert.serialNumber || null;
+            certFields.cert_fingerprint = cert.fingerprint256 || cert.fingerprint || null;
+            // subjectaltname comes back as "DNS:a.com, DNS:b.com, IP Address:1.2.3.4" — strip the
+            // "DNS:"/"IP Address:" prefixes for a cleaner comma-separated display list.
+            certFields.cert_san = cert.subjectaltname
+              ? cert.subjectaltname.split(',').map((s) => s.trim().replace(/^(DNS|IP Address):/, '')).join(', ')
+              : null;
+          }
         }
       }
 
@@ -102,12 +128,12 @@ function performHttpCheck(monitor) {
               : `Vẫn thấy từ khóa "${monitor.keyword}" (đáng lẽ không được có)`;
           }
         }
-        resolve({ status, status_code: res.statusCode, response_ms, error, cert_expires_at, cert_issuer });
+        resolve({ status, status_code: res.statusCode, response_ms, error, ...certFields });
       });
     });
     req.on('timeout', () => req.destroy(new Error('Timeout')));
     req.on('error', (e) => {
-      resolve({ status: 'down', status_code: null, response_ms: Date.now() - startedAt, error: e.message, cert_expires_at: null, cert_issuer: null });
+      resolve({ status: 'down', status_code: null, response_ms: Date.now() - startedAt, error: e.message, ...EMPTY_CERT_FIELDS });
     });
     req.end();
   });
@@ -125,7 +151,7 @@ function performTcpCheck(monitor) {
     const finish = (status, error) => {
       socket.removeAllListeners();
       socket.destroy();
-      resolve({ status, status_code: null, response_ms: Date.now() - startedAt, error, cert_expires_at: null, cert_issuer: null });
+      resolve({ status, status_code: null, response_ms: Date.now() - startedAt, error, ...EMPTY_CERT_FIELDS });
     };
     const socket = net.createConnection({ host: monitor.host, port: monitor.port, timeout: timeoutMs });
     socket.on('connect', () => finish('up', null));
@@ -141,15 +167,15 @@ function performTcpCheck(monitor) {
 async function performPingCheck(monitor) {
   const startedAt = Date.now();
   if (!pingLib) {
-    return { status: 'down', status_code: null, response_ms: null, error: 'Thư viện ping (ICMP) không khả dụng trên server này', cert_expires_at: null, cert_issuer: null };
+    return { status: 'down', status_code: null, response_ms: null, error: 'Thư viện ping (ICMP) không khả dụng trên server này', ...EMPTY_CERT_FIELDS };
   }
   try {
     const res = await pingLib.promise.probe(monitor.host, { timeout: monitor.timeout_sec || 10 });
-    if (!res.alive) return { status: 'down', status_code: null, response_ms: null, error: 'Không phản hồi ping (ICMP)', cert_expires_at: null, cert_issuer: null };
+    if (!res.alive) return { status: 'down', status_code: null, response_ms: null, error: 'Không phản hồi ping (ICMP)', ...EMPTY_CERT_FIELDS };
     const response_ms = (res.time == null || res.time === 'unknown') ? (Date.now() - startedAt) : Math.round(parseFloat(res.time));
-    return { status: 'up', status_code: null, response_ms, error: null, cert_expires_at: null, cert_issuer: null };
+    return { status: 'up', status_code: null, response_ms, error: null, ...EMPTY_CERT_FIELDS };
   } catch (e) {
-    return { status: 'down', status_code: null, response_ms: Date.now() - startedAt, error: e.message, cert_expires_at: null, cert_issuer: null };
+    return { status: 'down', status_code: null, response_ms: Date.now() - startedAt, error: e.message, ...EMPTY_CERT_FIELDS };
   }
 }
 
@@ -163,15 +189,24 @@ function performCheck(monitor) {
 }
 
 const insertCheck = db.prepare('INSERT INTO monitor_checks (monitor_id, status, status_code, response_ms, error) VALUES (?, ?, ?, ?, ?)');
+// SSL/TLS detail fields live only on monitors (a latest-value cache), not per-row in monitor_checks —
+// same treatment cert_expires_at/cert_issuer already had, since a cert doesn't meaningfully change
+// between consecutive checks and storing it on every row would just bloat the 30-day check history.
 const updateMonitorCache = db.prepare(`
-  UPDATE monitors SET current_status=?, last_checked_at=CURRENT_TIMESTAMP, last_response_ms=?, last_status_code=?, last_error=?, cert_expires_at=?, cert_issuer=?, updated_at=CURRENT_TIMESTAMP
+  UPDATE monitors SET current_status=?, last_checked_at=CURRENT_TIMESTAMP, last_response_ms=?, last_status_code=?, last_error=?,
+    cert_expires_at=?, cert_issuer=?, cert_valid_from=?, cert_subject=?, cert_serial=?, cert_fingerprint=?, cert_san=?, tls_protocol=?, tls_cipher=?,
+    updated_at=CURRENT_TIMESTAMP
   WHERE id=?
 `);
 
 async function checkMonitor(monitor) {
   const r = await performCheck(monitor);
   await insertCheck.run(monitor.id, r.status, r.status_code, r.response_ms, r.error);
-  await updateMonitorCache.run(r.status, r.response_ms, r.status_code, r.error, r.cert_expires_at, r.cert_issuer, monitor.id);
+  await updateMonitorCache.run(
+    r.status, r.response_ms, r.status_code, r.error,
+    r.cert_expires_at, r.cert_issuer, r.cert_valid_from, r.cert_subject, r.cert_serial, r.cert_fingerprint, r.cert_san, r.tls_protocol, r.tls_cipher,
+    monitor.id
+  );
   return r;
 }
 

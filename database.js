@@ -1124,6 +1124,17 @@ async function ensureSchemaAndMigrations() {
   // rotates source IPs against one specific target account). See routes/auth.js.
   try { await pool.query("ALTER TABLE users ADD COLUMN failed_login_count INT NOT NULL DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE users ADD COLUMN locked_until DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Richer SSL/TLS certificate detail for HTTP(S) monitors, beyond the original cert_expires_at/
+  // cert_issuer pair — see uptime-collector.js's performHttpCheck (getPeerCertificate(true) +
+  // getProtocol/getCipher). tcp/ping monitors always leave these NULL.
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_valid_from DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_subject VARCHAR(255)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_serial VARCHAR(100)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_fingerprint VARCHAR(100)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN cert_san TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN tls_protocol VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE monitors ADD COLUMN tls_cipher VARCHAR(100)"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

@@ -63,18 +63,34 @@ router.get('/:id/history', async (req, res) => {
 
   if (rangeSeconds <= 4 * 3600) {
     const rows = await db.prepare(
-      'SELECT checked_at as t, response_ms, status, error FROM monitor_checks WHERE monitor_id=? AND checked_at >= ? ORDER BY checked_at ASC'
+      'SELECT checked_at as t, response_ms, status, status_code, error FROM monitor_checks WHERE monitor_id=? AND checked_at >= ? ORDER BY checked_at ASC'
     ).all(req.params.id, fromSql);
-    return res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms, up: r.status === 'up' ? 1 : 0, error: r.error })), uptime_pct, bucketed: false });
+    // severity: 1=up (2xx/3xx, or up with no code at all for tcp/ping), 2=warn (4xx — reached but
+    // rejected), 3=down (5xx, or down with no code — connection failure/timeout). The chart
+    // (renderStatusCodeChart) colors purely off this, not response_ms — see routes/monitors.js's
+    // own header comment on why: an admin asked for "200 = alive, 50x = dead", not a latency graph.
+    const severityOf = (r) => {
+      if (r.status_code != null) return r.status_code >= 500 ? 3 : r.status_code >= 400 ? 2 : 1;
+      return r.status === 'up' ? 1 : 3;
+    };
+    return res.json({
+      points: rows.map(r => ({ t: r.t, response_ms: r.response_ms, up: r.status === 'up' ? 1 : 0, status_code: r.status_code, severity: severityOf(r), error: r.error })),
+      uptime_pct, bucketed: false,
+    });
   }
 
   const bucketSeconds = Math.max(60, Math.floor(rangeSeconds / 150));
+  // severity aggregate mirrors severityOf() above but as a SQL CASE/MAX — worst-case wins per bucket
+  // (same reasoning as the pre-existing MIN(status='up'): one 5xx in a bucket should show the bucket
+  // as down, not get averaged away).
   const rows = await db.prepare(`
-    SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(checked_at)/?)*?) as t, AVG(response_ms) as response_ms, MIN(status='up') as up, COUNT(*) as cnt
+    SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(checked_at)/?)*?) as t, AVG(response_ms) as response_ms, MIN(status='up') as up,
+      MAX(CASE WHEN status_code >= 500 THEN 3 WHEN status_code >= 400 THEN 2 WHEN status_code IS NULL AND status != 'up' THEN 3 ELSE 1 END) as severity,
+      COUNT(*) as cnt
     FROM monitor_checks WHERE monitor_id=? AND checked_at >= ?
     GROUP BY t ORDER BY t ASC
   `).all(bucketSeconds, bucketSeconds, req.params.id, fromSql);
-  res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms != null ? Math.round(r.response_ms) : null, up: r.up })), uptime_pct, bucketed: true });
+  res.json({ points: rows.map(r => ({ t: r.t, response_ms: r.response_ms != null ? Math.round(r.response_ms) : null, up: r.up, severity: r.severity })), uptime_pct, bucketed: true });
 });
 
 // Hostnames, IPv4, IPv6 only — rejects shell metacharacters as defense-in-depth. Not strictly

@@ -6224,7 +6224,7 @@ async function loadHeartbeat(id) {
   } catch { /* transient — next full re-render retries */ }
 }
 
-// ─── Monitor detail: response-time chart over a selectable time range ─────────────────────────
+// ─── Monitor detail: status-code timeline chart over a selectable time range ──────────────────
 const MONITOR_RANGE_PRESETS = [
   { label: '1h', hours: 1 }, { label: '2h', hours: 2 }, { label: '4h', hours: 4 },
   { label: '8h', hours: 8 }, { label: '12h', hours: 12 }, { label: '1 ngày', hours: 24 },
@@ -6260,6 +6260,7 @@ async function openMonitorDetail(id) {
       </div>
       <div style="font-size:12px;color:var(--fg-muted);margin-bottom:8px" id="monitorRangeUptime"></div>
       <div id="monitorChart"><div class="loading"><div class="spinner"></div></div></div>
+      ${renderSslDetail(m)}
     `;
     loadMonitorChart(id, 24);
   } else {
@@ -6293,54 +6294,78 @@ async function loadMonitorChart(id, hours, from, to) {
     document.getElementById('monitorRangeUptime').textContent = uptime_pct != null
       ? `Uptime trong khoảng này: ${uptime_pct}% (${points.length} điểm dữ liệu${bucketed ? ', đã gộp nhóm để vẽ' : ''})`
       : 'Chưa có dữ liệu trong khoảng này';
-    chartEl.innerHTML = renderTimeSeriesChart(points);
+    chartEl.innerHTML = renderStatusCodeChart(points);
   } catch (e) {
     chartEl.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 
-// Hand-rolled SVG line chart (app has no charting dependency — see renderSparkline()'s identical
-// reasoning) — response_ms polyline, red-tinted background bands over any down period, minimal
-// axis labels. `points`: [{t, response_ms, up}], oldest-first.
-function renderTimeSeriesChart(points) {
+// Hand-rolled SVG status timeline (app has no charting dependency — see renderSparkline()'s identical
+// reasoning) — colors each check interval by HTTP response code category instead of response time,
+// per explicit request: this chart answers "was it up or down" (200 = alive, 5xx = dead), not "how
+// fast was it". `points`: [{t, severity, status_code?, error?}], oldest-first — severity comes
+// pre-computed from routes/monitors.js (1=up/2xx-3xx, 2=warn/4xx, 3=down/5xx or no response at all,
+// which covers tcp/ping monitors too since they have no status_code and fall back to their up/down).
+const SEVERITY_COLOR = { 1: 'var(--accent)', 2: 'var(--yellow)', 3: 'var(--red)' };
+
+function renderStatusCodeChart(points) {
   if (!points || !points.length) return `<div style="padding:40px 0;text-align:center;color:var(--fg-dim);font-size:13px">Chưa có dữ liệu trong khoảng này</div>`;
-  const W = 760, H = 220, padL = 46, padR = 10, padT = 10, padB = 24;
+  const W = 760, H = 140, padL = 10, padR = 10, padT = 10, padB = 24;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const n = points.length;
-  const validMs = points.map(p => p.response_ms).filter(v => v != null);
-  const maxMs = Math.max(10, ...(validMs.length ? validMs : [0])) * 1.15;
-  const x = i => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const y = ms => padT + plotH - (Math.min(ms, maxMs) / maxMs) * plotH;
+  const x = i => padL + (n <= 1 ? 0 : (i / n) * plotW);
+  const segW = n <= 1 ? plotW : plotW / n;
 
-  let bands = '';
-  points.forEach((p, i) => {
-    if (!p.up) {
-      const x0 = i === 0 ? x(i) : (x(i - 1) + x(i)) / 2;
-      const x1 = i === n - 1 ? x(i) : (x(i) + x(i + 1)) / 2;
-      bands += `<rect x="${x0.toFixed(1)}" y="${padT}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${plotH}" fill="var(--red-dim)"/>`;
-    }
-  });
-
-  let polylines = '', seg = [];
-  const flushSeg = () => { if (seg.length > 1) polylines += `<polyline points="${seg.join(' ')}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>`; seg = []; };
-  points.forEach((p, i) => {
-    if (p.response_ms == null) { flushSeg(); return; }
-    seg.push(`${x(i).toFixed(1)},${y(p.response_ms).toFixed(1)}`);
-  });
-  flushSeg();
-
-  const yTicks = [0, maxMs / 2, maxMs];
-  const yLabels = yTicks.map(v => `<text x="${(padL - 6).toFixed(1)}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--fg-dim)">${Math.round(v)}ms</text>`).join('');
-  const yGrid = yTicks.map(v => `<line x1="${padL}" y1="${y(v).toFixed(1)}" x2="${W - padR}" y2="${y(v).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`).join('');
+  const bars = points.map((p, i) => {
+    const color = SEVERITY_COLOR[p.severity] || SEVERITY_COLOR[3];
+    const codeText = p.status_code != null ? `HTTP ${p.status_code}` : (p.severity === 1 ? 'Up' : 'Down');
+    const title = `${formatTime(p.t)} — ${codeText}${p.error ? ': ' + p.error : ''}`;
+    return `<rect x="${x(i).toFixed(1)}" y="${padT}" width="${Math.max(1, segW - 1).toFixed(1)}" height="${plotH}" fill="${color}" rx="1"><title>${escHtml(title)}</title></rect>`;
+  }).join('');
 
   const tickIdxs = [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
-  const xLabels = tickIdxs.map(i => `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="var(--fg-dim)">${String(points[i].t).slice(5, 16)}</text>`).join('');
+  const xLabels = tickIdxs.map(i => `<text x="${(x(i) + segW / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="10" fill="var(--fg-dim)">${String(points[i].t).slice(5, 16)}</text>`).join('');
 
-  return `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;overflow:visible">
-    ${bands}${yGrid}
-    ${polylines}
-    ${yLabels}${xLabels}
-  </svg>`;
+  return `
+    <div style="display:flex;gap:16px;align-items:center;margin-bottom:8px;font-size:12px;color:var(--fg-muted);flex-wrap:wrap">
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--accent);margin-right:4px;vertical-align:middle"></span>Sống (2xx–3xx)</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--yellow);margin-right:4px;vertical-align:middle"></span>Cảnh báo (4xx)</span>
+      <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--red);margin-right:4px;vertical-align:middle"></span>Chết (5xx / không phản hồi)</span>
+    </div>
+    <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;overflow:visible">
+      ${bars}${xLabels}
+    </svg>`;
+}
+
+// Detailed SSL/TLS certificate panel for the monitor detail modal — the card-view certBadge() stays
+// a compact day-count badge, this shows everything captured by uptime-collector.js's performHttpCheck
+// (subject, issuer, validity window, TLS version/cipher, serial, fingerprint, SAN list).
+function renderSslDetail(m) {
+  if (m.type !== 'http' || !m.url || !m.url.toLowerCase().startsWith('https')) return '';
+  if (!m.cert_expires_at) return `<div style="font-size:12px;color:var(--fg-dim);margin-top:14px">Chưa có thông tin chứng chỉ SSL (chưa kiểm tra lần nào, hoặc kết nối không dùng HTTPS hợp lệ).</div>`;
+  const d = m.cert_days_remaining;
+  const statusHtml = d < 0
+    ? `<span style="color:var(--red)">Đã hết hạn ${Math.abs(d)} ngày trước</span>`
+    : `<span style="color:${d <= 7 ? 'var(--red)' : d <= 30 ? 'var(--yellow)' : 'var(--accent)'}">Còn ${d} ngày</span>`;
+  const rows = [
+    ['Trạng thái', statusHtml],
+    ['Cấp cho (Subject)', escHtml(m.cert_subject || '—')],
+    ['Cấp bởi (Issuer)', escHtml(m.cert_issuer || '—')],
+    ['Hiệu lực từ', m.cert_valid_from ? formatTime(m.cert_valid_from) : '—'],
+    ['Hết hạn lúc', formatTime(m.cert_expires_at)],
+    ['Phiên bản TLS', escHtml(m.tls_protocol || '—')],
+    ['Bộ mã hóa (Cipher)', escHtml(m.tls_cipher || '—')],
+    ['Số serial', escHtml(m.cert_serial || '—')],
+    ['Fingerprint (SHA-256)', `<span style="font-family:monospace;font-size:11px;word-break:break-all">${escHtml(m.cert_fingerprint || '—')}</span>`],
+    ['Tên miền thay thế (SAN)', m.cert_san ? `<span style="font-size:11px;word-break:break-all">${escHtml(m.cert_san)}</span>` : '—'],
+  ];
+  return `
+    <div style="margin-top:14px;border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+      <div style="font-size:12px;font-weight:600;color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px">Chứng chỉ SSL/TLS</div>
+      <div style="display:grid;grid-template-columns:140px 1fr;gap:6px 12px;font-size:13px">
+        ${rows.map(([k, v]) => `<div style="color:var(--fg-dim)">${k}</div><div>${v}</div>`).join('')}
+      </div>
+    </div>`;
 }
 
 function openMonitorForm(monitor) {
@@ -7970,8 +7995,8 @@ function renderReportsTabBody() {
   return renderReportsOverviewTab();
 }
 
-// Hand-rolled multi-series SVG line chart — mirrors renderTimeSeriesChart's approach (this app has
-// no charting dependency by deliberate choice), extended to draw >1 named series with a legend.
+// Hand-rolled multi-series SVG line chart (this app has no charting dependency by deliberate
+// choice — see renderStatusCodeChart's identical reasoning), extended to draw >1 named series with a legend.
 function renderMultiLineChart(dates, series) {
   if (!dates || !dates.length) return `<div style="padding:40px 0;text-align:center;color:var(--fg-dim);font-size:13px">Chưa có dữ liệu trong khoảng này</div>`;
   const W = 760, H = 220, padL = 40, padR = 10, padT = 10, padB = 24;
