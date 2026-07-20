@@ -7395,7 +7395,7 @@ function renderTrivyHostBanner() {
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-secondary btn-sm" onclick="handleTrivyCheckUpdate(this)">Kiểm tra cập nhật</button>
-        <button class="btn ${outdated ? 'btn-primary' : 'btn-secondary'} btn-sm" onclick="handleTrivyInstallHost(this)">Cập nhật lên bản mới nhất</button>
+        <button class="btn ${outdated ? 'btn-primary' : 'btn-secondary'} btn-sm" ${upToDate ? 'disabled title="Đã là phiên bản mới nhất"' : ''} onclick="handleTrivyInstallHost(this)">Cập nhật lên bản mới nhất</button>
       </div>
     </div>`;
   applyPermissionVisibility();

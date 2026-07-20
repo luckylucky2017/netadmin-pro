@@ -185,6 +185,7 @@ if (!process.env.SESSION_SECRET) {
     require('./nginx-waf-collector').start();
     require('./vuln-scanner').start();
     require('./trivy-scanner').start();
+    require('./trivy-scanner').startVersionCheckScheduler();
     require('./harbor-scanner').start();
   } else {
     console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');

@@ -93,11 +93,13 @@ function getLocalTrivyVersionInfo() {
 }
 
 // Cached — this is called on every "Quét mã nguồn Trivy" tab load (via GET /trivy/host-status), and
-// there's no reason to hit GitHub's API that often; a release lands at most a few times a month.
+// there's no reason to hit GitHub's API that often; a release lands at most a few times a month. The
+// cache TTL matches startVersionCheckScheduler's 24h tick below, so between scheduled checks a page
+// load just reads the cached value instead of re-hitting GitHub on every visit.
 // Failure (offline netadmin-pro host, GitHub rate limit) resolves null rather than throwing, so a
 // flaky/absent outbound connection never blocks the rest of the host-status response.
 let latestReleaseCache = { checkedAt: 0, tag: null };
-const LATEST_RELEASE_CACHE_MS = 6 * 60 * 60 * 1000;
+const LATEST_RELEASE_CACHE_MS = 24 * 60 * 60 * 1000;
 // force=true bypasses the cache entirely — used by the manual "Kiểm tra cập nhật" button, where a
 // stale cached answer would defeat the point of clicking it.
 function getLatestTrivyRelease(force = false) {
@@ -121,6 +123,17 @@ function getLatestTrivyRelease(force = false) {
     req.on('error', () => resolve(null));
     req.on('timeout', () => { req.destroy(); resolve(null); });
   });
+}
+
+// Runs independently of anyone opening the "Quét mã nguồn Trivy" tab — without this, the cached
+// latest-release answer would only ever refresh when someone happens to load the page after the TTL
+// expires, so an admin who doesn't check in for a week wouldn't see "có bản mới" until they visit.
+// force=true each tick so this always reflects the true latest release regardless of the passive
+// cache TTL above; every host-status/page-load in between just reads what this already fetched.
+function startVersionCheckScheduler(intervalMs = LATEST_RELEASE_CACHE_MS) {
+  const tick = () => getLatestTrivyRelease(true).catch(() => {});
+  tick();
+  return setInterval(tick, intervalMs);
 }
 
 // Known dependency-manifest filenames across the ecosystems Trivy's fs scanner supports — only these
@@ -577,7 +590,7 @@ function start(intervalMs = TICK_MS) {
 module.exports = {
   start, collectAll, collectAllFilesystem, collectAllDocker,
   scanFilesystem, scanDocker, discoverPaths,
-  isLocalTrivyInstalled, installLocalTrivy, getLocalTrivyVersionInfo, getLatestTrivyRelease,
+  isLocalTrivyInstalled, installLocalTrivy, getLocalTrivyVersionInfo, getLatestTrivyRelease, startVersionCheckScheduler,
   parseTrivyScanOutput, buildFindManifestsScript, parseFindManifestsOutput,
   parseDiscoverPathsOutput, DISCOVER_PATHS_SCRIPT,
   parseDockerListOutput, buildDockerSaveScript, parseDockerSaveOutput, DOCKER_LIST_SCRIPT, DOCKER_IMAGE_NAME_RE,
