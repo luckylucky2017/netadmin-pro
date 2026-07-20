@@ -7412,7 +7412,7 @@ function renderTrivyRows() {
   const rows = paginateRows(sorted, trivyPagination);
   const rowOffset = (trivyPagination.page - 1) * trivyPagination.pageSize;
   wrap.innerHTML = `<table>
-    <thead><tr><th>#</th>${thSort('Tên VM', 'name', trivySortState, 'toggleTrivySort')}<th>Đường dẫn quét</th><th>Bật quét</th><th>Chế độ</th><th>Kết quả quét</th>${thSort('Quét lần cuối', 'trivy_last_scanned_at', trivySortState, 'toggleTrivySort')}<th>Hành động</th></tr></thead>
+    <thead><tr><th>#</th>${thSort('Tên VM', 'name', trivySortState, 'toggleTrivySort')}${thSort('Đường dẫn quét', 'trivy_scan_path', trivySortState, 'toggleTrivySort')}${thSort('Bật quét', 'trivy_scan_enabled', trivySortState, 'toggleTrivySort')}${thSort('Chế độ', 'trivy_scan_mode', trivySortState, 'toggleTrivySort')}${thSort('Kết quả quét', 'trivy_scan_status', trivySortState, 'toggleTrivySort')}${thSort('Quét lần cuối', 'trivy_last_scanned_at', trivySortState, 'toggleTrivySort')}<th>Hành động</th></tr></thead>
     <tbody>${rows.map((v, i) => {
       const eligible = !!(v.ssh_credential_id && v.ip_address);
       const status = v.trivy_scan_status || 'unknown';
@@ -7715,7 +7715,14 @@ async function openHarborFindingsModal(repoId) {
       body.innerHTML = `<div class="empty-state"><h3>Không có lỗ hổng nào</h3></div>`;
       return;
     }
-    body.innerHTML = `<div style="max-height:60vh;overflow:auto"><table>
+    body.innerHTML = `
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <button class="btn btn-secondary btn-sm" onclick="exportTrivyFindingsCsv('${escAttr(fullName)}')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất CSV
+        </button>
+      </div>
+      <div style="max-height:60vh;overflow:auto"><table>
       <thead><tr><th>Image / File</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
       <tbody>${trivyFindingRows.map(f => `
         <tr>
@@ -7839,7 +7846,14 @@ async function openTrivyFindingsModal(vmId, scanType) {
       body.innerHTML = `<div class="empty-state"><h3>Không có lỗ hổng nào</h3></div>`;
       return;
     }
-    body.innerHTML = `<div style="max-height:60vh;overflow:auto"><table>
+    body.innerHTML = `
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+        <button class="btn btn-secondary btn-sm" onclick="exportTrivyFindingsCsv('${escAttr(vm.name)}')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất CSV
+        </button>
+      </div>
+      <div style="max-height:60vh;overflow:auto"><table>
       <thead><tr><th>${scanType === 'docker' ? 'Image / File' : 'File'}</th><th>Package</th><th>Phiên bản</th><th>Mã CVE</th><th>Mức độ</th><th>EPSS</th><th>Giải pháp</th><th></th></tr></thead>
       <tbody>${trivyFindingRows.map(f => `
         <tr>
@@ -7892,6 +7906,33 @@ function trivyRemediationText(f) {
   const suffix = f.scan_type === 'harbor' ? ' rồi build lại, đẩy (push) image mới lên Harbor' : f.scan_type === 'docker' ? ' rồi build lại và deploy image mới' : ' rồi cài đặt lại';
   if (f.fixed_version) return `Nâng cấp "${f.package_name}" lên phiên bản ${f.fixed_version} trong file quản lý dependency (${f.target_file || '?'})${suffix}.`;
   return `Chưa có phiên bản vá cho "${f.package_name}" — theo dõi cập nhật từ nhà phát triển thư viện.`;
+}
+
+function slugifyForFilename(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'bao-cao';
+}
+
+// Exports whichever findings are currently loaded into trivyFindingRows — i.e. the single VM/image/repo
+// scan the user has the findings modal open for, not a re-fetch across everything like
+// exportVulnFindingsCsv does. That's the point: one CSV per scan, not one giant combined report.
+function exportTrivyFindingsCsv(scopeLabel) {
+  if (!trivyFindingRows.length) { toast('Không có dữ liệu để xuất', 'error'); return; }
+  const headers = ['VM/Repo', 'File/Image', 'Package', 'Phiên bản', 'Mã CVE', 'Đang bị khai thác (CISA KEV)', 'Mức độ', 'EPSS (%)', 'Mô tả', 'Giải pháp xử lý', 'Link tham khảo', 'Phát hiện lần đầu', 'Lần cuối thấy', 'Trạng thái'];
+  const csvRows = trivyFindingRows.map(f => [
+    f.vm_name || scopeLabel, f.target_file || '', f.package_name, f.package_version, f.vuln_id, f.in_kev ? 'Có' : 'Không',
+    VULN_SEVERITY_LABEL[f.severity] || f.severity, f.epss_score != null ? (Number(f.epss_score) * 100).toFixed(2) : '',
+    f.details || f.summary || '', trivyRemediationText(f), f.reference_url || '',
+    f.first_seen, f.last_seen, f.resolved_at ? 'Đã khắc phục' : 'Còn tồn tại',
+  ]);
+  const csv = [headers, ...csvRows].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `bao-cao-trivy-${slugifyForFilename(scopeLabel)}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function openTrivyFindingDetail(id) {
