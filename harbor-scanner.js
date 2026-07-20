@@ -123,8 +123,15 @@ async function discoverRepos() {
 // The tag actually worth scanning — whatever was pushed most recently. Falls back to the digest
 // reference (untagged artifact) if the latest push has no tag at all, since `trivy image` accepts
 // either form (repo:tag or repo@sha256:...).
+//
+// repo_name gets DOUBLE URL-encoded here — confirmed directly against the real harbor.fds.vn: a
+// repository name containing '/' (common — many repos here are nested like
+// "deployment/registry/thanhtra") needs %252F, not just %2F, or Harbor's own router 404s with
+// "path ... was not found" (single-encoding gets decoded back to a literal '/' before it reaches
+// Harbor's route matching). This is a documented Harbor API quirk, not something specific to this
+// app's HTTP client — reproduced identically with plain curl.
 async function getLatestTag(cfg, projectName, repoName) {
-  const encodedRepo = encodeURIComponent(repoName);
+  const encodedRepo = encodeURIComponent(encodeURIComponent(repoName));
   const r = await harborRequest(
     cfg.url,
     `/api/v2.0/projects/${encodeURIComponent(projectName)}/repositories/${encodedRepo}/artifacts?page=1&page_size=1&sort=-push_time`,
@@ -139,18 +146,33 @@ async function getLatestTag(cfg, projectName, repoName) {
 // TRIVY_USERNAME/TRIVY_PASSWORD via env, never a --password CLI flag — command-line arguments are
 // visible to any other user on the host via `ps aux`, exactly the reasoning already applied to the
 // MySQL diagnostics run earlier this session (MYSQL_PWD env var instead of `-p`).
+// 10 minutes, not trivy-scanner.js's 180s (VM-local scans there pull only small manifest files or
+// a Docker-daemon-cached image) — a Harbor scan pulls the full image over the network from scratch
+// every time, and a real image on the user's own instance was observed taking well over 3 minutes.
+// Also captures *why* a failure happened (stderr/timeout), not just a bare "error" status — found
+// during real testing that a generic status alone left no way to tell a timeout apart from an auth
+// failure or a genuinely malformed image reference without re-running the command by hand.
+const HARBOR_SCAN_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Wrapped in trivyScanner.runExclusive — this and trivy-scanner.js's own fs/docker scans all touch
+// the same --cache-dir, and each scan type runs its own independent periodic loop (server.js), so
+// without serializing across modules two of them can genuinely fire around the same moment. See
+// runExclusive's own comment in trivy-scanner.js for the real failure mode this avoids.
 function runTrivyImageScan(imageRef, cfg) {
-  return new Promise((resolve) => {
+  return trivyScanner.runExclusive(() => new Promise((resolve) => {
     const args = ['image', imageRef, '--cache-dir', trivyScanner.LOCAL_TRIVY_CACHE_DIR, '--format', 'json', '--scanners', 'vuln', '--quiet'];
     if (cfg.insecure) args.push('--insecure');
     const env = { ...process.env };
     if (cfg.username) env.TRIVY_USERNAME = cfg.username;
     if (cfg.password) env.TRIVY_PASSWORD = cfg.password;
-    execFile(trivyScanner.LOCAL_TRIVY_BIN, args, { timeout: 180000, maxBuffer: 20 * 1024 * 1024, env }, (err, stdout) => {
-      if (err && !stdout) return resolve({ status: 'error', findings: [] });
+    execFile(trivyScanner.LOCAL_TRIVY_BIN, args, { timeout: HARBOR_SCAN_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024, env }, (err, stdout, stderr) => {
+      if (err && !stdout) {
+        const detail = err.killed ? `Quá thời gian chờ (${Math.round(HARBOR_SCAN_TIMEOUT_MS / 60000)} phút) — image có thể quá lớn hoặc mạng tới Harbor chậm` : (stderr || err.message || '').slice(0, 500);
+        return resolve({ status: 'error', findings: [], errorDetail: detail });
+      }
       resolve(trivyScanner.parseTrivyScanOutput(`STATUS:ok\n${stdout}`));
     });
-  });
+  }));
 }
 
 const setRepoStatus = db.prepare(`
@@ -175,9 +197,10 @@ async function scanRepo(repo) {
     const imageRef = latest.isDigest ? `${registryHost}/${fullName}@${latest.ref}` : `${registryHost}/${fullName}:${latest.ref}`;
 
     await fsp.mkdir(trivyScanner.LOCAL_TRIVY_CACHE_DIR, { recursive: true });
-    const { status, findings } = await runTrivyImageScan(imageRef, cfg);
+    const { status, findings, errorDetail } = await runTrivyImageScan(imageRef, cfg);
     if (status !== 'ok') {
-      await setRepoStatus.run('error', `Lỗi khi Trivy quét image trên Harbor (trạng thái: ${status})`, latest.isDigest ? null : latest.ref, null, repo.id);
+      const message = errorDetail ? `Lỗi khi Trivy quét image trên Harbor: ${errorDetail}` : `Lỗi khi Trivy quét image trên Harbor (trạng thái: ${status})`;
+      await setRepoStatus.run('error', message, latest.isDigest ? null : latest.ref, null, repo.id);
       return;
     }
     for (const f of findings) f.targetFile = f.targetFile ? `${imageRef} :: ${f.targetFile}` : imageRef;

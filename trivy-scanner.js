@@ -101,10 +101,26 @@ function parseFindManifestsOutput(stdout) {
   return { status: 'ok', files: lines.slice(1).map((l) => l.trim()).filter(Boolean) };
 }
 
+// A process-wide mutex serializing every `trivy` invocation — fs scans, docker scans here, AND
+// harbor-scanner.js's registry scans all share the same --cache-dir, and this app runs each scan
+// type's collectAll() as its OWN independent setInterval loop (see server.js), so two of them can
+// genuinely fire around the same moment with no coordination between them. Found via real testing:
+// two trivy processes touching that cache directory concurrently don't just contend/slow down, one
+// fails outright ("cache may be in use by another process: timeout"). Every caller funnels through
+// runExclusive so only one `trivy` process ever runs at a time, regardless of which scanner
+// triggered it — a queue, not a "reject if busy", so a scan-now click during an automatic sweep
+// still eventually runs rather than erroring.
+let trivyLockChain = Promise.resolve();
+function runExclusive(fn) {
+  const run = trivyLockChain.then(fn, fn);
+  trivyLockChain = run.then(() => {}, () => {});
+  return run;
+}
+
 // Shared by both `trivy fs <dir>` and `trivy image --input <tar>` — caller supplies the full argv
 // (subcommand onward) since the two scan types differ beyond just the target argument.
 function runLocalTrivyScan(args) {
-  return new Promise((resolve) => {
+  return runExclusive(() => new Promise((resolve) => {
     execFile(
       LOCAL_TRIVY_BIN, args,
       { timeout: 180000, maxBuffer: 20 * 1024 * 1024 },
@@ -113,7 +129,7 @@ function runLocalTrivyScan(args) {
         resolve(parseTrivyScanOutput(`STATUS:ok\n${stdout}`));
       }
     );
-  });
+  }));
 }
 
 // Pure, testable: splits a "STATUS:ok\n{...trivy json...}" string into { status, findings }. Real Trivy JSON
@@ -508,6 +524,7 @@ module.exports = {
   parseDockerListOutput, buildDockerSaveScript, parseDockerSaveOutput, DOCKER_LIST_SCRIPT, DOCKER_IMAGE_NAME_RE,
   LOCAL_TRIVY_DIR, LOCAL_TRIVY_BIN, LOCAL_TRIVY_CACHE_DIR,
   // Shared with harbor-scanner.js — see enrichAndStoreFindings/raiseTrivyAlert's own comments on why
-  // a harbor_repos row works here unmodified (both only ever need {id, name} off the "source").
-  runLocalTrivyScan, enrichAndStoreFindings, resolveStaleFindings,
+  // a harbor_repos row works here unmodified (both only ever need {id, name} off the "source"), and
+  // runExclusive's own comment on why every trivy invocation across both modules must serialize.
+  runLocalTrivyScan, enrichAndStoreFindings, resolveStaleFindings, runExclusive,
 };
