@@ -454,7 +454,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, vuln: renderVuln, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, reports: renderReports };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, vuln: renderVuln, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, mikrotik: renderMikrotik, reports: renderReports };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -6143,6 +6143,449 @@ async function confirmDeleteFirewall(e, id, name) {
     closeModal();
     pfsenseFirewallId = null;
     renderPfsense();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// ─── MIKROTIK (RouterOS firewall — API nhị phân cổng 8728/8729) ────────────────
+const MIKROTIK_TAB_KEY = 'netadmin_mikrotikTab';
+let mikrotikTab = loadSavedTab(MIKROTIK_TAB_KEY, 'interfaces');
+let mikrotikFirewallId = null;
+let mikrotikFirewallsCache = [];
+let mikrotikInterfacesCache = [];
+let mikrotikInterfacesSortState = { key: null, dir: 'asc' };
+let mikrotikRulesCache = [];
+let mikrotikRulesSearch = '';
+let mikrotikRulesPagination = newPagination(20);
+let mikrotikRulesSortState = { key: null, dir: 'asc' };
+
+async function renderMikrotik() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    mikrotikFirewallsCache = await api('/mikrotik/firewalls');
+    if (!mikrotikFirewallsCache.find(f => f.id === mikrotikFirewallId)) {
+      mikrotikFirewallId = mikrotikFirewallsCache[0]?.id || null;
+    }
+    // Chưa có firewall nào -> mở thẳng tab Kết nối thay vì các tab đọc dữ liệu trống khó hiểu.
+    if (!mikrotikFirewallsCache.length) mikrotikTab = 'firewalls';
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">MikroTik</div><div class="page-subtitle">Quản lý firewall MikroTik RouterOS qua API nhị phân (cổng 8728/8729) — interface, rule tường lửa</div></div>
+      ${mikrotikFirewallsCache.length ? `<select class="filter-select" id="mikrotikFirewallSelect" onchange="onMikrotikFirewallChange(this.value)">
+        ${mikrotikFirewallsCache.map(f => `<option value="${f.id}" ${f.id === mikrotikFirewallId ? 'selected' : ''}>${escHtml(f.name)}</option>`).join('')}
+      </select>` : ''}
+    </div>
+    <div class="filter-tabs" id="mikrotikTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${mikrotikTab === 'interfaces' ? 'active' : ''}" data-tab="interfaces" onclick="setMikrotikTab('interfaces')">Interface</div>
+      <div class="filter-tab ${mikrotikTab === 'rules' ? 'active' : ''}" data-tab="rules" onclick="setMikrotikTab('rules')">Rule tường lửa</div>
+      <div class="filter-tab ${mikrotikTab === 'firewalls' ? 'active' : ''}" data-tab="firewalls" onclick="setMikrotikTab('firewalls')" data-permission="mikrotik.manage">Kết nối MikroTik</div>
+    </div>
+    <div id="mikrotikTabBody"></div>`;
+    applyPermissionVisibility();
+    renderMikrotikTabBody();
+  } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`; }
+}
+
+function onMikrotikFirewallChange(id) {
+  mikrotikFirewallId = Number(id);
+  renderMikrotikTabBody();
+}
+
+function setMikrotikTab(tab) {
+  mikrotikTab = tab;
+  saveTab(MIKROTIK_TAB_KEY, tab);
+  document.querySelectorAll('#mikrotikTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderMikrotikTabBody();
+}
+
+function renderMikrotikTabBody() {
+  if (mikrotikTab === 'firewalls') return renderMikrotikFirewallsTab();
+  if (!mikrotikFirewallId) {
+    document.getElementById('mikrotikTabBody').innerHTML = `<div class="empty-state"><h3>Chưa có firewall MikroTik nào</h3><p>Vào tab "Kết nối MikroTik" để thêm</p></div>`;
+    return;
+  }
+  if (mikrotikTab === 'interfaces') return renderMikrotikInterfacesTab();
+  if (mikrotikTab === 'rules') return renderMikrotikRulesTab();
+}
+
+// ── Tab: Interface — chỉ giám sát (traffic in/out), không có hành động ghi ──
+function toggleMikrotikInterfacesSort(key) { toggleSortState(mikrotikInterfacesSortState, key); renderMikrotikInterfacesTable(); }
+
+async function renderMikrotikInterfacesTab() {
+  const body = document.getElementById('mikrotikTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    mikrotikInterfacesCache = await api(`/mikrotik/firewalls/${mikrotikFirewallId}/interfaces`);
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div style="font-size:13px;color:var(--fg-muted)">Dữ liệu đồng bộ định kỳ mỗi 60s từ RouterOS — không cần mở kết nối trực tiếp mỗi lần xem</div>
+        <button class="btn btn-secondary btn-sm" style="margin-left:auto" data-permission="mikrotik.sync" onclick="handleMikrotikSyncNow(this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Đồng bộ ngay
+        </button>
+      </div>
+      <table>
+        <thead><tr>${thSort('Tên', 'name', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}${thSort('Loại', 'type', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}${thSort('Trạng thái', 'running', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}${thSort('Vào (In)', 'in_bps', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}${thSort('Ra (Out)', 'out_bps', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}${thSort('Cập nhật lúc', 'updated_at', mikrotikInterfacesSortState, 'toggleMikrotikInterfacesSort')}</tr></thead>
+        <tbody id="mikrotikInterfacesTableBody"></tbody>
+      </table>
+    </div>`;
+    renderMikrotikInterfacesTable();
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`; }
+}
+
+function renderMikrotikInterfacesTable() {
+  const el = document.getElementById('mikrotikInterfacesTableBody');
+  if (!el) return;
+  if (!mikrotikInterfacesCache.length) {
+    el.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--fg-muted)">Chưa có dữ liệu — bấm "Đồng bộ ngay" hoặc chờ lần đồng bộ tự động tiếp theo</td></tr>`;
+    return;
+  }
+  const sorted = applySort(mikrotikInterfacesCache, mikrotikInterfacesSortState, (row, key) => row[key]);
+  el.innerHTML = sorted.map(i => `
+    <tr>
+      <td style="font-family:'Fira Code',monospace;font-weight:600">${escHtml(i.name)}</td>
+      <td style="font-size:13px">${escHtml(i.type || '—')}</td>
+      <td>${i.disabled ? '<span class="status offline"><span class="dot"></span>Đã tắt</span>' : i.running ? '<span class="status online"><span class="dot"></span>Running</span>' : '<span class="status offline"><span class="dot"></span>Down</span>'}</td>
+      <td style="color:var(--blue);font-family:'Fira Code',monospace">↓ ${fmtBps(i.in_bps)}</td>
+      <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(i.out_bps)}</td>
+      <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(i.updated_at)}</span></td>
+    </tr>`).join('');
+}
+
+async function handleMikrotikSyncNow(btn) {
+  btn.disabled = true;
+  try {
+    await api(`/mikrotik/firewalls/${mikrotikFirewallId}/sync`, 'POST');
+    toast('Đã đồng bộ', 'success');
+    if (mikrotikTab === 'interfaces') await renderMikrotikInterfacesTab();
+    else if (mikrotikTab === 'rules') await renderMikrotikRulesTab();
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; }
+}
+
+// ── Tab: Rule tường lửa — đọc từ cache, ghi trực tiếp lên MikroTik thật rồi đồng bộ lại ──
+const MIKROTIK_CHAINS = ['input', 'forward', 'output'];
+const MIKROTIK_ACTIONS = ['accept', 'drop', 'reject', 'log', 'passthrough', 'jump', 'return'];
+const MIKROTIK_ACTION_COLOR = { accept: 'var(--accent)', drop: 'var(--red)', reject: 'var(--red)', log: 'var(--yellow)' };
+
+function toggleMikrotikRulesSort(key) { toggleSortState(mikrotikRulesSortState, key); renderMikrotikRulesTable(); }
+
+async function renderMikrotikRulesTab() {
+  const body = document.getElementById('mikrotikTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    mikrotikRulesCache = await api(`/mikrotik/firewalls/${mikrotikFirewallId}/rules`);
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="mikrotikRuleSearch" placeholder="Tìm theo comment/nguồn/đích..." value="${escAttr(mikrotikRulesSearch)}">
+        </div>
+        <button class="btn btn-secondary btn-sm" data-permission="mikrotik.sync" onclick="handleMikrotikSyncNow(this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Đồng bộ ngay
+        </button>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" data-permission="mikrotik.rules.write" onclick="openAddMikrotikRuleForm()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm rule
+        </button>
+      </div>
+      <div id="mikrotikRulesTableWrap"></div>
+    </div>`;
+    document.getElementById('mikrotikRuleSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { mikrotikRulesSearch = e.target.value; mikrotikRulesPagination.page = 1; renderMikrotikRulesTable(); }, 300);
+    });
+    renderMikrotikRulesTable();
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải rule</h3><p>${escHtml(e.message)}</p></div>`; }
+}
+
+function renderMikrotikRulesTable() {
+  const wrap = document.getElementById('mikrotikRulesTableWrap');
+  if (!wrap) return;
+  const q = mikrotikRulesSearch.trim().toLowerCase();
+  const filtered = q ? mikrotikRulesCache.filter(r =>
+    (r.comment || '').toLowerCase().includes(q) || (r.src_address || '').toLowerCase().includes(q) || (r.dst_address || '').toLowerCase().includes(q)
+  ) : mikrotikRulesCache;
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20"/></svg><h3>Không có rule nào</h3></div>`;
+    return;
+  }
+  const sorted = applySort(filtered, mikrotikRulesSortState, (row, key) => row[key]);
+  const rows = paginateRows(sorted, mikrotikRulesPagination);
+  wrap.innerHTML = `<table>
+    <thead><tr>${thSort('Chain', 'chain', mikrotikRulesSortState, 'toggleMikrotikRulesSort')}${thSort('Action', 'action', mikrotikRulesSortState, 'toggleMikrotikRulesSort')}<th>Protocol</th><th>Nguồn</th><th>Đích</th><th>Port đích</th><th>Comment</th><th>Bật</th><th>Hành động</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr>
+        <td style="font-family:monospace;font-size:12px">${escHtml(r.chain)}</td>
+        <td style="font-weight:600;color:${MIKROTIK_ACTION_COLOR[r.action] || 'var(--fg-base)'}">${escHtml(r.action)}</td>
+        <td style="font-size:12px">${escHtml(r.protocol || '—')}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(r.src_address || '—')}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(r.dst_address || '—')}</td>
+        <td style="font-family:monospace;font-size:12px">${escHtml(r.dst_port || '—')}</td>
+        <td style="font-size:12px;color:var(--fg-muted)">${escHtml(r.comment || '—')}</td>
+        <td>
+          <label class="toggle-switch" data-permission="mikrotik.rules.write">
+            <input type="checkbox" ${r.disabled ? '' : 'checked'} onchange="handleMikrotikRuleToggle('${escAttr(r.ros_id)}', this)">
+            <span class="toggle-slider"></span>
+          </label>
+        </td>
+        <td><div class="actions">
+          <button class="btn-icon edit" title="Sửa" data-permission="mikrotik.rules.write" onclick="openEditMikrotikRuleForm('${escAttr(r.ros_id)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="mikrotik.rules.delete" onclick="openDeleteMikrotikRuleConfirm('${escAttr(r.ros_id)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>${paginationBar(mikrotikRulesPagination, sorted.length, 'mikrotikRulesPagination', 'renderMikrotikRulesTable')}`;
+  applyPermissionVisibility();
+}
+
+function mikrotikRuleFormHtml(rule) {
+  const isEdit = !!rule;
+  return `
+    <form id="mikrotikRuleForm" onsubmit="saveMikrotikRule(event, ${isEdit ? `'${escAttr(rule.ros_id)}'` : 'null'})">
+      <div class="form-grid">
+        <div class="form-group"><label>Chain *</label>
+          <select name="chain" required>${MIKROTIK_CHAINS.map(c => `<option value="${c}" ${rule?.chain === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label>Action *</label>
+          <select name="action" required>${MIKROTIK_ACTIONS.map(a => `<option value="${a}" ${rule?.action === a ? 'selected' : ''}>${a}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label>Protocol</label><input type="text" name="protocol" value="${rule?.protocol || ''}" placeholder="tcp, udp, icmp..."></div>
+        <div class="form-group"><label>Port đích</label><input type="text" name="dst_port" value="${rule?.dst_port || ''}" placeholder="80, 443, 8000-9000"></div>
+        <div class="form-group"><label>Địa chỉ nguồn</label><input type="text" name="src_address" value="${rule?.src_address || ''}" placeholder="192.168.1.0/24"></div>
+        <div class="form-group"><label>Địa chỉ đích</label><input type="text" name="dst_address" value="${rule?.dst_address || ''}" placeholder="10.0.0.5"></div>
+        <div class="form-group full"><label>Comment</label><input type="text" name="comment" value="${escAttr(rule?.comment || '')}"></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="disabled" ${rule?.disabled ? 'checked' : ''} style="width:auto;margin-right:6px"> Tắt rule này (không xóa, chỉ vô hiệu hóa)</label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm rule'}</button>
+      </div>
+    </form>`;
+}
+
+function openAddMikrotikRuleForm() {
+  openModal('Thêm rule tường lửa MikroTik', mikrotikRuleFormHtml());
+}
+function openEditMikrotikRuleForm(rosId) {
+  const rule = mikrotikRulesCache.find(r => r.ros_id === rosId);
+  if (!rule) return;
+  openModal('Sửa rule tường lửa MikroTik', mikrotikRuleFormHtml(rule));
+}
+
+async function saveMikrotikRule(e, rosId) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    chain: fd.get('chain'), action: fd.get('action'),
+    protocol: fd.get('protocol') || '', src_address: fd.get('src_address') || '',
+    dst_address: fd.get('dst_address') || '', dst_port: fd.get('dst_port') || '',
+    comment: fd.get('comment') || '', disabled: fd.get('disabled') === 'on'
+  };
+  try {
+    if (rosId) await api(`/mikrotik/firewalls/${mikrotikFirewallId}/rules/${encodeURIComponent(rosId)}`, 'PUT', payload);
+    else await api(`/mikrotik/firewalls/${mikrotikFirewallId}/rules`, 'POST', payload);
+    toast(rosId ? 'Đã cập nhật rule' : 'Đã thêm rule', 'success');
+    closeModal();
+    renderMikrotikRulesTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function handleMikrotikRuleToggle(rosId, checkboxEl) {
+  const disabled = !checkboxEl.checked;
+  checkboxEl.disabled = true;
+  try {
+    await api(`/mikrotik/firewalls/${mikrotikFirewallId}/rules/${encodeURIComponent(rosId)}/toggle`, 'PATCH', { disabled });
+    toast(disabled ? 'Đã tắt rule' : 'Đã bật rule', 'success');
+    const rule = mikrotikRulesCache.find(r => r.ros_id === rosId);
+    if (rule) rule.disabled = disabled ? 1 : 0;
+  } catch (e) {
+    toast(e.message, 'error');
+    checkboxEl.checked = !checkboxEl.checked; // revert on failure
+  }
+  checkboxEl.disabled = false;
+}
+
+function openDeleteMikrotikRuleConfirm(rosId) {
+  const rule = mikrotikRulesCache.find(r => r.ros_id === rosId);
+  openModal('Xóa rule tường lửa MikroTik', `
+    <form id="mikrotikRuleDeleteForm" onsubmit="confirmDeleteMikrotikRule(event, '${escAttr(rosId)}')">
+      <p style="font-size:14px;margin-bottom:12px">Xóa rule <strong>${escHtml(rule?.chain || '')} / ${escHtml(rule?.action || '')}</strong>${rule?.comment ? ` ("${escHtml(rule.comment)}")` : ''} khỏi MikroTik thật? Không thể hoàn tác.</p>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteMikrotikRule(e, rosId) {
+  e.preventDefault();
+  try {
+    await api(`/mikrotik/firewalls/${mikrotikFirewallId}/rules/${encodeURIComponent(rosId)}`, 'DELETE');
+    toast('Đã xóa rule', 'success');
+    closeModal();
+    renderMikrotikRulesTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// ── Tab: Kết nối MikroTik (CRUD firewall) ──
+async function renderMikrotikFirewallsTab() {
+  const body = document.getElementById('mikrotikTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const firewalls = mikrotikFirewallsCache.length ? mikrotikFirewallsCache : await api('/mikrotik/firewalls');
+    body.innerHTML = `
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div style="font-size:13px;color:var(--fg-muted)">Kết nối tới firewall MikroTik thật qua API RouterOS (cổng 8728/8729)</div>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddMikrotikFirewallForm()" data-permission="mikrotik.manage">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm firewall
+        </button>
+      </div>
+      <div id="mikrotikFirewallsBody">${renderMikrotikFirewallsTable(firewalls)}</div>
+    </div>`;
+    applyPermissionVisibility();
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`; }
+}
+
+function renderMikrotikFirewallsTable(firewalls) {
+  if (!firewalls.length) {
+    return `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20"/></svg><h3>Chưa có firewall MikroTik nào</h3><p>Bấm "Thêm firewall" để kết nối</p></div>`;
+  }
+  return `<table>
+    <thead><tr><th>Tên</th><th>Host</th><th>Username</th><th>Trạng thái</th><th>RouterOS</th><th>Đồng bộ lần cuối</th><th>Bật</th><th>Hành động</th></tr></thead>
+    <tbody>${firewalls.map(f => `
+      <tr>
+        <td style="font-weight:600">${escHtml(f.name)}</td>
+        <td style="font-family:'Fira Code',monospace;font-size:13px">${escHtml(f.host)}:${escHtml(String(f.port))}</td>
+        <td style="font-size:13px">${escHtml(f.username || '—')}</td>
+        <td>${clusterStatusBadge(f.status, f.last_error)}</td>
+        <td style="font-size:12px;color:var(--fg-muted)">${f.routeros_version ? `v${escHtml(f.routeros_version)}` : '—'}</td>
+        <td><span style="font-size:12px;color:var(--fg-muted)">${f.last_synced_at ? formatTime(f.last_synced_at) : 'chưa đồng bộ'}</span></td>
+        <td>${f.enabled ? '<span class="status online"><span class="dot"></span>Bật</span>' : '<span class="status offline"><span class="dot"></span>Tắt</span>'}</td>
+        <td><div class="actions">
+          <button class="btn-icon" title="Đồng bộ ngay" data-permission="mikrotik.sync" onclick="syncOneMikrotikFirewallUi(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="btn-icon" title="Kiểm tra kết nối" data-permission="mikrotik.manage" onclick="testSavedMikrotikFirewall(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>
+          <button class="btn-icon edit" title="Sửa" data-permission="mikrotik.manage" onclick='openEditMikrotikFirewallForm(${JSON.stringify({ id: f.id, name: f.name, host: f.host, port: f.port, username: f.username, enabled: !!f.enabled }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" data-permission="mikrotik.manage" onclick="openDeleteMikrotikFirewallConfirm(${f.id},'${escAttr(f.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function mikrotikFirewallFormHtml(fw) {
+  const isEdit = !!fw;
+  return `
+    <form id="mikrotikFirewallForm" onsubmit="saveMikrotikFirewall(event, ${isEdit ? fw.id : 'null'})">
+      <div class="form-grid">
+        <div class="form-group full"><label>Tên *</label><input type="text" name="name" value="${escAttr(fw?.name || '')}" required placeholder="vd: MikroTik CE0"></div>
+        <div class="form-group"><label>Host *</label><input type="text" name="host" value="${escAttr(fw?.host || '')}" required placeholder="192.168.1.1"></div>
+        <div class="form-group"><label>Port</label><input type="number" name="port" value="${fw?.port || 8728}" placeholder="8728"></div>
+        <div class="form-group"><label>Username *</label><input type="text" name="username" value="${escAttr(fw?.username || '')}" required></div>
+        <div class="form-group"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><input type="password" name="password" autocomplete="new-password" ${isEdit ? '' : 'required'}></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="enabled" ${fw?.enabled !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bật (tham gia đồng bộ tự động)</label>
+        </div>
+      </div>
+      <div id="mikrotikTestResult" style="margin-top:8px;font-size:13px"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="testMikrotikFirewallForm(this)">Kiểm tra kết nối</button>
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm firewall'}</button>
+      </div>
+    </form>`;
+}
+
+function openAddMikrotikFirewallForm() {
+  openModal('Thêm kết nối MikroTik', mikrotikFirewallFormHtml());
+}
+function openEditMikrotikFirewallForm(fw) {
+  openModal(`Sửa kết nối — ${escHtml(fw.name)}`, mikrotikFirewallFormHtml(fw));
+}
+
+async function testMikrotikFirewallForm(btn) {
+  const form = document.getElementById('mikrotikFirewallForm');
+  const fd = new FormData(form);
+  const payload = { host: fd.get('host'), port: Number(fd.get('port')) || 8728, username: fd.get('username'), password: fd.get('password') };
+  const resultEl = document.getElementById('mikrotikTestResult');
+  btn.disabled = true;
+  resultEl.innerHTML = `<span style="color:var(--fg-dim)">Đang kiểm tra...</span>`;
+  try {
+    const result = await api('/mikrotik/firewalls/test', 'POST', payload);
+    resultEl.innerHTML = result.ok
+      ? `<span style="color:var(--accent)">✓ Kết nối thành công${result.identity ? ' — ' + escHtml(result.identity) : ''}</span>`
+      : `<span style="color:var(--red)">✗ ${escHtml(result.error)}</span>`;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:var(--red)">✗ ${escHtml(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveMikrotikFirewall(e, id) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    name: fd.get('name'), host: fd.get('host'), port: Number(fd.get('port')) || 8728,
+    username: fd.get('username'), password: fd.get('password') || '', enabled: fd.get('enabled') === 'on'
+  };
+  try {
+    if (id) await api(`/mikrotik/firewalls/${id}`, 'PUT', payload);
+    else await api('/mikrotik/firewalls', 'POST', payload);
+    toast(id ? 'Đã cập nhật' : 'Đã thêm firewall', 'success');
+    closeModal();
+    renderMikrotik();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function testSavedMikrotikFirewall(id, btn) {
+  btn.disabled = true;
+  try {
+    const result = await api(`/mikrotik/firewalls/${id}/test`, 'POST');
+    toast(result.ok ? `Kết nối thành công${result.identity ? ': ' + result.identity : ''}` : `Lỗi kết nối: ${result.error}`, result.ok ? 'success' : 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; renderMikrotikFirewallsTab(); }
+}
+
+async function syncOneMikrotikFirewallUi(id, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/mikrotik/firewalls/${id}/sync`, 'POST');
+    toast('Đã đồng bộ', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  finally { renderMikrotikFirewallsTab(); }
+}
+
+function openDeleteMikrotikFirewallConfirm(id, name) {
+  openModal('Xóa kết nối MikroTik', `
+    <form id="mikrotikFirewallDeleteForm" onsubmit="confirmDeleteMikrotikFirewall(event, ${id}, '${escAttr(name)}')">
+      <p style="font-size:14px;margin-bottom:12px">Thao tác này sẽ xóa kết nối <strong>${escHtml(name)}</strong> và toàn bộ dữ liệu đã đồng bộ (không thay đổi gì trên MikroTik thật, chỉ xóa dữ liệu theo dõi). Không thể hoàn tác.</p>
+      <div class="form-group full"><label>Gõ chính xác tên để xác nhận</label><input type="text" name="confirmName" placeholder="${escAttr(name)}" autocomplete="off" required></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteMikrotikFirewall(e, id, name) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const confirmName = fd.get('confirmName');
+  if (confirmName !== name) { toast('Tên không khớp — đã hủy xóa', 'error'); return; }
+  try {
+    await api(`/mikrotik/firewalls/${id}`, 'DELETE', { confirmName });
+    toast(`Đã xóa "${name}"`, 'success');
+    closeModal();
+    mikrotikFirewallId = null;
+    renderMikrotik();
   } catch (err) { toast(err.message, 'error'); }
 }
 

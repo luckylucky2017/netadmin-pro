@@ -1182,6 +1182,69 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_15 DECIMAL(6,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_checked_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // MikroTik RouterOS integration. Unlike pfSense (REST API, v2+), RouterOS v6.x only has the
+  // legacy binary API protocol (port 8728 plain / 8729 TLS) — no HTTP/REST at all until RouterOS
+  // v7.1. mikrotik-client.js talks that protocol via the node-routeros package. Also unlike
+  // pfSense's firewall rules (whose REST "id" is an array index that drifts on reorder, requiring
+  // pfsense_firewall_rules.rule_tracker as a stable join key), RouterOS's own ".id" (e.g. "*3") is
+  // an internal, genuinely stable object handle — no separate tracker column needed here.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mikrotik_firewalls (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      name TEXT NOT NULL,
+      host TEXT NOT NULL,
+      port INT NOT NULL DEFAULT 8728,
+      username TEXT,
+      password TEXT,
+      enabled INT NOT NULL DEFAULT 1,
+      status VARCHAR(20) DEFAULT 'unknown',
+      last_synced_at DATETIME,
+      last_error TEXT,
+      identity TEXT,
+      routeros_version VARCHAR(50),
+      uptime VARCHAR(100),
+      if_bandwidth_snapshot TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mikrotik_interfaces (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      firewall_id INT NOT NULL,
+      ros_id VARCHAR(32) NOT NULL,
+      name VARCHAR(191),
+      type VARCHAR(50),
+      running INT,
+      disabled INT,
+      in_bps BIGINT,
+      out_bps BIGINT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mikrotik_iface (firewall_id, ros_id)
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mikrotik_firewall_rules (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      firewall_id INT NOT NULL,
+      ros_id VARCHAR(32) NOT NULL,
+      chain VARCHAR(50),
+      action VARCHAR(50),
+      protocol VARCHAR(20),
+      src_address TEXT,
+      dst_address TEXT,
+      dst_port VARCHAR(100),
+      comment TEXT,
+      disabled INT DEFAULT 0,
+      sort_order INT,
+      raw_json TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_mikrotik_rule (firewall_id, ros_id)
+    )
+  `);
 }
 
 async function seedIfEmpty() {

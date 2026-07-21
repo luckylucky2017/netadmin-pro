@@ -112,6 +112,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/vuln', requireAuth, require('./routes/vuln'));
   app.use('/api/trivy', requireAuth, require('./routes/trivy'));
   app.use('/api/harbor', requireAuth, require('./routes/harbor'));
+  app.use('/api/mikrotik', requireAuth, require('./routes/mikrotik'));
 
   app.get('/api/dashboard', requireAuth, async (req, res) => {
     const [serverStats, deviceStats, recentActivity, deviceTypes, serverTypes] = await Promise.all([
@@ -188,6 +189,7 @@ if (!process.env.SESSION_SECRET) {
     require('./trivy-scanner').startVersionCheckScheduler();
     require('./harbor-scanner').start();
     require('./vcenter-load-collector').start();
+    require('./mikrotik-collector').start();
   } else {
     console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');
   }
