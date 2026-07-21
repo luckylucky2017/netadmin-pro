@@ -1975,7 +1975,7 @@ function renderVcenterRows() {
   const vms = paginateRows(sortedVms, vcenterPagination);
   const rowOffset = (vcenterPagination.page - 1) * vcenterPagination.pageSize;
   tbody.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}<th>Cụm</th>${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM cấp phát', 'memory_mib', vcenterSortState, 'toggleVcenterSort')}${thSort('CPU dùng', 'cpu_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Load avg (1m)', 'load_avg_1', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}<th>Cụm</th>${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('Load average', 'load_avg_1', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
       <tbody>${vms.map((v, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -1983,8 +1983,6 @@ function renderVcenterRows() {
           <td><span class="tag">${escHtml(v.cluster_name || '—')}</span></td>
           <td>${vcPowerBadge(v.power_state)}</td>
           <td><span class="ping-ms" style="font-size:13px">${v.cpu_count ?? '—'}</span></td>
-          <td><span class="ping-ms" style="font-size:13px">${v.memory_mib ? (v.memory_mib / 1024).toFixed(0) + ' GB' : '—'}</span></td>
-          <td>${vcPctCell(v.cpu_pct)}</td>
           <td>${vcLoadAvgCell(v)}</td>
           <td>${vcPctCell(v.mem_pct, v.memory_mib != null && v.mem_pct != null ? `${((v.memory_mib / 1024) * (v.mem_pct / 100)).toFixed(1)} / ${(v.memory_mib / 1024).toFixed(1)} GB` : null)}</td>
           <td>${vcPctCell(v.disk_pct, v.disk_used_gb != null && v.disk_total_gb != null ? `${Number(v.disk_used_gb).toFixed(1)} / ${Number(v.disk_total_gb).toFixed(1)} GB` : null)}</td>
@@ -2189,8 +2187,8 @@ function vcLoadAvgCell(v) {
   }
   const perCore = v.cpu_count ? Number(v.load_avg_1) / v.cpu_count : null;
   const cls = perCore == null ? '' : perCore >= 1 ? 'slow' : perCore >= 0.7 ? 'medium' : 'fast';
-  const title = `1 phút: ${Number(v.load_avg_1).toFixed(2)} — 5 phút: ${Number(v.load_avg_5).toFixed(2)} — 15 phút: ${Number(v.load_avg_15).toFixed(2)}${v.cpu_count ? ` (${v.cpu_count} vCPU)` : ''}${v.load_avg_checked_at ? ' — cập nhật lúc ' + formatTime(v.load_avg_checked_at) : ''}`;
-  return `<span class="ping-ms ${cls}" title="${escAttr(title)}">${Number(v.load_avg_1).toFixed(2)}</span>`;
+  const title = `${v.cpu_count ? `${v.cpu_count} vCPU` : ''}${v.load_avg_checked_at ? `${v.cpu_count ? ' — ' : ''}cập nhật lúc ${formatTime(v.load_avg_checked_at)}` : ''}`;
+  return `<span class="ping-ms ${cls}" style="font-family:monospace" title="${escAttr(title)}">${Number(v.load_avg_1).toFixed(2)} / ${Number(v.load_avg_5).toFixed(2)} / ${Number(v.load_avg_15).toFixed(2)}</span>`;
 }
 
 function vcPowerBadge(state) {
