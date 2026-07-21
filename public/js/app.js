@@ -552,7 +552,7 @@ function dashboardActivityHtml(recentActivity) {
   `).join('') || '<div style="color:var(--fg-dim);font-size:13px;padding:12px 0">Chưa có hoạt động</div>';
 }
 
-let dashboardRefreshMs = 5000;
+let dashboardRefreshMs = 15000;
 let dashboardRefreshTimer = null;
 
 function onDashboardRefreshIntervalChange(val) {
@@ -563,6 +563,7 @@ function onDashboardRefreshIntervalChange(val) {
 
 async function refreshDashboardData() {
   if (currentPage !== 'dashboard') { clearInterval(dashboardRefreshTimer); dashboardRefreshTimer = null; return; }
+  if (document.hidden) return; // tab backgrounded/minimized — skip this tick, resumes on its own once visible again
   try {
     const [dash, sStats, dStats] = await Promise.all([api('/dashboard'), api('/servers/stats'), api('/devices/stats')]);
     // Re-check after the await — the user may have navigated away while these calls were
@@ -1408,7 +1409,7 @@ async function renderAlerts(search = '') {
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
-let alertsRefreshMs = 5000;
+let alertsRefreshMs = 15000;
 let alertsRefreshTimer = null;
 
 function onAlertsRefreshIntervalChange(val) {
@@ -1419,6 +1420,7 @@ function onAlertsRefreshIntervalChange(val) {
 
 async function refreshAlertsData() {
   if (currentPage !== 'alerts') { clearInterval(alertsRefreshTimer); alertsRefreshTimer = null; return; }
+  if (document.hidden) return;
   try {
     const stats = await api('/alerts/stats');
     // Re-check after the await — the user may have navigated away while it was in-flight.
@@ -1864,7 +1866,7 @@ function renderVcenterTabBody(search) {
   else renderVcenterVmsTab(search);
 }
 
-let vcenterRefreshMs = 5000;
+let vcenterRefreshMs = 15000;
 let vcenterRefreshTimer = null;
 
 function onVcenterRefreshIntervalChange(val) {
@@ -1877,8 +1879,15 @@ function onVcenterRefreshIntervalChange(val) {
 // toast + full-page re-render so it doesn't spam a toast every 5-15s or wipe the search/filter.
 async function refreshVcenterData() {
   if (currentPage !== 'vcenter') { clearInterval(vcenterRefreshTimer); vcenterRefreshTimer = null; return; }
+  if (document.hidden) return;
   try {
-    await api('/vcenter/sync', 'POST');
+    // Reads GET /vcenter/stats only — vcenter-collector.js already runs its own live vCenter
+    // sync + bulk upsert every 60s server-side independently of any page being open. This used to
+    // also POST /vcenter/sync on every 5s tick, which re-triggered that full live sync (REST calls
+    // across every VM + bulk DB upsert) once per open browser tab, every 5 seconds — with several
+    // admins having this page open, that alone was enough to saturate MySQL CPU while nobody was
+    // even clicking anything. Confirmed live on production: mysqld was at ~650% CPU with this
+    // still wired in.
     const stats = await api('/vcenter/stats');
     // Re-check after the awaits — the user may have navigated away while these calls were in-flight.
     if (currentPage !== 'vcenter') return;
@@ -2694,7 +2703,7 @@ const SECURITY_TAB_KEY = 'netadmin_securityTab';
 let securityTab = loadSavedTab(SECURITY_TAB_KEY, 'events');
 const securityFilter = { vmId: '', eventType: '', foreignOnly: false };
 const securityState = { vms: [] };
-let securityRefreshMs = 5000;
+let securityRefreshMs = 15000;
 let securityRefreshTimer = null;
 
 // Generic renderer for a .stat-hover-panel's content — one row per item, a primary value on the
@@ -2805,6 +2814,7 @@ function onSecurityRefreshIntervalChange(val) {
 // "Quản lý VM giám sát" tab) doesn't get wiped out every 5-15s by auto-refresh.
 async function refreshSecurityData() {
   if (currentPage !== 'security') { clearInterval(securityRefreshTimer); securityRefreshTimer = null; return; }
+  if (document.hidden) return;
   try {
     const [stats, outboundStats] = await Promise.all([api('/security/stats'), api('/security/outbound/stats')]);
     // Re-check after the await — the user may have navigated away while these calls were in-flight.
@@ -3422,7 +3432,7 @@ const WAF_TAB_KEY = 'netadmin_wafTab';
 let wafTab = loadSavedTab(WAF_TAB_KEY, 'events');
 const wafEventFilter = { vmId: '', eventType: '' };
 const wafState = { vms: [] };
-let wafRefreshMs = 5000;
+let wafRefreshMs = 15000;
 let wafRefreshTimer = null;
 
 // Mirrors nginx-waf-collector.js's own domainLabel — a waf_events row's domain can be NULL (no
@@ -3561,6 +3571,7 @@ function onWafRefreshIntervalChange(val) {
 
 async function refreshWafData() {
   if (currentPage !== 'waf') { clearInterval(wafRefreshTimer); wafRefreshTimer = null; return; }
+  if (document.hidden) return;
   try {
     const stats = await api('/waf/stats');
     if (currentPage !== 'waf') return;
@@ -5207,7 +5218,7 @@ function setPfsenseTab(tab) {
   renderPfsenseTabBody();
 }
 
-let pfsenseRefreshMs = 5000;
+let pfsenseRefreshMs = 15000;
 let pfsenseRefreshTimer = null;
 
 function onPfsenseRefreshIntervalChange(val) {
@@ -5222,6 +5233,7 @@ function onPfsenseRefreshIntervalChange(val) {
 // Also skips entirely while a modal is open, for the same reason.
 async function refreshPfsenseData() {
   if (currentPage !== 'pfsense') { clearInterval(pfsenseRefreshTimer); pfsenseRefreshTimer = null; return; }
+  if (document.hidden) return;
   if (!pfsenseFirewallId) return;
   if (document.getElementById('modalOverlay')?.classList.contains('open')) return;
   try {
