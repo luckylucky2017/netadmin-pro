@@ -6157,6 +6157,8 @@ let mikrotikRulesCache = [];
 let mikrotikRulesSearch = '';
 let mikrotikRulesPagination = newPagination(20);
 let mikrotikRulesSortState = { key: null, dir: 'asc' };
+let mikrotikOvpnUsersCache = [];
+let mikrotikOvpnProfilesCache = [];
 
 async function renderMikrotik() {
   const c = document.getElementById('pageContent');
@@ -6178,6 +6180,7 @@ async function renderMikrotik() {
     <div class="filter-tabs" id="mikrotikTabs" style="margin-bottom:16px">
       <div class="filter-tab ${mikrotikTab === 'interfaces' ? 'active' : ''}" data-tab="interfaces" onclick="setMikrotikTab('interfaces')">Interface</div>
       <div class="filter-tab ${mikrotikTab === 'rules' ? 'active' : ''}" data-tab="rules" onclick="setMikrotikTab('rules')">Rule tường lửa</div>
+      <div class="filter-tab ${mikrotikTab === 'ovpn' ? 'active' : ''}" data-tab="ovpn" onclick="setMikrotikTab('ovpn')" data-permission="mikrotik.vpn.manage">OpenVPN</div>
       <div class="filter-tab ${mikrotikTab === 'firewalls' ? 'active' : ''}" data-tab="firewalls" onclick="setMikrotikTab('firewalls')" data-permission="mikrotik.manage">Kết nối MikroTik</div>
     </div>
     <div id="mikrotikTabBody"></div>`;
@@ -6206,6 +6209,7 @@ function renderMikrotikTabBody() {
   }
   if (mikrotikTab === 'interfaces') return renderMikrotikInterfacesTab();
   if (mikrotikTab === 'rules') return renderMikrotikRulesTab();
+  if (mikrotikTab === 'ovpn') return renderMikrotikOvpnTab();
 }
 
 // ── Tab: Interface — chỉ giám sát (traffic in/out), không có hành động ghi ──
@@ -6434,6 +6438,177 @@ async function confirmDeleteMikrotikRule(e, rosId) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
+// ── Tab: OpenVPN — user (PPP secret) CRUD + xuất file .ovpn ──
+async function renderMikrotikOvpnTab() {
+  const body = document.getElementById('mikrotikTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const fw = mikrotikFirewallsCache.find(f => f.id === mikrotikFirewallId);
+    const [users, profiles] = await Promise.all([
+      api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/users`),
+      api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/profiles`),
+    ]);
+    mikrotikOvpnUsersCache = users;
+    mikrotikOvpnProfilesCache = profiles;
+    const needsSetup = !fw?.has_ovpn_certs || !fw?.ovpn_public_host;
+    body.innerHTML = `
+    ${needsSetup ? `
+      <div style="margin-bottom:12px;padding:12px 14px;border-radius:var(--radius);background:var(--yellow-dim);border:1px solid var(--yellow);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="font-size:13px;color:var(--yellow)">
+          ${!fw?.has_ovpn_certs ? '<strong>Chưa đồng bộ chứng chỉ OpenVPN</strong> — cần đồng bộ trước khi xuất được file .ovpn. ' : ''}
+          ${!fw?.ovpn_public_host ? '<strong>Chưa cấu hình Public host cho VPN client</strong> — vào tab "Kết nối MikroTik" → Sửa để thêm.' : ''}
+        </div>
+        ${!fw?.has_ovpn_certs ? `<button class="btn btn-primary btn-sm" onclick="handleMikrotikSyncOvpnCerts(this)">Đồng bộ chứng chỉ VPN</button>` : ''}
+      </div>` : ''}
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div class="search-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="mikrotikOvpnSearch" placeholder="Tìm theo username...">
+        </div>
+        ${fw?.has_ovpn_certs ? `<button class="btn btn-secondary btn-sm" onclick="handleMikrotikSyncOvpnCerts(this)">Đồng bộ lại chứng chỉ VPN</button>` : ''}
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="openAddMikrotikOvpnUserForm()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Thêm user OpenVPN
+        </button>
+      </div>
+      <div id="mikrotikOvpnTableWrap"></div>
+    </div>`;
+    document.getElementById('mikrotikOvpnSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => renderMikrotikOvpnTable(e.target.value), 300);
+    });
+    renderMikrotikOvpnTable('');
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`; }
+}
+
+function renderMikrotikOvpnTable(search) {
+  const wrap = document.getElementById('mikrotikOvpnTableWrap');
+  if (!wrap) return;
+  const q = (search || '').trim().toLowerCase();
+  const filtered = q ? mikrotikOvpnUsersCache.filter(u => u.name.toLowerCase().includes(q)) : mikrotikOvpnUsersCache;
+  if (!filtered.length) {
+    wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0113 0"/></svg><h3>Không có user OpenVPN nào</h3></div>`;
+    return;
+  }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Username</th><th>Profile</th><th>Trạng thái</th><th>Comment</th><th>Lần cuối ngắt kết nối</th><th>Hành động</th></tr></thead>
+    <tbody>${filtered.map(u => `
+      <tr>
+        <td style="font-weight:600;font-family:monospace">${escHtml(u.name)}</td>
+        <td style="font-size:12px">${escHtml(u.profile || '—')}</td>
+        <td>${u.disabled ? '<span class="status offline"><span class="dot"></span>Đã tắt</span>' : '<span class="status online"><span class="dot"></span>Bật</span>'}</td>
+        <td style="font-size:12px;color:var(--fg-muted)">${escHtml(u.comment || '—')}</td>
+        <td style="font-size:12px;color:var(--fg-muted)">${u.lastLoggedOut && u.lastLoggedOut !== 'jan/01/1970' ? escHtml(u.lastLoggedOut) : '—'}</td>
+        <td><div class="actions">
+          <button class="btn-icon" title="Xuất file .ovpn" onclick="downloadMikrotikOvpn('${escAttr(u.name)}', this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+          <button class="btn-icon edit" title="Sửa" onclick="openEditMikrotikOvpnUserForm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon delete" title="Xóa" onclick="openDeleteMikrotikOvpnUserConfirm('${escAttr(u.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+        </div></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+}
+
+async function handleMikrotikSyncOvpnCerts(btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Đang đồng bộ… (có thể mất vài giây)';
+  try {
+    await api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/sync-certs`, 'POST');
+    toast('Đã đồng bộ chứng chỉ OpenVPN', 'success');
+    mikrotikFirewallsCache = await api('/mikrotik/firewalls');
+    renderMikrotikOvpnTab();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = original; }
+}
+
+function mikrotikOvpnUserFormHtml(user) {
+  const isEdit = !!user;
+  return `
+    <form id="mikrotikOvpnUserForm" onsubmit="saveMikrotikOvpnUser(event, ${isEdit ? `'${escAttr(user.name)}'` : 'null'})">
+      <div class="form-grid">
+        <div class="form-group"><label>Username *</label><input type="text" name="name" value="${escAttr(user?.name || '')}" ${isEdit ? 'readonly' : 'required'}></div>
+        <div class="form-group"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><input type="text" name="password" autocomplete="new-password" ${isEdit ? '' : 'required'}></div>
+        <div class="form-group"><label>Profile</label>
+          <select name="profile">${mikrotikOvpnProfilesCache.map(p => `<option value="${escAttr(p)}" ${user?.profile === p ? 'selected' : ''}>${escHtml(p)}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label>Comment</label><input type="text" name="comment" value="${escAttr(user?.comment || '')}"></div>
+        <div class="form-group full">
+          <label style="text-transform:none;font-size:14px"><input type="checkbox" name="disabled" ${user?.disabled ? 'checked' : ''} style="width:auto;margin-right:6px"> Tắt user này (không xóa, chỉ vô hiệu hóa)</label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">${isEdit ? 'Lưu thay đổi' : 'Thêm user'}</button>
+      </div>
+    </form>`;
+}
+
+function openAddMikrotikOvpnUserForm() {
+  openModal('Thêm user OpenVPN', mikrotikOvpnUserFormHtml());
+}
+function openEditMikrotikOvpnUserForm(name) {
+  const user = mikrotikOvpnUsersCache.find(u => u.name === name);
+  if (!user) return;
+  openModal(`Sửa user OpenVPN — ${escHtml(name)}`, mikrotikOvpnUserFormHtml(user));
+}
+
+async function saveMikrotikOvpnUser(e, name) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {
+    name: fd.get('name'), password: fd.get('password') || '', profile: fd.get('profile') || '',
+    comment: fd.get('comment') || '', disabled: fd.get('disabled') === 'on'
+  };
+  try {
+    if (name) await api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/users/${encodeURIComponent(name)}`, 'PUT', payload);
+    else await api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/users`, 'POST', payload);
+    toast(name ? 'Đã cập nhật user' : 'Đã thêm user OpenVPN', 'success');
+    closeModal();
+    renderMikrotikOvpnTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+function openDeleteMikrotikOvpnUserConfirm(name) {
+  openModal('Xóa user OpenVPN', `
+    <form id="mikrotikOvpnUserDeleteForm" onsubmit="confirmDeleteMikrotikOvpnUser(event, '${escAttr(name)}')">
+      <p style="font-size:14px;margin-bottom:12px">Xóa user OpenVPN <strong>${escHtml(name)}</strong> khỏi MikroTik thật? Người dùng này sẽ mất kết nối VPN ngay lập tức. Không thể hoàn tác.</p>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-danger">Xóa vĩnh viễn</button>
+      </div>
+    </form>`);
+}
+
+async function confirmDeleteMikrotikOvpnUser(e, name) {
+  e.preventDefault();
+  try {
+    await api(`/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/users/${encodeURIComponent(name)}`, 'DELETE');
+    toast('Đã xóa user OpenVPN', 'success');
+    closeModal();
+    renderMikrotikOvpnTab();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// Server generates the .ovpn text (needs the live PPP secret password + cached certs) — fetched
+// via a plain authenticated fetch() rather than api() (which always parses JSON), then handed to
+// the browser as a file download the same way exportVulnFindingsCsv() does for CSVs.
+async function downloadMikrotikOvpn(name, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API}/mikrotik/firewalls/${mikrotikFirewallId}/ovpn/users/${encodeURIComponent(name)}/export`, { credentials: 'same-origin' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'Lỗi xuất file'); }
+    const text = await res.text();
+    const blob = new Blob([text], { type: 'application/x-openvpn-profile' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}.ovpn`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false;
+}
+
 // ── Tab: Kết nối MikroTik (CRUD firewall) ──
 async function renderMikrotikFirewallsTab() {
   const body = document.getElementById('mikrotikTabBody');
@@ -6473,7 +6648,7 @@ function renderMikrotikFirewallsTable(firewalls) {
         <td><div class="actions">
           <button class="btn-icon" title="Đồng bộ ngay" data-permission="mikrotik.sync" onclick="syncOneMikrotikFirewallUi(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="btn-icon" title="Kiểm tra kết nối" data-permission="mikrotik.manage" onclick="testSavedMikrotikFirewall(${f.id},this)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>
-          <button class="btn-icon edit" title="Sửa" data-permission="mikrotik.manage" onclick='openEditMikrotikFirewallForm(${JSON.stringify({ id: f.id, name: f.name, host: f.host, port: f.port, username: f.username, enabled: !!f.enabled }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="btn-icon edit" title="Sửa" data-permission="mikrotik.manage" onclick='openEditMikrotikFirewallForm(${JSON.stringify({ id: f.id, name: f.name, host: f.host, port: f.port, username: f.username, enabled: !!f.enabled, ovpn_public_host: f.ovpn_public_host || '' }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
           <button class="btn-icon delete" title="Xóa" data-permission="mikrotik.manage" onclick="openDeleteMikrotikFirewallConfirm(${f.id},'${escAttr(f.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
         </div></td>
       </tr>`).join('')}
@@ -6490,6 +6665,8 @@ function mikrotikFirewallFormHtml(fw) {
         <div class="form-group"><label>Port</label><input type="number" name="port" value="${fw?.port || 8728}" placeholder="8728"></div>
         <div class="form-group"><label>Username *</label><input type="text" name="username" value="${escAttr(fw?.username || '')}" required></div>
         <div class="form-group"><label>Mật khẩu ${isEdit ? '(để trống nếu giữ nguyên)' : '*'}</label><input type="password" name="password" autocomplete="new-password" ${isEdit ? '' : 'required'}></div>
+        <div class="form-group full"><label>Public host cho VPN client</label><input type="text" name="ovpn_public_host" value="${escAttr(fw?.ovpn_public_host || '')}" placeholder="vd: vpn.example.com hoặc IP public"></div>
+        <div class="form-group full" style="margin-top:-8px"><span style="font-size:11px;color:var(--fg-dim)">Địa chỉ router thật mà client OpenVPN sẽ kết nối tới — khác với Host phía trên (đó là IP quản lý nội bộ netadmin-pro dùng để gọi API)</span></div>
         <div class="form-group full">
           <label style="text-transform:none;font-size:14px"><input type="checkbox" name="enabled" ${fw?.enabled !== false ? 'checked' : ''} style="width:auto;margin-right:6px"> Bật (tham gia đồng bộ tự động)</label>
         </div>
@@ -6534,7 +6711,8 @@ async function saveMikrotikFirewall(e, id) {
   const fd = new FormData(e.target);
   const payload = {
     name: fd.get('name'), host: fd.get('host'), port: Number(fd.get('port')) || 8728,
-    username: fd.get('username'), password: fd.get('password') || '', enabled: fd.get('enabled') === 'on'
+    username: fd.get('username'), password: fd.get('password') || '', enabled: fd.get('enabled') === 'on',
+    ovpn_public_host: fd.get('ovpn_public_host') || ''
   };
   try {
     if (id) await api(`/mikrotik/firewalls/${id}`, 'PUT', payload);

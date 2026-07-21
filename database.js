@@ -1210,6 +1210,22 @@ async function ensureSchemaAndMigrations() {
     )
   `);
 
+  // OpenVPN user (PPP secret) management + .ovpn export. RouterOS's OpenVPN server auth combines
+  // a shared client certificate (require-client-certificate=true on the ovpn-server, but the CN
+  // isn't bound to a specific PPP secret — confirmed against the real router, which already reuses
+  // one "Client" cert across 39 existing users) with per-user PPP username/password as the actual
+  // identity check. So the exported .ovpn embeds this ONE cert+key (fetched once via
+  // export-certificate + FTP, decrypted locally — RouterOS's API has no way to stream file bytes
+  // directly) plus whichever user's live PPP secret password, rather than minting a cert per user.
+  // ovpn_public_host is intentionally separate from `host` above — `host` is the LAN/management IP
+  // netadmin-pro itself connects to for the API, which is almost never what a remote VPN client
+  // should dial (that needs the router's actual public IP/DDNS name on the WAN side).
+  try { await pool.query("ALTER TABLE mikrotik_firewalls ADD COLUMN ovpn_public_host TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE mikrotik_firewalls ADD COLUMN ovpn_ca_cert TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE mikrotik_firewalls ADD COLUMN ovpn_client_cert TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE mikrotik_firewalls ADD COLUMN ovpn_client_key TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE mikrotik_firewalls ADD COLUMN ovpn_cert_synced_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mikrotik_interfaces (
       id INT PRIMARY KEY AUTO_INCREMENT,

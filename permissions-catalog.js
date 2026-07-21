@@ -49,6 +49,7 @@ const PERMISSIONS = [
   { key: 'mikrotik.sync', label: 'Đồng bộ dữ liệu MikroTik', group: 'MikroTik' },
   { key: 'mikrotik.rules.write', label: 'Tạo/sửa/bật-tắt rule tường lửa MikroTik', group: 'MikroTik' },
   { key: 'mikrotik.rules.delete', label: 'Xóa rule tường lửa MikroTik', group: 'MikroTik' },
+  { key: 'mikrotik.vpn.manage', label: 'Quản lý user OpenVPN & xuất file cấu hình .ovpn trên MikroTik', group: 'MikroTik' },
 ];
 
 const PERMISSION_KEYS = new Set(PERMISSIONS.map(p => p.key));
@@ -62,7 +63,7 @@ const OPERATOR_EXCLUDED = new Set([
   'servers.ipmi_config', 'monitors.delete', 'servers.snmp_config', 'devices.snmp_config',
   'vcenter.cluster.manage', 'ssh_credentials.manage', 'settings.manage',
   'pfsense.manage', 'pfsense.rules.delete', 'pfsense.vpn.manage',
-  'mikrotik.manage', 'mikrotik.rules.delete',
+  'mikrotik.manage', 'mikrotik.rules.delete', 'mikrotik.vpn.manage',
 ]);
 
 module.exports = { PERMISSIONS, PERMISSION_KEYS, OPERATOR_EXCLUDED };

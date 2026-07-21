@@ -8,10 +8,12 @@ const { requirePermission, logActivity } = require('../auth');
 // password is a credential — never returned to the client, same treatment as
 // pfsense_firewalls.password/vcenter_clusters.password. if_bandwidth_snapshot is internal
 // bookkeeping (raw byte counters for bps deltas), same treatment as pfSense's equivalent column.
+// ovpn_client_key is a private key — same treatment as password; ovpn_ca_cert/ovpn_client_cert
+// aren't secret but there's no UI need to ship raw PEM blobs to the client either.
 function sanitizeFirewall(fw) {
   if (!fw) return fw;
-  const { password, if_bandwidth_snapshot, ...rest } = fw;
-  return { ...rest, has_password: !!password };
+  const { password, if_bandwidth_snapshot, ovpn_ca_cert, ovpn_client_cert, ovpn_client_key, ...rest } = fw;
+  return { ...rest, has_password: !!password, has_ovpn_certs: !!(ovpn_ca_cert && ovpn_client_cert && ovpn_client_key) };
 }
 
 async function requireFirewall(req, res) {
@@ -28,25 +30,25 @@ router.get('/firewalls', async (req, res) => {
 });
 
 router.post('/firewalls', requirePermission('mikrotik.manage'), async (req, res) => {
-  const { name, host, port, username, password, enabled } = req.body;
+  const { name, host, port, username, password, enabled, ovpn_public_host } = req.body;
   if (!name || !host || !username || !password) return res.status(400).json({ error: 'Thiếu name/host/username/password' });
   const result = await db.prepare(`
-    INSERT INTO mikrotik_firewalls (name, host, port, username, password, enabled)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(name, host, port || 8728, username, password, enabled === false ? 0 : 1);
+    INSERT INTO mikrotik_firewalls (name, host, port, username, password, enabled, ovpn_public_host)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(name, host, port || 8728, username, password, enabled === false ? 0 : 1, ovpn_public_host || null);
   await logActivity(req.user, 'CREATE', 'mikrotik_firewall', result.lastInsertRowid, name);
   res.status(201).json({ id: result.lastInsertRowid, message: 'Đã tạo kết nối MikroTik' });
 });
 
 router.put('/firewalls/:id', requirePermission('mikrotik.manage'), async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
-  const { name, host, port, username, password, enabled } = req.body;
+  const { name, host, port, username, password, enabled, ovpn_public_host } = req.body;
   if (!name || !host || !username) return res.status(400).json({ error: 'Thiếu name/host/username' });
   // Blank password = keep existing — same COALESCE/NULLIF pattern as pfsense_firewalls.password.
   await db.prepare(`
     UPDATE mikrotik_firewalls SET name=?, host=?, port=?, username=?,
-      password=COALESCE(NULLIF(?, ''), password), enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
-  `).run(name, host, port || 8728, username, password || '', enabled === false ? 0 : 1, req.params.id);
+      password=COALESCE(NULLIF(?, ''), password), enabled=?, ovpn_public_host=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+  `).run(name, host, port || 8728, username, password || '', enabled === false ? 0 : 1, ovpn_public_host || null, req.params.id);
   await logActivity(req.user, 'UPDATE', 'mikrotik_firewall', req.params.id, name);
   res.json({ message: 'Đã cập nhật' });
 });
@@ -171,6 +173,132 @@ router.delete('/firewalls/:id/rules/:rosId', requirePermission('mikrotik.rules.d
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
+});
+
+// ── OpenVPN user (PPP secret) management + .ovpn export ──
+// RouterOS stores OpenVPN users as /ppp/secret entries (service=ovpn) — there's no separate "VPN
+// user" object. Reads go straight to the live router rather than a cache table (unlike
+// interfaces/rules above) since a stale password/profile here would silently break a real person's
+// VPN access; this section is low-traffic enough that live round-trips are fine.
+function asBool(v) { return v === 'true' || v === 'yes'; }
+
+function sanitizePppSecret(s) {
+  return { name: s.name, profile: s.profile, service: s.service, disabled: asBool(s.disabled), comment: s.comment || null, lastLoggedOut: s['last-logged-out'] || null };
+}
+
+async function findPppSecret(conn, name) {
+  const rows = await conn.write('/ppp/secret/print', [`?name=${name}`]);
+  return rows[0] || null;
+}
+
+router.get('/firewalls/:id/ovpn/profiles', async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    const profiles = await client.withConnection(fw, (conn) => conn.write('/ppp/profile/print'));
+    res.json(profiles.map(p => p.name));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+router.get('/firewalls/:id/ovpn/users', async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    const users = await client.withConnection(fw, (conn) => conn.write('/ppp/secret/print'));
+    res.json(users.filter(u => u.service === 'ovpn' || u.service === 'any').map(sanitizePppSecret));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+router.post('/firewalls/:id/ovpn/sync-certs', requirePermission('mikrotik.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    const { caCert, clientCert, clientKey } = await client.syncOpenvpnCerts(fw);
+    await db.prepare(`
+      UPDATE mikrotik_firewalls SET ovpn_ca_cert=?, ovpn_client_cert=?, ovpn_client_key=?, ovpn_cert_synced_at=CURRENT_TIMESTAMP WHERE id=?
+    `).run(caCert, clientCert, clientKey, fw.id);
+    await logActivity(req.user, 'UPDATE', 'mikrotik_firewall', fw.id, `${fw.name} (đồng bộ chứng chỉ OpenVPN)`);
+    res.json({ message: 'Đã đồng bộ chứng chỉ OpenVPN' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+router.post('/firewalls/:id/ovpn/users', requirePermission('mikrotik.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const { name, password, profile, comment, disabled } = req.body;
+  if (!name || !password) return res.status(400).json({ error: 'Thiếu name/password' });
+  try {
+    const params = [`=name=${name}`, `=password=${password}`, '=service=ovpn'];
+    if (profile) params.push(`=profile=${profile}`);
+    if (comment) params.push(`=comment=${comment}`);
+    params.push(`=disabled=${disabled ? 'yes' : 'no'}`);
+    await client.withConnection(fw, (conn) => conn.write('/ppp/secret/add', params));
+    await logActivity(req.user, 'CREATE', 'mikrotik_ovpn_user', fw.id, name);
+    res.status(201).json({ message: 'Đã tạo user OpenVPN' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+router.put('/firewalls/:id/ovpn/users/:name', requirePermission('mikrotik.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const { password, profile, comment, disabled } = req.body;
+  try {
+    await client.withConnection(fw, async (conn) => {
+      const secret = await findPppSecret(conn, req.params.name);
+      if (!secret) throw Object.assign(new Error('Không tìm thấy user OpenVPN này trên MikroTik'), { statusCode: 404 });
+      const params = [`=.id=${secret['.id']}`];
+      if (password) params.push(`=password=${password}`);
+      if (profile) params.push(`=profile=${profile}`);
+      if (comment !== undefined) params.push(`=comment=${comment}`);
+      if (disabled !== undefined) params.push(`=disabled=${disabled ? 'yes' : 'no'}`);
+      await conn.write('/ppp/secret/set', params);
+    });
+    await logActivity(req.user, 'UPDATE', 'mikrotik_ovpn_user', fw.id, req.params.name);
+    res.json({ message: 'Đã cập nhật user OpenVPN' });
+  } catch (e) { res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message }); }
+});
+
+router.delete('/firewalls/:id/ovpn/users/:name', requirePermission('mikrotik.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  try {
+    await client.withConnection(fw, async (conn) => {
+      const secret = await findPppSecret(conn, req.params.name);
+      if (!secret) throw Object.assign(new Error('Không tìm thấy user OpenVPN này trên MikroTik'), { statusCode: 404 });
+      await conn.write('/ppp/secret/remove', [`=.id=${secret['.id']}`]);
+    });
+    await logActivity(req.user, 'DELETE', 'mikrotik_ovpn_user', fw.id, req.params.name);
+    res.json({ message: 'Đã xóa user OpenVPN' });
+  } catch (e) { res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message }); }
+});
+
+// RouterOS v6.x's built-in ovpn-server is TCP-only (UDP support was added in v7) — confirmed
+// against the real router's /interface/ovpn-server/server config, which has no protocol field at
+// all in v6.x because TCP is the only option. cipher/auth picked from the strongest options present
+// in that server's own configured cipher/auth lists (aes256 / sha1) rather than hardcoded blind.
+router.get('/firewalls/:id/ovpn/users/:name/export', requirePermission('mikrotik.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  if (!fw.ovpn_ca_cert || !fw.ovpn_client_cert || !fw.ovpn_client_key) {
+    return res.status(400).json({ error: 'Chưa đồng bộ chứng chỉ OpenVPN — bấm "Đồng bộ chứng chỉ VPN" trước' });
+  }
+  if (!fw.ovpn_public_host) {
+    return res.status(400).json({ error: 'Chưa cấu hình địa chỉ public cho VPN client (Sửa kết nối MikroTik → Public host cho VPN)' });
+  }
+  try {
+    const ovpnConfig = await client.withConnection(fw, async (conn) => {
+      const secret = await findPppSecret(conn, req.params.name);
+      if (!secret) throw Object.assign(new Error('Không tìm thấy user OpenVPN này trên MikroTik'), { statusCode: 404 });
+      const [server] = await conn.write('/interface/ovpn-server/server/print');
+      return [
+        'client', 'dev tun', 'proto tcp-client',
+        `remote ${fw.ovpn_public_host} ${server?.port || 1194}`,
+        'resolv-retry infinite', 'nobind', 'persist-key', 'persist-tun',
+        'remote-cert-tls server', 'cipher AES-256-CBC', 'auth SHA1', 'verb 3', '',
+        '<ca>', fw.ovpn_ca_cert.trim(), '</ca>',
+        '<cert>', fw.ovpn_client_cert.trim(), '</cert>',
+        '<key>', fw.ovpn_client_key.trim(), '</key>', '',
+        '<auth-user-pass>', secret.name, secret.password, '</auth-user-pass>',
+      ].join('\n');
+    });
+    res.setHeader('Content-Type', 'application/x-openvpn-profile');
+    res.setHeader('Content-Disposition', `attachment; filename="${req.params.name}.ovpn"`);
+    res.send(ovpnConfig);
+    logActivity(req.user, 'READ', 'mikrotik_ovpn_user', fw.id, `${req.params.name} (xuất file .ovpn)`);
+  } catch (e) { res.status(e.statusCode === 404 ? 404 : 502).json({ error: e.message }); }
 });
 
 module.exports = router;
