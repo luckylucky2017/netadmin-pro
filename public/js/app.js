@@ -1975,7 +1975,7 @@ function renderVcenterRows() {
   const vms = paginateRows(sortedVms, vcenterPagination);
   const rowOffset = (vcenterPagination.page - 1) * vcenterPagination.pageSize;
   tbody.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}<th>Cụm</th>${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM cấp phát', 'memory_mib', vcenterSortState, 'toggleVcenterSort')}${thSort('CPU dùng', 'cpu_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Tên VM', 'name', vcenterSortState, 'toggleVcenterSort')}<th>Cụm</th>${thSort('Trạng thái', 'power_state', vcenterSortState, 'toggleVcenterSort')}${thSort('vCPU', 'cpu_count', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM cấp phát', 'memory_mib', vcenterSortState, 'toggleVcenterSort')}${thSort('CPU dùng', 'cpu_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Load avg (1m)', 'load_avg_1', vcenterSortState, 'toggleVcenterSort')}${thSort('RAM dùng', 'mem_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Disk dùng', 'disk_pct', vcenterSortState, 'toggleVcenterSort')}${thSort('Đồng bộ lần cuối', 'last_synced_at', vcenterSortState, 'toggleVcenterSort')}<th>Hành động</th></tr></thead>
       <tbody>${vms.map((v, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -1985,8 +1985,9 @@ function renderVcenterRows() {
           <td><span class="ping-ms" style="font-size:13px">${v.cpu_count ?? '—'}</span></td>
           <td><span class="ping-ms" style="font-size:13px">${v.memory_mib ? (v.memory_mib / 1024).toFixed(0) + ' GB' : '—'}</span></td>
           <td>${vcPctCell(v.cpu_pct)}</td>
-          <td>${vcPctCell(v.mem_pct)}</td>
-          <td>${vcPctCell(v.disk_pct)}</td>
+          <td>${vcLoadAvgCell(v)}</td>
+          <td>${vcPctCell(v.mem_pct, v.memory_mib != null && v.mem_pct != null ? `${((v.memory_mib / 1024) * (v.mem_pct / 100)).toFixed(1)} / ${(v.memory_mib / 1024).toFixed(1)} GB` : null)}</td>
+          <td>${vcPctCell(v.disk_pct, v.disk_used_gb != null && v.disk_total_gb != null ? `${Number(v.disk_used_gb).toFixed(1)} / ${Number(v.disk_total_gb).toFixed(1)} GB` : null)}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(v.last_synced_at)}</span></td>
           <td><div class="actions">
             ${v.power_state === 'POWERED_ON'
@@ -2167,11 +2168,29 @@ async function confirmDeleteCluster(e, id, name) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
-function vcPctCell(pct) {
+// subtitle (e.g. "3.2 / 8 GB") is optional detail shown under the % badge — used for RAM/Disk cells
+// where the raw GB figure matters as much as the percentage (a VM at 90% of 1GB is a very different
+// story from 90% of 500GB).
+function vcPctCell(pct, subtitle) {
   if (pct == null) return `<span style="font-size:13px;color:var(--fg-dim)">—</span>`;
   const cls = pct >= 90 ? 'slow' : pct >= 70 ? 'medium' : 'fast';
   const blink = pct >= 70 ? 'blink-warning-text' : '';
-  return `<span class="ping-ms ${cls} ${blink}">${pct.toFixed(1)}%</span>`;
+  return `<span class="ping-ms ${cls} ${blink}">${pct.toFixed(1)}%</span>${subtitle ? `<div style="font-size:11px;color:var(--fg-dim)">${subtitle}</div>` : ''}`;
+}
+
+// vCenter's cpu.usage.average is % of allocated CPU MHz consumed — a different concept from Unix
+// load average (processes waiting to run), which vCenter's own counters have no equivalent for.
+// load_avg_* only exists for VMs with SSH configured (vcenter-load-collector.js), so most fleets
+// will show "—" here until an admin opts a VM into SSH monitoring for some other feature too.
+function vcLoadAvgCell(v) {
+  if (v.load_avg_1 == null) {
+    const hint = v.ssh_credential_id ? 'Đang chờ lần kiểm tra tiếp theo qua SSH' : 'Cần cấu hình tài khoản kết nối SSH (trang Giám sát bất thường) để đọc load average';
+    return `<span style="font-size:12px;color:var(--fg-dim)" title="${escAttr(hint)}">—</span>`;
+  }
+  const perCore = v.cpu_count ? Number(v.load_avg_1) / v.cpu_count : null;
+  const cls = perCore == null ? '' : perCore >= 1 ? 'slow' : perCore >= 0.7 ? 'medium' : 'fast';
+  const title = `1 phút: ${Number(v.load_avg_1).toFixed(2)} — 5 phút: ${Number(v.load_avg_5).toFixed(2)} — 15 phút: ${Number(v.load_avg_15).toFixed(2)}${v.cpu_count ? ` (${v.cpu_count} vCPU)` : ''}${v.load_avg_checked_at ? ' — cập nhật lúc ' + formatTime(v.load_avg_checked_at) : ''}`;
+  return `<span class="ping-ms ${cls}" title="${escAttr(title)}">${Number(v.load_avg_1).toFixed(2)}</span>`;
 }
 
 function vcPowerBadge(state) {

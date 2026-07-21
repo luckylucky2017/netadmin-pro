@@ -1165,6 +1165,23 @@ async function ensureSchemaAndMigrations() {
       UNIQUE KEY uq_harbor_repo (project_name, repo_name)
     )
   `);
+
+  // Absolute disk usage — vcenter_vms.disk_pct already existed but only ever stored the percentage,
+  // discarding the actual capacity/used bytes guestDiskPct() reads from VMware Tools. RAM used (GB)
+  // needs no new column — it's memory_mib * mem_pct already in vcenter_vms, computed in the UI.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN disk_total_gb DECIMAL(10,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN disk_used_gb DECIMAL(10,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Load average (1/5/15 min) is a guest-OS concept vCenter's performance counters don't expose at
+  // all — cpu.usage.average is % of allocated CPU MHz consumed, not "processes waiting to run".
+  // Only obtainable the same way every other guest-level metric in this app is: SSH in and read
+  // /proc/loadavg, world-readable, no sudo needed. Opportunistic on whichever VMs already have
+  // ssh_credential_id configured for other features (fail2ban/Trivy/WAF) — no separate enable toggle.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_1 DECIMAL(6,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_5 DECIMAL(6,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_15 DECIMAL(6,2)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_checked_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN load_avg_error TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 }
 
 async function seedIfEmpty() {

@@ -12,14 +12,22 @@ async function guestIdentity(moref) {
   return { ip_address: identity?.ip_address || null, guest_family: identity?.family || null };
 }
 
-async function guestDiskPct(moref) {
+// Returns both the % (existing behavior) and the absolute capacity/used in GB — the caller previously
+// discarded totalCap/totalFree right after computing the percentage, so "disk dùng" could never be
+// shown as an actual GB figure, only a bare percentage.
+async function guestDiskUsage(moref) {
   const fs = await client.rest('GET', `/api/vcenter/vm/${moref}/guest/local-filesystem`);
   const mounts = Object.values(fs || {});
-  if (!mounts.length) return null;
+  if (!mounts.length) return { pct: null, totalGb: null, usedGb: null };
   const totalCap = mounts.reduce((s, m) => s + (m.capacity || 0), 0);
   const totalFree = mounts.reduce((s, m) => s + (m.free_space || 0), 0);
-  if (!totalCap) return null;
-  return Math.round(((totalCap - totalFree) / totalCap) * 1000) / 10;
+  if (!totalCap) return { pct: null, totalGb: null, usedGb: null };
+  const GB = 1024 ** 3;
+  return {
+    pct: Math.round(((totalCap - totalFree) / totalCap) * 1000) / 10,
+    totalGb: Math.round((totalCap / GB) * 100) / 100,
+    usedGb: Math.round(((totalCap - totalFree) / GB) * 100) / 100,
+  };
 }
 
 // Counter IDs (cpu.usage.average / mem.usage.average) are looked up once per cluster, not
@@ -124,7 +132,7 @@ const STATS_CONCURRENCY = 8;
 async function syncStatsForCluster(cluster) {
   return registry.withClient(cluster.id, async () => {
     const vms = await db.prepare("SELECT id, moref FROM vcenter_vms WHERE power_state = 'POWERED_ON' AND vcenter_cluster_id = ?").all(cluster.id);
-    const update = db.prepare('UPDATE vcenter_vms SET cpu_pct=?, mem_pct=?, disk_pct=?, stats_updated_at=CURRENT_TIMESTAMP WHERE moref=? AND vcenter_cluster_id=?');
+    const update = db.prepare('UPDATE vcenter_vms SET cpu_pct=?, mem_pct=?, disk_pct=?, disk_total_gb=?, disk_used_gb=?, stats_updated_at=CURRENT_TIMESTAMP WHERE moref=? AND vcenter_cluster_id=?');
     const insertHistory = db.prepare('INSERT INTO vm_metrics_history (vm_id, cpu_pct, mem_pct, disk_pct) VALUES (?, ?, ?, ?)');
     const updateIdentity = db.prepare('UPDATE vcenter_vms SET ip_address=?, guest_family=? WHERE moref=? AND vcenter_cluster_id=?');
 
@@ -133,11 +141,11 @@ async function syncStatsForCluster(cluster) {
       try {
         const [perf, disk, identity] = await Promise.all([
           vmPerf(cluster.id, vm.moref).catch(() => ({})),
-          guestDiskPct(vm.moref).catch(() => null),
+          guestDiskUsage(vm.moref).catch(() => ({ pct: null, totalGb: null, usedGb: null })),
           guestIdentity(vm.moref).catch(() => null)
         ]);
-        await update.run(perf.cpu_pct ?? null, perf.mem_pct ?? null, disk, vm.moref, cluster.id);
-        await insertHistory.run(vm.id, perf.cpu_pct ?? null, perf.mem_pct ?? null, disk);
+        await update.run(perf.cpu_pct ?? null, perf.mem_pct ?? null, disk.pct, disk.totalGb, disk.usedGb, vm.moref, cluster.id);
+        await insertHistory.run(vm.id, perf.cpu_pct ?? null, perf.mem_pct ?? null, disk.pct);
         if (identity) await updateIdentity.run(identity.ip_address, identity.guest_family, vm.moref, cluster.id);
         ok++;
       } catch {
@@ -174,4 +182,4 @@ function start(intervalMs = 60000) {
   return { stop: () => { stopped = true; } };
 }
 
-module.exports = { start, syncVMs, syncStats, syncOneCluster, vmPerf, guestDiskPct, guestIdentity };
+module.exports = { start, syncVMs, syncStats, syncOneCluster, vmPerf, guestDiskUsage, guestIdentity };

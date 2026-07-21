@@ -187,6 +187,7 @@ if (!process.env.SESSION_SECRET) {
     require('./trivy-scanner').start();
     require('./trivy-scanner').startVersionCheckScheduler();
     require('./harbor-scanner').start();
+    require('./vcenter-load-collector').start();
   } else {
     console.log('[server] DISABLE_BACKGROUND_COLLECTORS=true — periodic polling/auto-block loops NOT started (see server.js)');
   }
