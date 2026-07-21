@@ -48,13 +48,18 @@ async function pingHost(host) {
 const TOOLS = [
   {
     name: 'list_servers',
-    description: 'Liệt kê tất cả máy chủ vật lý và trạng thái tổng quan (online/offline, ping, sức khỏe IPMI).',
+    description: 'Liệt kê máy chủ vật lý và trạng thái tổng quan (online/offline, ping, sức khỏe IPMI). Tối đa 100 kết quả — nếu cần tìm 1 máy cụ thể, dùng get_server_status thay vì liệt kê hết.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
     mutating: false,
     permission: null,
+    // No LIMIT here used to mean a real deployment with hundreds of servers dumped its entire table
+    // into the conversation on a single "liệt kê máy chủ" — and since the whole message history gets
+    // echoed back on every subsequent turn (see chatbot-engine.js), that one tool result then got
+    // re-sent, un-shrunk, for the rest of the session. Capped the same way list_vms already was.
     execute: async () => {
-      const servers = await db.prepare('SELECT id, name, ip_address, status, ping_ms, ipmi_health, last_ping FROM servers ORDER BY name').all();
-      return { count: servers.length, servers };
+      const servers = await db.prepare('SELECT id, name, ip_address, status, ping_ms, ipmi_health, last_ping FROM servers ORDER BY name LIMIT 100').all();
+      const total = (await db.prepare('SELECT COUNT(*) as cnt FROM servers').get()).cnt;
+      return { count: servers.length, total, servers };
     }
   },
   {
@@ -83,13 +88,14 @@ const TOOLS = [
   },
   {
     name: 'list_devices',
-    description: 'Liệt kê tất cả thiết bị mạng (switch/router/firewall...) và trạng thái online/offline.',
+    description: 'Liệt kê thiết bị mạng (switch/router/firewall...) và trạng thái online/offline. Tối đa 100 kết quả.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
     mutating: false,
     permission: null,
     execute: async () => {
-      const devices = await db.prepare('SELECT id, name, ip_address, type, status, ping_ms, last_ping FROM network_devices ORDER BY name').all();
-      return { count: devices.length, devices };
+      const devices = await db.prepare('SELECT id, name, ip_address, type, status, ping_ms, last_ping FROM network_devices ORDER BY name LIMIT 100').all();
+      const total = (await db.prepare('SELECT COUNT(*) as cnt FROM network_devices').get()).cnt;
+      return { count: devices.length, total, devices };
     }
   },
   {

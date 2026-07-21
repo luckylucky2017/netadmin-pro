@@ -17,7 +17,16 @@ QUY TẮC BẮT BUỘC:
 - Nếu 1 tool trả về lỗi "không có quyền", hãy thông báo lại cho người dùng bằng tiếng Việt rằng họ không có quyền thực hiện hành động đó, không thử lại.
 - Trả lời ngắn gọn, rõ ràng, bằng tiếng Việt.`;
 
-const ANTHROPIC_TOOLS = TOOLS.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
+// The system prompt and full tool catalog are byte-identical on every single API call this module
+// ever makes — within one turn's multi-round loop AND across every future message in the same chat
+// session, since the client resends the whole history each time. Marking the tail end of each with
+// cache_control lets Anthropic skip re-processing that (currently unbilled-savings-free) fixed
+// prefix; only genuinely new content (the growing message history) costs full input-token price.
+const ANTHROPIC_SYSTEM = [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
+const ANTHROPIC_TOOLS = TOOLS.map((t, i, arr) => ({
+  name: t.name, description: t.description, input_schema: t.input_schema,
+  ...(i === arr.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
+}));
 
 function textOf(content) {
   const block = (content || []).find(b => b.type === 'text');
@@ -60,7 +69,7 @@ async function runTurn({ messages, approveToolUseId, decision, pendingExtraResul
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const response = await client.messages.create({
-      model: MODEL, max_tokens: MAX_TOKENS, system: SYSTEM_PROMPT, tools: ANTHROPIC_TOOLS, messages: msgs
+      model: MODEL, max_tokens: MAX_TOKENS, system: ANTHROPIC_SYSTEM, tools: ANTHROPIC_TOOLS, messages: msgs
     });
 
     if (response.stop_reason !== 'tool_use') {
