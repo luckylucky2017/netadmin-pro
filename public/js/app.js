@@ -3270,7 +3270,7 @@ function renderSecurityBannedRows() {
   const rows = paginateRows(sortedRows, securityBannedPagination);
   const rowOffset = (securityBannedPagination.page - 1) * securityBannedPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('IP', 'ip', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Quốc gia', 'country', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Số lần thất bại', 'event_count', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Username đã thử</th>${thSort('Lần đầu chặn', 'first_seen', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Loại chặn', 'permanent', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('IP', 'ip', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Quốc gia', 'country', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Số lần thất bại', 'event_count', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Username đã thử</th>${thSort('Lần chặn gần nhất', 'last_seen', securityBannedSortState, 'toggleSecurityBannedSort')}${thSort('Loại chặn', 'permanent', securityBannedSortState, 'toggleSecurityBannedSort')}<th>Hành động</th></tr></thead>
       <tbody>${rows.map((r, i) => {
         const usernames = r.usernames ? r.usernames.split('|||').filter(Boolean) : [];
         const usernamesPreview = usernames.length ? escHtml(usernames[0]) + (usernames.length > 1 ? ` (+${usernames.length - 1} khác)` : '') : '—';
@@ -3283,7 +3283,7 @@ function renderSecurityBannedRows() {
           <td>${r.country || '—'}</td>
           <td>${r.event_count != null ? `${r.event_count} lần thất bại` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${usernamesTitle}">${usernamesPreview}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn. Lần cuối xác nhận vẫn còn bị chặn: ${formatTime(r.last_seen)}">${formatTime(r.first_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn: ${formatTime(r.first_seen)}">${formatTime(r.last_seen)}</span></td>
           <td>${banTypeBadge(r)}</td>
           <td><div class="actions">
             <button class="btn btn-secondary btn-sm" data-permission="security.block" onclick="securityUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
@@ -3852,7 +3852,7 @@ function renderWafBannedRows() {
   const rows = paginateRows(sortedRows, wafBannedPagination);
   const rowOffset = (wafBannedPagination.page - 1) * wafBannedPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần đầu chặn', 'first_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Loại chặn', 'permanent', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần chặn gần nhất', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Loại chặn', 'permanent', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
       <tbody>${rows.map((r, i) => {
         const paths = r.sample_paths ? r.sample_paths.split('|||').filter(Boolean) : [];
         const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 50) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
@@ -3866,7 +3866,7 @@ function renderWafBannedRows() {
           <td>${(() => { const v = formatWafViolationType(r); return v ? v : '<span style="color:var(--fg-dim)">—</span>'; })()}</td>
           <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${pathsTitle}">${pathsPreview}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn. Lần cuối xác nhận vẫn còn bị chặn: ${formatTime(r.last_seen)}">${formatTime(r.first_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn: ${formatTime(r.first_seen)}">${formatTime(r.last_seen)}</span></td>
           <td>${banTypeBadge(r)}</td>
           <td><div class="actions">
             <button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
