@@ -89,13 +89,32 @@ async function evaluate() {
   for (const rule of rules) await evaluateRule(rule);
 }
 
-function start(intervalMs = 10000) {
+const AUTO_RESOLVE_AFTER_HOURS = 24;
+
+// Blanket time-based sweep, independent of whether the underlying condition actually cleared —
+// deliberately separate from applyBreach()'s own resolve-when-condition-clears logic above (which
+// only covers threshold rules) and from every other collector's own resolve-on-recovery handling.
+// Requested directly: any alert still 'open' 24h after creation flips to 'resolved' regardless of
+// source. Runs on its own, much longer interval — a 24h threshold needs no finer-than-minutes
+// precision, and idx_alerts_status (see database.js) keeps this cheap even with a large backlog.
+async function autoResolveStaleOpenAlerts() {
+  await db.prepare(`
+    UPDATE alerts SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+    WHERE status = 'open' AND created_at < DATE_SUB(NOW(), INTERVAL ? HOUR)
+  `).run(AUTO_RESOLVE_AFTER_HOURS);
+}
+
+function start(intervalMs = 10000, autoResolveIntervalMs = 15 * 60 * 1000) {
   // Wrapped in .catch — evaluate() now hits MySQL over the network on every tick (every 10s), so a
   // transient connection hiccup must not become an unhandled promise rejection (which crashes the
   // whole Node process, unlike a synchronous throw from the old in-process SQLite calls).
   const tick = () => evaluate().catch(e => console.error('[alert-engine] Lỗi đánh giá ngưỡng:', e.message));
   tick();
-  return setInterval(tick, intervalMs);
+  setInterval(tick, intervalMs);
+
+  const autoResolveTick = () => autoResolveStaleOpenAlerts().catch(e => console.error('[alert-engine] Lỗi tự động xử lý cảnh báo quá hạn:', e.message));
+  autoResolveTick();
+  return setInterval(autoResolveTick, autoResolveIntervalMs);
 }
 
-module.exports = { start, evaluate };
+module.exports = { start, evaluate, autoResolveStaleOpenAlerts };
