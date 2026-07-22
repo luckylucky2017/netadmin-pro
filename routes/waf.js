@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 const wafManager = require('../waf-manager');
+const fail2banConfig = require('../fail2ban-config');
 
 router.get('/events', async (req, res) => {
   const { vmId, eventType, search, limit } = req.query;
@@ -240,6 +241,15 @@ router.get('/banned-ips', async (req, res) => {
     ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
     ORDER BY b.last_seen DESC
   `).all();
+  // Same "permanent vs temporary" derivation as routes/security.js's GET /banned-ips — see comment
+  // there. waf_bantime_sec = -1 means permanent.
+  const vmIds = [...new Set(rows.map((r) => r.vm_id))];
+  const configs = new Map(await Promise.all(vmIds.map(async (id) => [id, await fail2banConfig.getEffectiveConfig(id)])));
+  for (const r of rows) {
+    const bantimeSec = configs.get(r.vm_id)?.waf_bantime_sec ?? -1;
+    r.bantime_sec = bantimeSec;
+    r.permanent = bantimeSec === -1;
+  }
   res.json(rows);
 });
 

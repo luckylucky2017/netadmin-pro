@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 const fail2banManager = require('../fail2ban-manager');
+const fail2banConfig = require('../fail2ban-config');
 
 router.get('/events', async (req, res) => {
   const { vmId, eventType, foreignOnly, search, limit } = req.query;
@@ -210,6 +211,16 @@ router.get('/banned-ips', async (req, res) => {
     ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
     ORDER BY b.last_seen DESC
   `).all();
+  // "Vĩnh viễn/tạm thời" is a property of the VM's effective ssh_bantime_sec at ban time, not of the
+  // row itself — fetch once per distinct VM in the result set and attach, since bantime_sec = -1 means
+  // permanent (fail2ban never auto-expires it) vs a positive value the row will eventually clear.
+  const vmIds = [...new Set(rows.map((r) => r.vm_id))];
+  const configs = new Map(await Promise.all(vmIds.map(async (id) => [id, await fail2banConfig.getEffectiveConfig(id)])));
+  for (const r of rows) {
+    const bantimeSec = configs.get(r.vm_id)?.ssh_bantime_sec ?? -1;
+    r.bantime_sec = bantimeSec;
+    r.permanent = bantimeSec === -1;
+  }
   res.json(rows);
 });
 
