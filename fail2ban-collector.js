@@ -108,7 +108,14 @@ async function syncSshBannedIps(vm, sshdIps) {
   const currentSet = new Set(sshdIps);
   for (const ip of sshdIps) await upsertSshBannedIp.run(vm.id, ip);
   const known = await db.prepare('SELECT ip FROM ssh_banned_ips WHERE vm_id = ?').all(vm.id);
-  for (const { ip } of known) if (!currentSet.has(ip)) await deleteSshBannedIp.run(vm.id, ip);
+  for (const { ip } of known) {
+    if (currentSet.has(ip)) continue;
+    await deleteSshBannedIp.run(vm.id, ip);
+    // This only runs on a CONFIRMED live listing (see collectVm's hasOwnProperty('sshd') guard) —
+    // logged so a drop is always auditable (bantime expiry, manual unban, or a genuine mismatch
+    // worth investigating), never a silent removal.
+    console.warn(`[fail2ban] ${vm.name}: IP ${ip} không còn trong danh sách chặn sshd (đã hết hạn, được gỡ chặn, hoặc jail restart)`);
+  }
 }
 
 async function collectVm(vm) {
@@ -166,11 +173,47 @@ async function collectAll() {
   `).run(...monitoredIds);
 }
 
-function start(intervalMs = 45000) {
+// Reconciliation sweep, deliberately on its own longer interval — separate from the 45s tailing
+// loop above. checkBruteForce() (ssh-security-collector.js) only retries a ban when the SAME
+// src_ip generates a NEW failed attempt within the detection window; if an attacker pauses right
+// after the first failed ban attempt, the "CHƯA chặn được" alert it raised would otherwise sit
+// open indefinitely with no further attempt to actually close the gap — a real, silent
+// under-blocking risk, not just a cosmetic one. This re-attempts every such alert's ban directly
+// against its recorded IP, every sweep, until it succeeds (resolving the alert and recording the
+// ban) or someone acts on it manually.
+async function retryUnbannedSshAlerts() {
+  const pending = await db.prepare(`
+    SELECT id, source_id as vm_id, metric_value as ip FROM alerts
+    WHERE category = 'security' AND metric = 'ssh_bruteforce' AND status = 'open'
+  `).all();
+  if (!pending.length) return;
+  const vmIds = [...new Set(pending.map((p) => p.vm_id))];
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_port, ssh_credential_id FROM vcenter_vms WHERE id IN (${vmIds.map(() => '?').join(',')})
+  `).all(...vmIds);
+  const vmById = new Map(vms.map((v) => [v.id, v]));
+
+  for (const alert of pending) {
+    const vm = vmById.get(alert.vm_id);
+    if (!vm || !vm.ssh_credential_id || !vm.ip_address) continue;
+    const result = await fail2banManager.banIp(vm, alert.ip).catch((e) => ({ ok: false, error: e.message }));
+    if (result.ok) {
+      await db.prepare("UPDATE alerts SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(alert.id);
+      await upsertSshBannedIp.run(vm.id, alert.ip);
+      console.warn(`[fail2ban] ${vm.name}: đã chặn được IP ${alert.ip} ở lần thử lại (trước đó thất bại lúc phát hiện)`);
+    }
+  }
+}
+
+function start(intervalMs = 45000, retryIntervalMs = 5 * 60 * 1000) {
   // Wrapped in .catch — see alert-engine.js's start() for why (async setInterval + network DB).
   const tick = () => collectAll().catch(e => console.error('[fail2ban] Lỗi:', e.message));
   tick();
-  return setInterval(tick, intervalMs);
+  setInterval(tick, intervalMs);
+
+  const retryTick = () => retryUnbannedSshAlerts().catch(e => console.error('[fail2ban] Lỗi thử chặn lại IP:', e.message));
+  retryTick();
+  return setInterval(retryTick, retryIntervalMs);
 }
 
-module.exports = { start, collectAll, collectVm, parseStatus };
+module.exports = { start, collectAll, collectVm, parseStatus, retryUnbannedSshAlerts };

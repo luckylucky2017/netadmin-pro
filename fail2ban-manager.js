@@ -318,8 +318,14 @@ async function banIp(vm, ip) {
     ssh = await connect(vm);
     const status = await ssh.execCommand(`sudo -n fail2ban-client status ${SSHD_JAIL_NAME} 2>&1`);
     if (!/Status for the jail/i.test(status.stdout)) return { ok: false, error: 'Jail sshd chưa được cài đặt trên VM này' };
+    if (status.stdout.includes(ip)) return { ok: true, error: null }; // already banned
     const result = await ssh.execCommand(`sudo -n fail2ban-client set ${SSHD_JAIL_NAME} banip ${ip} 2>&1`);
-    const ok = result.stdout.trim() === '1' || /already banned/i.test(result.stdout);
+    // `banip`'s own return value isn't a reliable success signal on every fail2ban version/action
+    // config — confirmed live against a real jail that returns "0" even when the ban was genuinely
+    // applied (the IP really was in the jail's banned list right after). Always verify against the
+    // actual live list instead of trusting the command's exit text.
+    const after = await ssh.execCommand(`sudo -n fail2ban-client status ${SSHD_JAIL_NAME} 2>&1`);
+    const ok = after.stdout.includes(ip);
     return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không chặn được IP').slice(0, 300) };
   } catch (e) {
     return { ok: false, error: `Không kết nối được SSH: ${e.message}` };

@@ -723,7 +723,13 @@ async function syncBannedIps(vm, ssh) {
     await upsertBannedIp.run(vm.id, ip);
   }
   const known = await db.prepare('SELECT ip FROM waf_banned_ips WHERE vm_id = ?').all(vm.id);
-  for (const { ip } of known) if (!currentSet.has(ip)) await deleteBannedIp.run(vm.id, ip);
+  for (const { ip } of known) {
+    if (currentSet.has(ip)) continue;
+    await deleteBannedIp.run(vm.id, ip);
+    // Only reached on a CONFIRMED live listing (error === null above) — logged so every removal is
+    // auditable rather than a silent drop.
+    console.warn(`[nginx-waf] ${vm.name}: IP ${ip} không còn trong danh sách chặn WAF (đã hết hạn, được gỡ chặn, hoặc jail restart)`);
+  }
 }
 
 async function collectVm(vm) {
@@ -779,14 +785,50 @@ async function collectAll() {
   `).run(...monitoredIds);
 }
 
-function start(intervalMs = 30000) {
+// Reconciliation sweep, on its own longer interval — separate from the main tailing loop. A
+// waf_scan/waf_dos alert only exists in a "not yet blocked" state when waf_auto_block was on but
+// the ban attempt failed at detection time (see raiseWafAlert's action wording); processHits() only
+// retries when fresh matching request activity keeps arriving, so if the offending source pauses
+// right after the failed attempt, that gap would otherwise never get retried. Only bothers with VMs
+// that currently have waf_auto_block on — if it's off, "not blocked" was the intended state, not a
+// failure to fix.
+async function retryUnbannedWafAlerts() {
+  const pending = await db.prepare(`
+    SELECT a.id, a.source_id as vm_id, a.metric_value as ip FROM alerts a
+    JOIN vcenter_vms v ON v.id = a.source_id
+    WHERE a.category = 'security' AND a.metric IN ('waf_scan', 'waf_dos') AND a.status = 'open' AND v.waf_auto_block = 1
+  `).all();
+  if (!pending.length) return;
+  const vmIds = [...new Set(pending.map((p) => p.vm_id))];
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_port, ssh_credential_id FROM vcenter_vms WHERE id IN (${vmIds.map(() => '?').join(',')})
+  `).all(...vmIds);
+  const vmById = new Map(vms.map((v) => [v.id, v]));
+
+  for (const alert of pending) {
+    const vm = vmById.get(alert.vm_id);
+    if (!vm || !vm.ssh_credential_id || !vm.ip_address) continue;
+    const result = await wafManager.banIp(vm, alert.ip).catch((e) => ({ ok: false, error: e.message }));
+    if (result.ok) {
+      await db.prepare("UPDATE alerts SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(alert.id);
+      await upsertBannedIp.run(vm.id, alert.ip);
+      console.warn(`[nginx-waf] ${vm.name}: đã chặn được IP ${alert.ip} ở lần thử lại (trước đó thất bại lúc phát hiện)`);
+    }
+  }
+}
+
+function start(intervalMs = 30000, retryIntervalMs = 5 * 60 * 1000) {
   const tick = () => collectAll().catch(e => console.error('[nginx-waf] Lỗi:', e.message));
   tick();
-  return setInterval(tick, intervalMs);
+  setInterval(tick, intervalMs);
+
+  const retryTick = () => retryUnbannedWafAlerts().catch(e => console.error('[nginx-waf] Lỗi thử chặn lại IP:', e.message));
+  retryTick();
+  return setInterval(retryTick, retryIntervalMs);
 }
 
 module.exports = {
-  start, collectAll, collectVm,
+  start, collectAll, collectVm, retryUnbannedWafAlerts,
   parseNginxLine, parseNginxTimestamp, detectPerIpEvents, detectDdos,
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
   classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,

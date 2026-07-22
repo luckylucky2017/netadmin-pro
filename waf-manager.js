@@ -276,8 +276,12 @@ async function banIp(vm, ip) {
     ssh = await connect(vm);
     const status = await ssh.execCommand(`sudo -n fail2ban-client status ${JAIL_NAME} 2>&1`);
     if (!/Status for the jail/i.test(status.stdout)) return { ok: false, error: 'Jail WAF chưa được cài đặt trên VM này' };
+    if (status.stdout.includes(ip)) return { ok: true, error: null }; // already banned
     const result = await ssh.execCommand(`sudo -n fail2ban-client set ${JAIL_NAME} banip ${ip} 2>&1`);
-    const ok = result.stdout.trim() === '1' || /already banned/i.test(result.stdout);
+    // See fail2ban-manager.js's banIp for why the command's own return value isn't trusted — always
+    // re-verify against the live list instead.
+    const after = await ssh.execCommand(`sudo -n fail2ban-client status ${JAIL_NAME} 2>&1`);
+    const ok = after.stdout.includes(ip);
     return ok ? { ok: true, error: null } : { ok: false, error: (result.stdout || result.stderr || 'Không chặn được IP').slice(0, 300) };
   } catch (e) {
     return { ok: false, error: `Không kết nối được SSH: ${e.message}` };
