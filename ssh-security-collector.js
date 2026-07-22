@@ -311,7 +311,11 @@ async function collectAll() {
   `).all();
   if (!vms.length) return;
   await Promise.allSettled(vms.map(collectVm));
-  await db.prepare("DELETE FROM ssh_login_events WHERE occurred_at < DATE_SUB(NOW(), INTERVAL 30 DAY)").run();
+  // Lowered from 30 to 7 days — at the fleet's real observed volume (~27k events/hour from
+  // continuous internet SSH brute-force scanning), 30 days had grown this table to 10M+ rows,
+  // making every query against it slow regardless of indexing (see routes/security.js's
+  // GET /events and GET /banned-ips fix commits for the concrete before/after numbers).
+  await db.prepare("DELETE FROM ssh_login_events WHERE occurred_at < DATE_SUB(NOW(), INTERVAL 7 DAY)").run();
 }
 
 function start(intervalMs = 45000) {
