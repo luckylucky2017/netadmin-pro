@@ -3283,7 +3283,7 @@ function renderSecurityBannedRows() {
           <td>${r.country || '—'}</td>
           <td>${r.event_count != null ? `${r.event_count} lần thất bại` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${usernamesTitle}">${usernamesPreview}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn: ${formatTime(r.first_seen)}">${formatTime(r.last_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Thời điểm IP này bắt đầu bị chặn ở lần chặn hiện tại (mỗi lần gỡ chặn rồi bị chặn lại sẽ cập nhật lại mốc này)">${formatTime(r.first_seen)}</span></td>
           <td>${banTypeBadge(r)}</td>
           <td><div class="actions">
             <button class="btn btn-secondary btn-sm" data-permission="security.block" onclick="securityUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
@@ -3866,7 +3866,7 @@ function renderWafBannedRows() {
           <td>${(() => { const v = formatWafViolationType(r); return v ? v : '<span style="color:var(--fg-dim)">—</span>'; })()}</td>
           <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${pathsTitle}">${pathsPreview}</span></td>
-          <td><span style="font-size:12px;color:var(--fg-muted)" title="Lần đầu ghi nhận IP này bị chặn: ${formatTime(r.first_seen)}">${formatTime(r.last_seen)}</span></td>
+          <td><span style="font-size:12px;color:var(--fg-muted)" title="Thời điểm IP này bắt đầu bị chặn ở lần chặn hiện tại (mỗi lần gỡ chặn rồi bị chặn lại sẽ cập nhật lại mốc này)">${formatTime(r.first_seen)}</span></td>
           <td>${banTypeBadge(r)}</td>
           <td><div class="actions">
             <button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="wafUnblockIpFromBannedTab(${r.vm_id}, '${escAttr(r.ip)}', this)">Gỡ chặn</button>
