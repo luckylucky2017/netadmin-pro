@@ -3855,7 +3855,7 @@ function renderWafBannedRows() {
       <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần chặn gần nhất', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Loại chặn', 'permanent', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
       <tbody>${rows.map((r, i) => {
         const paths = r.sample_paths ? r.sample_paths.split('|||').filter(Boolean) : [];
-        const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 50) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
+        const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 70) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
         const pathsTitle = paths.length ? paths.map(escAttr).join('\n') : '';
         return `
         <tr>

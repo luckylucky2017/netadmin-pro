@@ -235,7 +235,7 @@ router.get('/banned-ips', async (req, res) => {
         GROUP_CONCAT(DISTINCT attack_category ORDER BY attack_category SEPARATOR ', ') AS attack_categories,
         SUM(hit_count) AS total_hits,
         COUNT(*) AS event_count,
-        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT path ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths
+        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT CONCAT(COALESCE(NULLIF(domain, ''), '(không rõ domain)'), path) ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths
       FROM waf_events
       GROUP BY vm_id, src_ip
     ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
