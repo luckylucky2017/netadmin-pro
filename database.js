@@ -1261,6 +1261,19 @@ async function ensureSchemaAndMigrations() {
       UNIQUE KEY uq_mikrotik_rule (firewall_id, ros_id)
     )
   `);
+
+  // `alerts` had NO indexes beyond the primary key — every alert-raising collector
+  // (fail2ban-collector.js, trivy-scanner.js, vuln-scanner.js, nginx-waf-collector.js,
+  // reboot-status.js, alert-engine.js) runs a dedup lookup shaped like
+  // "WHERE source_type=? AND source_id=? AND metric/rule_id=? AND status=..." before raising a
+  // new alert — once per monitored target, every 30-60s tick, continuously, regardless of whether
+  // the app UI is even open. With 10k+ rows in production this was a full table scan every time;
+  // confirmed live as a major contributor to sustained high mysqld CPU. source_type/metric are
+  // TEXT columns, hence the (50) prefix lengths — MySQL can't index a full TEXT column, and 50
+  // chars comfortably covers every real value ('vcenter_vm', 'trivy_finding', 'waf_ddos', etc).
+  try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_source_metric (source_type(50), source_id, metric(50), status)"); } catch (e) { if (e.errno !== 1061) throw e; }
+  try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_source_rule (source_type(50), source_id, rule_id, status)"); } catch (e) { if (e.errno !== 1061) throw e; }
+  try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_status (status)"); } catch (e) { if (e.errno !== 1061) throw e; }
 }
 
 async function seedIfEmpty() {
