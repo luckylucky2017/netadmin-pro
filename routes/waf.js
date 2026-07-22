@@ -225,7 +225,7 @@ router.post('/vms/:id/jail/stop', requirePermission('waf.jail.manage'), async (r
 router.get('/banned-ips', async (req, res) => {
   const rows = await db.prepare(`
     SELECT b.vm_id, v.name AS vm_name, b.ip, b.first_seen, b.last_seen,
-           agg.country, agg.event_types, agg.attack_categories, agg.total_hits, agg.event_count, agg.sample_paths
+           agg.country, agg.event_types, agg.attack_categories, agg.total_hits, agg.event_count, agg.domains, agg.sample_paths
     FROM waf_banned_ips b
     JOIN vcenter_vms v ON v.id = b.vm_id
     LEFT JOIN (
@@ -235,7 +235,8 @@ router.get('/banned-ips', async (req, res) => {
         GROUP_CONCAT(DISTINCT attack_category ORDER BY attack_category SEPARATOR ', ') AS attack_categories,
         SUM(hit_count) AS total_hits,
         COUNT(*) AS event_count,
-        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT CONCAT(COALESCE(NULLIF(domain, ''), '(không rõ domain)'), path) ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths
+        GROUP_CONCAT(DISTINCT COALESCE(NULLIF(domain, ''), '(không rõ domain)') ORDER BY domain SEPARATOR ', ') AS domains,
+        SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT path ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS sample_paths
       FROM waf_events
       GROUP BY vm_id, src_ip
     ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip

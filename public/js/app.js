@@ -3852,10 +3852,13 @@ function renderWafBannedRows() {
   const rows = paginateRows(sortedRows, wafBannedPagination);
   const rowOffset = (wafBannedPagination.page - 1) * wafBannedPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần chặn gần nhất', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Loại chặn', 'permanent', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', wafBannedSortState, 'toggleWafBannedSort')}${thSort('IP', 'ip', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Quốc gia', 'country', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Domain', 'domains', wafBannedSortState, 'toggleWafBannedSort')}<th>Loại vi phạm</th>${thSort('Số request bất thường', 'total_hits', wafBannedSortState, 'toggleWafBannedSort')}<th>URL nghi ngờ</th>${thSort('Lần chặn gần nhất', 'last_seen', wafBannedSortState, 'toggleWafBannedSort')}${thSort('Loại chặn', 'permanent', wafBannedSortState, 'toggleWafBannedSort')}<th>Hành động</th></tr></thead>
       <tbody>${rows.map((r, i) => {
+        const domains = r.domains ? r.domains.split(', ').filter(Boolean) : [];
+        const domainsPreview = domains.length ? escHtml(domains[0]) + (domains.length > 1 ? ` (+${domains.length - 1} khác)` : '') : '—';
+        const domainsTitle = domains.length ? domains.map(escAttr).join('\n') : '';
         const paths = r.sample_paths ? r.sample_paths.split('|||').filter(Boolean) : [];
-        const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 70) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
+        const pathsPreview = paths.length ? escHtml(paths[0]).slice(0, 60) + (paths.length > 1 ? ` (+${paths.length - 1} khác)` : '') : '—';
         const pathsTitle = paths.length ? paths.map(escAttr).join('\n') : '';
         return `
         <tr>
@@ -3863,6 +3866,7 @@ function renderWafBannedRows() {
           <td style="font-weight:600">${r.vm_name || '—'}</td>
           <td><span style="font-family:monospace">${escHtml(r.ip)}</span>${r.exceptionConflict ? ` <span class="status warning" style="display:inline-flex" title="IP này đang khớp 1 mục trong danh sách Ngoại lệ IP nhưng vẫn còn bị chặn trên VM — bấm &quot;Gỡ chặn&quot; để xử lý thủ công"><span class="dot"></span>Trong ngoại lệ</span>` : ''}</td>
           <td>${r.country || '—'}</td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${domainsTitle}">${domainsPreview}</span></td>
           <td>${(() => { const v = formatWafViolationType(r); return v ? v : '<span style="color:var(--fg-dim)">—</span>'; })()}</td>
           <td title="${r.event_count ? `Phát hiện ${r.event_count} lần` : ''}">${r.total_hits != null ? `${r.total_hits} request${r.event_count ? ` (${r.event_count} lần phát hiện)` : ''}` : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${pathsTitle}">${pathsPreview}</span></td>
