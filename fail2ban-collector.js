@@ -120,7 +120,7 @@ async function collectVm(vm) {
 
     const result = await ssh.execCommand(STATUS_SCRIPT);
     const banned = parseStatus(result.stdout);
-    if (!banned) { await syncSshBannedIps(vm, []); return; } // fail2ban not installed/reachable — clear any stale rows
+    if (!banned) { await syncSshBannedIps(vm, []); return; } // FAIL2BAN:none — genuinely not installed, safe to clear
 
     await reconcileSshExceptions(vm, ssh, banned);
     const stillBannedIps = new Set();
@@ -131,7 +131,16 @@ async function collectVm(vm) {
       }
     }
     await resolveStaleUnbans(vm, stillBannedIps);
-    await syncSshBannedIps(vm, banned.sshd || []);
+    // Only sync (and thus potentially delete) ssh_banned_ips rows when this poll actually got a
+    // confirmed sshd jail listing — `banned` has no 'sshd' key at all when STATUS_SCRIPT couldn't
+    // even enumerate jails (sudo -n hiccup, fail2ban mid-restart), which used to fall through to
+    // `banned.sshd || []` and get treated as "confirmed zero currently banned", silently wiping
+    // every row on a single transient failure even though the real ban (bantime -1, permanent)
+    // never actually lifted. `banned.sshd` being a present-but-empty array is a genuine "currently
+    // zero banned" report and still clears correctly.
+    if (Object.prototype.hasOwnProperty.call(banned, 'sshd')) {
+      await syncSshBannedIps(vm, banned.sshd);
+    }
   } catch (e) {
     console.error(`[fail2ban] ${vm.name} (${vm.ip_address}): ${e.message}`);
   } finally {

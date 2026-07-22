@@ -699,7 +699,14 @@ const deleteBannedIp = db.prepare('DELETE FROM waf_banned_ips WHERE vm_id = ? AN
 // self-heals that gap on the very next poll instead of leaving it stuck — matching the requirement
 // that an excepted IP must not stay blocked, with the unban logged as a warning, not silently.
 async function syncBannedIps(vm, ssh) {
-  const { ips } = await wafManager.listBannedIpsViaSsh(ssh).catch(() => ({ ips: [] }));
+  const { ips, error } = await wafManager.listBannedIpsViaSsh(ssh).catch((e) => ({ ips: [], error: e.message }));
+  // `error` covers both "jail genuinely not installed" and "the status command itself failed this
+  // poll" (sudo/SSH hiccup, fail2ban mid-restart) — parseBannedIpsOutput can't tell those apart from
+  // stdout alone. Treating either as "confirmed zero currently banned" used to silently wipe every
+  // row in waf_banned_ips on a single transient failure, even though the real fail2ban ban (bantime
+  // -1, permanent) never actually lifted — only the dashboard's bookkeeping did. Bans must only ever
+  // be cleared here on a genuine, successful listing, or explicitly via the unban/exception routes.
+  if (error) return;
   const exceptions = await wafManager.getExceptions();
   const currentSet = new Set();
   for (const ip of ips) {
