@@ -1274,6 +1274,17 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_source_metric (source_type(50), source_id, metric(50), status)"); } catch (e) { if (e.errno !== 1061) throw e; }
   try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_source_rule (source_type(50), source_id, rule_id, status)"); } catch (e) { if (e.errno !== 1061) throw e; }
   try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_status (status)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
+  // routes/security.js's GET /banned-ips aggregates ssh_login_events (WHERE event_type='failed'
+  // GROUP BY source_id, src_ip) to show "why is this IP banned" context — with 10M+ rows in
+  // production (continuous internet SSH brute-force scanning against the monitored fleet, ~27k
+  // events/HOUR — the table doing its job, not a bug), this was a full table scan + filesort
+  // taking 33+ seconds for just 56 result rows. Confirmed live: this exact composite index turns
+  // it into an index-only ref scan, 446ms, no time-window trade-off needed (full history still
+  // aggregated). event_type/src_ip are TEXT columns needing prefix lengths to be indexable.
+  // NOTE: ADD INDEX on a 10M+ row table took ~67s in testing — expect the app to take noticeably
+  // longer than usual to come up after this migration runs once.
+  try { await pool.query("ALTER TABLE ssh_login_events ADD INDEX idx_ssh_events_failed_grouping (event_type(20), source_id, src_ip(45), occurred_at)"); } catch (e) { if (e.errno !== 1061) throw e; }
 }
 
 async function seedIfEmpty() {

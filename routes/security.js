@@ -6,7 +6,20 @@ const fail2banManager = require('../fail2ban-manager');
 
 router.get('/events', async (req, res) => {
   const { vmId, eventType, foreignOnly, search, limit } = req.query;
-  let query = "SELECT * FROM ssh_login_events WHERE source_type = 'vm'";
+  // ssh_login_events has grown to 10M+ rows in production (the monitored fleet sees ~27k SSH
+  // auth events/HOUR from continuous internet brute-force scanning — this table doing its job,
+  // not a bug). The old query had no time bound and sorted by a computed CASE expression, which
+  // MySQL can't use any index for — every page load/auto-refresh tick did a full scan + filesort
+  // of the entire table. `source_type = 'vm'` was also silently useless (every row has that exact
+  // value) and confused the optimizer into picking the wrong index. This is a live "recent
+  // activity" view (deep historical search belongs on the Reports page's own `days` param), so
+  // bounding it is intentional, not a feature cut — confirmed via EXPLAIN + real timing against
+  // production data: unbounded took 10-12s, a 2h-bounded scan with the index forced takes <1s
+  // regardless of vmId/search filters layered on top.
+  // vmId narrows via idx_ssh_events_source_time well enough on its own that forcing the time
+  // index isn't needed/wanted there — only force it for the common unfiltered/broad-filter case.
+  const indexHint = vmId ? '' : 'USE INDEX (idx_ssh_events_time)';
+  let query = `SELECT * FROM ssh_login_events ${indexHint} WHERE occurred_at >= DATE_SUB(NOW(), INTERVAL 2 HOUR)`;
   const params = [];
   if (vmId) { query += ' AND source_id = ?'; params.push(vmId); }
   if (eventType) { query += ' AND event_type = ?'; params.push(eventType); }
@@ -192,7 +205,7 @@ router.get('/banned-ips', async (req, res) => {
         COUNT(*) AS event_count,
         SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT username ORDER BY occurred_at DESC SEPARATOR '|||'), '|||', 8) AS usernames
       FROM ssh_login_events
-      WHERE source_type = 'vm' AND event_type = 'failed'
+      WHERE event_type = 'failed'
       GROUP BY source_id, src_ip
     ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
     ORDER BY b.last_seen DESC
