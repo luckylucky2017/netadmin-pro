@@ -22,18 +22,32 @@ function toSqlDatetime(date) {
 
 const insertEvent = db.prepare(`
   INSERT INTO waf_events (vm_id, vm_name, domain, event_type, src_ip, country, is_foreign, method, path, status_code, user_agent, hit_count, blocked, occurred_at, source, crowdsec_scenario)
-  VALUES (?, ?, NULL, 'scan', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'crowdsec', ?)
+  VALUES (?, ?, ?, 'scan', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'crowdsec', ?)
 `);
+const findDomainByLogPath = db.prepare('SELECT domain FROM waf_domain_logs WHERE vm_id = ? AND log_path = ?');
 
 // alert.events[0].meta is an array of {key, value} pairs (see a real captured alert during rollout
-// testing: http_path/http_verb/http_status/http_user_agent) — flattened once per alert for the
-// waf_events row's method/path/status_code/user_agent columns, same fields the old detector fills.
+// testing: http_path/http_verb/http_status/http_user_agent/datasource_path) — flattened once per
+// alert for the waf_events row's method/path/status_code/user_agent columns, same fields the old
+// detector fills.
 function firstEventMeta(alert) {
   const meta = alert?.events?.[0]?.meta;
   if (!Array.isArray(meta)) return {};
   const out = {};
   for (const { key, value } of meta) out[key] = value;
   return out;
+}
+
+// CrowdSec's alert has no notion of "domain" — it only knows which log FILE the hit came from
+// (meta.datasource_path, e.g. "/var/log/nginx/access_fds.vn.log"). nginx-waf-collector.js already
+// maps every discovered per-domain log file to its domain in waf_domain_logs (same discovery that
+// generated this VM's crowdsec acquisition config in the first place — see this file's header
+// comment) — reusing that mapping here instead of leaving domain NULL, so a CrowdSec-sourced row is
+// just as attributable to a specific site as a netadmin-sourced one.
+async function resolveDomain(vm, datasourcePath) {
+  if (!datasourcePath) return null;
+  const row = await findDomainByLogPath.get(vm.id, datasourcePath);
+  return row?.domain || null;
 }
 
 // A JWT machine token, cached in-memory and refreshed on expiry/401 — avoids logging in on every
@@ -82,7 +96,7 @@ async function fetchNewAlerts(settings) {
     .sort((a, b) => a.id - b.id);
 }
 
-async function raiseCrowdsecAlert(vm, ip, country, scenario, blockResult, autoBlockOn) {
+async function raiseCrowdsecAlert(vm, ip, country, scenario, domain, blockResult, autoBlockOn) {
   const already = await db.prepare(`
     SELECT id FROM alerts WHERE metric = 'waf_crowdsec' AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
   `).get(vm.id, ip);
@@ -93,12 +107,13 @@ async function raiseCrowdsecAlert(vm, ip, country, scenario, blockResult, autoBl
       : ` — CHƯA chặn được (${blockResult?.error || 'lỗi không rõ'})`)
     : ' — chỉ cảnh báo (tự động chặn CrowdSec đang tắt cho VM này)';
   const scenarioLabel = scenario ? scenario.replace(/^crowdsecurity\//, '') : 'hành vi bất thường';
+  const site = domain ? `"${domain}" trên VM "${vm.name}"` : `VM "${vm.name}"`;
   await db.prepare(`
     INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
     VALUES ('security', 'critical', ?, ?, 'vcenter_vm', ?, ?, 'waf_crowdsec', ?, 'open')
   `).run(
     'CrowdSec phát hiện tấn công',
-    `IP ${ip}${country ? ` (${country})` : ''} bị CrowdSec gắn cờ "${scenarioLabel}" trên VM "${vm.name}"${action}`,
+    `IP ${ip}${country ? ` (${country})` : ''} bị CrowdSec gắn cờ "${scenarioLabel}" tới ${site}${action}`,
     vm.id, vm.name, ip,
   );
 }
@@ -112,6 +127,7 @@ async function ingestAlert(vm, alert) {
   const meta = firstEventMeta(alert);
   const statusCode = meta.http_status ? Number(meta.http_status) : null;
   const occurredAt = toSqlDatetime(new Date(alert.created_at));
+  const domain = await resolveDomain(vm, meta.datasource_path);
 
   let blockResult = null;
   if (vm.crowdsec_auto_block) {
@@ -120,11 +136,11 @@ async function ingestAlert(vm, alert) {
   const blocked = blockResult?.ok ? 1 : 0;
 
   await insertEvent.run(
-    vm.id, vm.name, ip, country, isForeign,
+    vm.id, vm.name, domain, ip, country, isForeign,
     meta.http_verb || null, meta.http_path || null, statusCode, meta.http_user_agent || null,
     alert.events_count || 1, blocked, occurredAt, scenario,
   );
-  await raiseCrowdsecAlert(vm, ip, country, scenario, blockResult, !!vm.crowdsec_auto_block);
+  await raiseCrowdsecAlert(vm, ip, country, scenario, domain, blockResult, !!vm.crowdsec_auto_block);
 }
 
 async function pollAlerts() {
