@@ -3737,7 +3737,7 @@ function renderWafEventRows() {
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(ev.occurred_at)}</span></td>
           <td style="font-weight:600">${ev.vm_name || '—'}</td>
-          <td>${ev.domain ? escHtml(ev.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${ev.domain ? escHtml(ev.domain) : '<span style="color:var(--fg-dim)" title="Request không khớp Host header của domain nào đã cấu hình — rơi vào vhost mặc định của nginx">(không xác định)</span>'}</td>
           <td><span class="severity ${WAF_EVENT_CLASS[ev.event_type] || 'unknown'}"><span class="dot"></span>${WAF_EVENT_LABEL[ev.event_type] || ev.event_type}</span></td>
           <td>${ev.source === 'crowdsec'
             ? `<span class="status online" title="${ev.crowdsec_scenario ? escAttr(ev.crowdsec_scenario) : ''}"><span class="dot"></span>CrowdSec</span>`
