@@ -40,10 +40,16 @@ function firstEventMeta(alert) {
 // 45s poll tick. Module-level (not per-call state) since there's only ever one hub configured.
 let cachedToken = null; // { token, expiresAt }
 
+// CrowdSec's LAPI middleware rejects any request with no (or Node fetch's default) User-Agent header
+// — a bare 401 "incorrect Username or Password" even when the credentials are correct, confirmed by
+// diffing a working curl request against an otherwise-identical Node fetch/http request during
+// rollout testing. Every request to the hub must set this explicitly.
+const USER_AGENT = 'netadmin-pro-crowdsec-collector/1.0';
+
 async function login(settings) {
   const res = await fetch(`${settings.lapi_url}/v1/watchers/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
     body: JSON.stringify({ machine_id: settings.machine_id, password: settings.machine_password }),
   });
   if (!res.ok) throw new Error(`Đăng nhập CrowdSec LAPI thất bại (HTTP ${res.status})`);
@@ -64,10 +70,10 @@ async function getToken(settings) {
 async function fetchNewAlerts(settings) {
   const token = await getToken(settings);
   const url = `${settings.lapi_url}/v1/alerts?limit=200`;
-  let res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  let res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, 'User-Agent': USER_AGENT } });
   if (res.status === 401) {
     const fresh = await login(settings);
-    res = await fetch(url, { headers: { Authorization: `Bearer ${fresh}` } });
+    res = await fetch(url, { headers: { Authorization: `Bearer ${fresh}`, 'User-Agent': USER_AGENT } });
   }
   if (!res.ok) throw new Error(`Poll CrowdSec alerts thất bại (HTTP ${res.status})`);
   const alerts = await res.json();
