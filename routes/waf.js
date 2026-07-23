@@ -163,17 +163,25 @@ router.get('/traffic', async (req, res) => {
 const SAFE_LOG_PATH_RE = wafManager.SAFE_LOG_PATH_RE;
 
 router.patch('/vms/:id', requirePermission('waf.manage'), async (req, res) => {
-  const vm = await db.prepare('SELECT id, name, crowdsec_machine_id FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  const vm = await db.prepare(`
+    SELECT id, name, waf_enabled, waf_log_path, waf_auto_block, waf_trust_xff, crowdsec_machine_id, crowdsec_auto_block
+    FROM vcenter_vms WHERE id = ?
+  `).get(req.params.id);
   if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
-  const enabled = req.body?.enabled ? 1 : 0;
-  const logPath = String(req.body?.logPath || '/var/log/nginx/access.log').trim();
-  const autoBlock = req.body?.autoBlock ? 1 : 0;
-  const trustXff = req.body?.trustXff ? 1 : 0;
+  // Every field falls back to the VM's CURRENT value when the request body omits it — this route is
+  // shared by 2 different save actions in the UI (the main "Quản lý giám sát" row, which always sends
+  // every waf_* field, and the CrowdSec-only modal, which only ever sends crowdsecMachineId/
+  // crowdsecAutoBlock) — without this fallback, saving from the CrowdSec modal would silently reset
+  // waf_enabled/waf_auto_block/waf_log_path/waf_trust_xff back to off/default.
+  const enabled = req.body?.enabled != null ? (req.body.enabled ? 1 : 0) : vm.waf_enabled;
+  const logPath = req.body?.logPath != null ? String(req.body.logPath).trim() : (vm.waf_log_path || '/var/log/nginx/access.log');
+  const autoBlock = req.body?.autoBlock != null ? (req.body.autoBlock ? 1 : 0) : vm.waf_auto_block;
+  const trustXff = req.body?.trustXff != null ? (req.body.trustXff ? 1 : 0) : vm.waf_trust_xff;
   // CrowdSec fields are independent of the waf_* ones above (a VM can run the old detector, the
   // CrowdSec agent, both, or neither) — crowdsecMachineId is set once, by hand, after registering the
   // VM's agent on the hub (see crowdsec-collector.js's header comment); '' clears it back to unmapped.
   const crowdsecMachineId = req.body?.crowdsecMachineId != null ? String(req.body.crowdsecMachineId).trim().slice(0, 64) : vm.crowdsec_machine_id;
-  const crowdsecAutoBlock = req.body?.crowdsecAutoBlock ? 1 : 0;
+  const crowdsecAutoBlock = req.body?.crowdsecAutoBlock != null ? (req.body.crowdsecAutoBlock ? 1 : 0) : vm.crowdsec_auto_block;
   if (enabled && !SAFE_LOG_PATH_RE.test(logPath)) {
     return res.status(400).json({ error: 'Đường dẫn log không hợp lệ — phải là đường dẫn tuyệt đối, chỉ gồm chữ/số/_-./ ' });
   }
