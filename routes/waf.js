@@ -70,7 +70,8 @@ router.get('/stats', async (req, res) => {
 router.get('/vms', async (req, res) => {
   const vms = await db.prepare(`
     SELECT id, moref, name, power_state, ip_address, guest_family, ssh_credential_id, ssh_user, ssh_port,
-           waf_enabled, waf_log_path, waf_auto_block, waf_trust_xff, waf_jail_status, waf_jail_checked_at, waf_jail_error
+           waf_enabled, waf_log_path, waf_auto_block, waf_trust_xff, waf_jail_status, waf_jail_checked_at, waf_jail_error,
+           crowdsec_machine_id, crowdsec_auto_block
     FROM vcenter_vms ORDER BY name ASC
   `).all();
   res.json(vms);
@@ -162,21 +163,58 @@ router.get('/traffic', async (req, res) => {
 const SAFE_LOG_PATH_RE = wafManager.SAFE_LOG_PATH_RE;
 
 router.patch('/vms/:id', requirePermission('waf.manage'), async (req, res) => {
-  const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(req.params.id);
+  const vm = await db.prepare('SELECT id, name, crowdsec_machine_id FROM vcenter_vms WHERE id = ?').get(req.params.id);
   if (!vm) return res.status(404).json({ error: 'Không tìm thấy VM' });
   const enabled = req.body?.enabled ? 1 : 0;
   const logPath = String(req.body?.logPath || '/var/log/nginx/access.log').trim();
   const autoBlock = req.body?.autoBlock ? 1 : 0;
   const trustXff = req.body?.trustXff ? 1 : 0;
+  // CrowdSec fields are independent of the waf_* ones above (a VM can run the old detector, the
+  // CrowdSec agent, both, or neither) — crowdsecMachineId is set once, by hand, after registering the
+  // VM's agent on the hub (see crowdsec-collector.js's header comment); '' clears it back to unmapped.
+  const crowdsecMachineId = req.body?.crowdsecMachineId != null ? String(req.body.crowdsecMachineId).trim().slice(0, 64) : vm.crowdsec_machine_id;
+  const crowdsecAutoBlock = req.body?.crowdsecAutoBlock ? 1 : 0;
   if (enabled && !SAFE_LOG_PATH_RE.test(logPath)) {
     return res.status(400).json({ error: 'Đường dẫn log không hợp lệ — phải là đường dẫn tuyệt đối, chỉ gồm chữ/số/_-./ ' });
   }
-  await db.prepare('UPDATE vcenter_vms SET waf_enabled = ?, waf_log_path = ?, waf_auto_block = ?, waf_trust_xff = ? WHERE id = ?')
-    .run(enabled, logPath, autoBlock, trustXff, vm.id);
+  await db.prepare('UPDATE vcenter_vms SET waf_enabled = ?, waf_log_path = ?, waf_auto_block = ?, waf_trust_xff = ?, crowdsec_machine_id = ?, crowdsec_auto_block = ? WHERE id = ?')
+    .run(enabled, logPath, autoBlock, trustXff, crowdsecMachineId || null, crowdsecAutoBlock, vm.id);
   await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name,
     enabled
       ? `Bật giám sát WAF (log dự phòng: ${logPath}, tự động chặn: ${autoBlock ? 'bật' : 'tắt'}, tin X-Forwarded-For: ${trustXff ? 'bật' : 'tắt'})`
       : 'Tắt giám sát WAF');
+  res.json({ message: 'OK' });
+});
+
+// Where crowdsec-collector.js reaches the CrowdSec LAPI hub — see database.js's crowdsec_settings
+// comment. machine_password never leaves the server (redacted to its last 4 chars), same convention
+// as ssh_credentials.password elsewhere in this app.
+router.get('/crowdsec/settings', requirePermission('waf.manage'), async (req, res) => {
+  const row = await db.prepare('SELECT lapi_url, machine_id, machine_password, last_alert_id FROM crowdsec_settings WHERE id = 1').get();
+  res.json({
+    lapiUrl: row?.lapi_url || '',
+    machineId: row?.machine_id || '',
+    machinePasswordSet: !!row?.machine_password,
+    machinePasswordPreview: row?.machine_password ? `••••${row.machine_password.slice(-4)}` : '',
+    lastAlertId: row?.last_alert_id || 0,
+  });
+});
+
+router.patch('/crowdsec/settings', requirePermission('waf.manage'), async (req, res) => {
+  const lapiUrl = String(req.body?.lapiUrl || '').trim().replace(/\/+$/, '');
+  const machineId = String(req.body?.machineId || '').trim();
+  const machinePassword = req.body?.machinePassword != null ? String(req.body.machinePassword) : undefined;
+  if (lapiUrl && !/^https?:\/\//.test(lapiUrl)) {
+    return res.status(400).json({ error: 'LAPI URL phải bắt đầu bằng http:// hoặc https://' });
+  }
+  if (machinePassword !== undefined) {
+    await db.prepare('UPDATE crowdsec_settings SET lapi_url = ?, machine_id = ?, machine_password = ? WHERE id = 1')
+      .run(lapiUrl || null, machineId || null, machinePassword || null);
+  } else {
+    // Password field left blank in the form — keep whatever's already stored, only update url/id.
+    await db.prepare('UPDATE crowdsec_settings SET lapi_url = ?, machine_id = ? WHERE id = 1').run(lapiUrl || null, machineId || null);
+  }
+  await logActivity(req.user, 'UPDATE', 'crowdsec_settings', 1, 'CrowdSec', `Cập nhật cấu hình CrowdSec LAPI (${lapiUrl || 'trống'})`);
   res.json({ message: 'OK' });
 });
 

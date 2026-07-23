@@ -580,6 +580,23 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_fail2ban_profile_name (name)
   );
 
+  -- Single global row (id fixed at 1) holding how crowdsec-collector.js reaches the CrowdSec LAPI hub
+  -- — lapi_url + the netadmin-pro "machine" credentials (registered on the hub via cscli machines
+  -- add, NOT a bouncer key: /v1/alerts, which is what the collector polls for per-alert detail
+  -- including machine_id/scenario/source ip, requires machine-level JWT auth, not a bouncer API key).
+  -- machine_password sits in plaintext here, same convention as ssh_credentials.password — never
+  -- returned to the client (see routes/waf.js's GET /crowdsec/settings, which redacts it).
+  -- last_alert_id is the polling cursor (CrowdSec alert IDs are a monotonically increasing sequence
+  -- on the hub), so a restart doesn't reprocess history.
+  CREATE TABLE IF NOT EXISTS crowdsec_settings (
+    id INT PRIMARY KEY,
+    lapi_url VARCHAR(255),
+    machine_id VARCHAR(64),
+    machine_password VARCHAR(255),
+    last_alert_id BIGINT NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  );
+
   -- Outbound (VM-initiated) established TCP connections, refreshed each collection cycle. One row
   -- per unique (vm, remote ip, remote port) currently open — not an ever-growing event log — with
   -- first_seen/last_seen tracking so stale (closed) connections can be pruned.
@@ -971,6 +988,24 @@ async function ensureSchemaAndMigrations() {
   // CREATE TABLE comment and nginx-waf-collector.js's header comment for why.
   try { await pool.query("ALTER TABLE waf_domain_logs ADD COLUMN last_byte_offset BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
 
+  // CrowdSec integration (crowdsec-collector.js) — a second, independently-running detection source
+  // that writes into this SAME waf_events/alerts pipeline rather than a parallel table, so the
+  // existing UI/ban/exception machinery needs no duplication. source distinguishes which engine
+  // produced a row ('netadmin' = the original JS threshold detector, 'crowdsec' = polled from a
+  // CrowdSec alert); crowdsec_scenario carries the raw upstream scenario name (e.g.
+  // "crowdsecurity/http-sqli-probing") for rows where source='crowdsec', NULL otherwise.
+  try { await pool.query("ALTER TABLE waf_events ADD COLUMN source VARCHAR(16) NOT NULL DEFAULT 'netadmin'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE waf_events ADD COLUMN crowdsec_scenario VARCHAR(120)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // crowdsec_machine_id is the CrowdSec machine-id this VM's local agent registered under on the hub
+  // — set manually by an admin after running `cscli machines add` on the hub (no in-app "install
+  // agent" automation for the initial rollout). crowdsec-collector.js uses it to map an incoming
+  // alert's machine_id back to a vm_id. crowdsec_auto_block is a SEPARATE opt-in from the legacy
+  // waf_auto_block (defaults off on every VM) — CrowdSec-sourced detections only raise an alert until
+  // an admin explicitly turns this on per VM, after validating against real traffic.
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN crowdsec_machine_id VARCHAR(64)"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE vcenter_vms ADD COLUMN crowdsec_auto_block INT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Interface + OpenVPN client bandwidth (in/out bps) — pfSense's API only exposes cumulative byte
   // counters, not a rate, so bps is derived from the delta against the previous poll's snapshot,
   // same convention as servers.snmp_if_prev_snapshot in snmp-collector.js. Snapshots live on
@@ -1024,6 +1059,7 @@ async function ensureSchemaAndMigrations() {
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.
   await pool.query('INSERT IGNORE INTO fail2ban_config (id) VALUES (1)');
+  await pool.query('INSERT IGNORE INTO crowdsec_settings (id) VALUES (1)');
 
   // Which fail2ban_config_profiles row (if any) this VM is assigned to — NULL means "no profile,
   // governed by the global default (or a per-VM override)". See fail2ban_config_profiles' own

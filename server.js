@@ -164,7 +164,8 @@ if (!process.env.SESSION_SECRET) {
   // .gitignore) to stop this instance's periodic polling/auto-block loops. Meant for a local dev
   // instance pointed at the SAME real infrastructure a prod instance also manages — every one of
   // these collectors opens real SSH connections to real VMs, and 3 of them (ssh-security-collector,
-  // fail2ban-collector, nginx-waf-collector) actively call fail2ban-client banip/unbanip/reload —
+  // fail2ban-collector, nginx-waf-collector — plus crowdsec-collector, once a VM's crowdsec_auto_block
+  // is turned on) actively call fail2ban-client banip/unbanip/reload —
   // running both instances' collectors unattended in parallel means two independent processes
   // deciding to mutate the same real fail2ban jails, based on two different (local vs prod)
   // databases' worth of exceptions/state, which can race or disagree. Manually invoking a specific
@@ -184,6 +185,7 @@ if (!process.env.SESSION_SECRET) {
     require('./snmp-collector').start();
     require('./pfsense-collector').start();
     require('./nginx-waf-collector').start();
+    require('./crowdsec-collector').start();
     require('./vuln-scanner').start();
     require('./trivy-scanner').start();
     require('./trivy-scanner').startVersionCheckScheduler();

@@ -3728,7 +3728,7 @@ function renderWafEventRows() {
   const events = paginateRows(sortedEvents, wafEventPagination);
   const rowOffset = (wafEventPagination.page - 1) * wafEventPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('Dạng tấn công', 'attack_category', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Cảnh báo</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Thời gian', 'occurred_at', wafEventSortState, 'toggleWafEventSort')}${thSort('VM', 'vm_name', wafEventSortState, 'toggleWafEventSort')}${thSort('Domain', 'domain', wafEventSortState, 'toggleWafEventSort')}${thSort('Loại', 'event_type', wafEventSortState, 'toggleWafEventSort')}${thSort('Nguồn', 'source', wafEventSortState, 'toggleWafEventSort')}${thSort('Dạng tấn công', 'attack_category', wafEventSortState, 'toggleWafEventSort')}${thSort('IP nguồn', 'src_ip', wafEventSortState, 'toggleWafEventSort')}${thSort('Quốc gia', 'country', wafEventSortState, 'toggleWafEventSort')}<th>Đường dẫn</th>${thSort('Số lần', 'hit_count', wafEventSortState, 'toggleWafEventSort')}${thSort('Trạng thái', 'blocked', wafEventSortState, 'toggleWafEventSort')}<th>Cảnh báo</th><th>Hành động</th></tr></thead>
       <tbody>${events.map((ev, i) => {
         const blockedForeign = !!ev.blocked && !!ev.is_foreign;
         const recent = blockedForeign && isRecentTimestamp(ev.occurred_at, 300000); // blink for ~5 min after auto-block
@@ -3739,7 +3739,10 @@ function renderWafEventRows() {
           <td style="font-weight:600">${ev.vm_name || '—'}</td>
           <td>${ev.domain ? escHtml(ev.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td><span class="severity ${WAF_EVENT_CLASS[ev.event_type] || 'unknown'}"><span class="dot"></span>${WAF_EVENT_LABEL[ev.event_type] || ev.event_type}</span></td>
-          <td>${wafAttackCategoryBadge(ev.attack_category) || '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td>${ev.source === 'crowdsec'
+            ? `<span class="status online" title="${ev.crowdsec_scenario ? escAttr(ev.crowdsec_scenario) : ''}"><span class="dot"></span>CrowdSec</span>`
+            : '<span class="status unknown"><span class="dot"></span>NetAdmin</span>'}</td>
+          <td>${wafAttackCategoryBadge(ev.attack_category) || (ev.crowdsec_scenario ? `<span style="font-size:12px;color:var(--fg-muted)" title="${escAttr(ev.crowdsec_scenario)}">${escHtml(ev.crowdsec_scenario.replace(/^crowdsecurity\//, ''))}</span>` : '<span style="color:var(--fg-dim)">—</span>')}</td>
           <td>${ev.src_ip ? `<span style="font-family:monospace">${escHtml(ev.src_ip)}</span>` : '<span style="color:var(--fg-dim)">— (phân tán)</span>'}</td>
           <td>${ev.country || '—'}</td>
           <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${ev.path ? escAttr(ev.path) : ''}">${ev.path ? escHtml(ev.path).slice(0, 60) : '—'}</span></td>
@@ -3936,6 +3939,9 @@ async function renderWafManage() {
         <p style="margin-bottom:6px">Bật/tắt jail WAF (chặn IP) đã chuyển sang trang <a href="#" onclick="navigate('fail2banConfig');return false" style="color:var(--accent)">Cấu hình Fail2ban</a> → tab "Quản lý Jail" — việc PHÁT HIỆN dò quét/DoS/DDoS do hệ thống này tự làm, không phụ thuộc fail2ban.</p>
         <p style="margin-bottom:0">Cột <strong>Tin X-Forwarded-For</strong>: CHỈ bật nếu VM này nằm sau 1 reverse proxy/load balancer thật (khi đó $remote_addr trong log luôn là IP của proxy, không phải khách thật) — bật nhầm cho VM nhận traffic trực tiếp sẽ cho phép giả mạo header để đổ lỗi/chặn nhầm IP bất kỳ.</p>
       </div>
+      <div style="padding:10px 16px 0;display:flex;justify-content:flex-end">
+        <button class="btn btn-secondary btn-sm" data-permission="waf.manage" onclick="openCrowdsecSettingsModal()">Cấu hình CrowdSec LAPI</button>
+      </div>
       <div class="table-toolbar">
         <div class="search-box">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -3968,7 +3974,7 @@ function renderWafManageRows() {
   const rowOffset = (wafManagePagination.page - 1) * wafManagePagination.pageSize;
   wrap.innerHTML = `<table>
         <thead><tr>
-          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}${thSort('Tài khoản SSH', 'ssh_user', wafManageSortState, 'toggleWafManageSort')}${thSort('Port', 'ssh_port', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th><th>Hành động</th></tr></thead>
+          <th>#</th>${thSort('Tên VM', 'name', wafManageSortState, 'toggleWafManageSort')}${thSort('IP', 'ip_address', wafManageSortState, 'toggleWafManageSort')}${thSort('Tài khoản SSH', 'ssh_user', wafManageSortState, 'toggleWafManageSort')}${thSort('Port', 'ssh_port', wafManageSortState, 'toggleWafManageSort')}<th>Domain đã dò</th><th>Log dự phòng</th><th>Bật giám sát</th><th>Tự động chặn</th><th>Tin X-Forwarded-For</th><th>CrowdSec</th><th>Hành động</th></tr></thead>
         <tbody>${vms.map((v, i) => {
           const eligible = !!(v.ssh_credential_id && v.ip_address);
           return `<tr data-vm-id="${v.id}">
@@ -3982,6 +3988,9 @@ function renderWafManageRows() {
             <td><label class="toggle-switch" data-permission="waf.manage" title="${eligible ? '' : 'Cần gán tài khoản kết nối SSH trước (trang Giám sát bất thường)'}"><input type="checkbox" class="waf-enabled" data-id="${v.id}" ${v.waf_enabled ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="Tự động chặn IP khi phát hiện tấn công"><input type="checkbox" class="waf-auto-block" data-id="${v.id}" ${v.waf_auto_block ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
             <td><label class="toggle-switch" data-permission="waf.manage" title="CHỈ bật nếu VM này sau reverse proxy/load balancer thật"><input type="checkbox" class="waf-trust-xff" data-id="${v.id}" ${v.waf_trust_xff ? 'checked' : ''} ${eligible ? '' : 'disabled'}><span class="toggle-slider"></span></label></td>
+            <td><button class="btn-icon" data-permission="waf.manage" title="${v.crowdsec_machine_id ? `Đã gán agent CrowdSec: ${v.crowdsec_machine_id}` : 'Chưa gán agent CrowdSec'}" onclick="openCrowdsecVmModal(${v.id})">
+              <span class="status ${v.crowdsec_machine_id ? (v.crowdsec_auto_block ? 'online' : 'warning') : 'unknown'}"><span class="dot"></span>${v.crowdsec_machine_id ? (v.crowdsec_auto_block ? 'Tự chặn' : 'Chỉ cảnh báo') : 'Chưa gán'}</span>
+            </button></td>
             <td><div class="actions">
               <button class="btn ${v.waf_enabled ? 'btn-primary' : 'btn-secondary'} btn-sm" title="${v.waf_enabled ? 'Đã lưu — đang giám sát WAF' : 'Chưa lưu'}" data-permission="waf.manage" ${eligible ? '' : 'disabled'} onclick="saveWafConfig(${v.id}, this)">Lưu</button>
               <button class="btn-icon" data-permission="waf.jail.check" title="Xem IP đang bị chặn" ${eligible ? '' : 'disabled'} onclick="openWafBannedIpsModal(${v.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></button>
@@ -4007,6 +4016,87 @@ async function saveWafConfig(id, btn) {
     await api(`/waf/vms/${id}`, 'PATCH', { enabled, logPath, autoBlock, trustXff });
     toast(enabled ? 'Đã bật giám sát WAF' : 'Đã tắt giám sát WAF', 'success');
     renderWaf();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// Per-VM CrowdSec mapping — a small modal rather than 2 more columns crammed into an already-wide
+// table (mirrors openWafDomainsModal/openWafBannedIpsModal's icon-button-opens-modal pattern below).
+// crowdsec_machine_id is set by hand after registering the VM's agent on the hub (`cscli machines
+// add <name> --auto -f <file>` — see crowdsec-collector.js's header comment for the full rollout
+// steps; there's no in-app "install agent" automation for the initial rollout).
+function openCrowdsecVmModal(vmId) {
+  const vm = wafState.vms.find(v => v.id === vmId);
+  if (!vm) return;
+  openModal(`CrowdSec — ${vm.name}`, `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <p style="font-size:13px;color:var(--fg-dim);margin:0">Machine-id được cấp khi đăng ký agent CrowdSec của VM này trên hub trung tâm (<code>cscli machines add</code>). Dán đúng tên machine để hệ thống gắn được cảnh báo CrowdSec vào đúng VM.</p>
+      <label style="font-size:13px;font-weight:600">Machine-id trên hub CrowdSec
+        <input type="text" id="crowdsecMachineIdInput" value="${escAttr(vm.crowdsec_machine_id || '')}" placeholder="vd: proxy1-fds-vm3" style="width:100%;margin-top:6px;font-family:monospace">
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600">
+        <label class="toggle-switch"><input type="checkbox" id="crowdsecAutoBlockInput" ${vm.crowdsec_auto_block ? 'checked' : ''}><span class="toggle-slider"></span></label>
+        Tự động chặn IP khi CrowdSec phát hiện tấn công
+      </label>
+      <p style="font-size:12px;color:var(--fg-dim);margin:0">Khi tắt: cảnh báo CrowdSec vẫn ghi nhận đầy đủ vào tab "Sự kiện" và trang Cảnh báo, chỉ KHÔNG tự gọi chặn IP qua fail2ban — nên để tắt cho tới khi đã theo dõi và tin tưởng độ chính xác.</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="saveCrowdsecVmConfig(${vm.id}, this)">Lưu</button>
+      </div>
+    </div>
+  `);
+}
+
+async function saveCrowdsecVmConfig(vmId, btn) {
+  const machineId = document.getElementById('crowdsecMachineIdInput')?.value.trim() || '';
+  const autoBlock = !!document.getElementById('crowdsecAutoBlockInput')?.checked;
+  btn.disabled = true;
+  try {
+    await api(`/waf/vms/${vmId}`, 'PATCH', { crowdsecMachineId: machineId, crowdsecAutoBlock: autoBlock });
+    toast('Đã lưu cấu hình CrowdSec', 'success');
+    closeModal();
+    renderWaf();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// Global (not per-VM) — where crowdsec-collector.js reaches the hub. See routes/waf.js's
+// GET/PATCH /crowdsec/settings; machinePassword is always redacted on read, only overwritten when
+// the field is actually filled in (blank = keep the currently-stored one).
+async function openCrowdsecSettingsModal() {
+  openModal('Cấu hình CrowdSec LAPI', `<div class="loading"><div class="spinner"></div></div>`);
+  try {
+    const s = await api('/waf/crowdsec/settings');
+    document.getElementById('modalBody').innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <label style="font-size:13px;font-weight:600">LAPI URL (hub trung tâm)
+          <input type="text" id="crowdsecLapiUrlInput" value="${escAttr(s.lapiUrl)}" placeholder="http://192.168.68.110:8080" style="width:100%;margin-top:6px;font-family:monospace">
+        </label>
+        <label style="font-size:13px;font-weight:600">Machine-id (netadmin-pro)
+          <input type="text" id="crowdsecMachineIdSettingInput" value="${escAttr(s.machineId)}" placeholder="netadmin-pro" style="width:100%;margin-top:6px;font-family:monospace">
+        </label>
+        <label style="font-size:13px;font-weight:600">Machine password
+          <input type="password" id="crowdsecMachinePasswordInput" placeholder="${s.machinePasswordSet ? `Đang lưu ${s.machinePasswordPreview} — bỏ trống để giữ nguyên` : 'Chưa cấu hình'}" style="width:100%;margin-top:6px;font-family:monospace">
+        </label>
+        <p style="font-size:12px;color:var(--fg-dim);margin:0">Đăng ký machine này trên hub bằng <code>cscli machines add netadmin-pro --auto -f &lt;file&gt;</code> rồi dán đúng machine-id/password vào đây.</p>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveCrowdsecSettings(this)">Lưu</button>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+async function saveCrowdsecSettings(btn) {
+  const lapiUrl = document.getElementById('crowdsecLapiUrlInput')?.value.trim() || '';
+  const machineId = document.getElementById('crowdsecMachineIdSettingInput')?.value.trim() || '';
+  const machinePassword = document.getElementById('crowdsecMachinePasswordInput')?.value || '';
+  const body = { lapiUrl, machineId };
+  if (machinePassword) body.machinePassword = machinePassword;
+  btn.disabled = true;
+  try {
+    await api('/waf/crowdsec/settings', 'PATCH', body);
+    toast('Đã lưu cấu hình CrowdSec LAPI', 'success');
+    closeModal();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
 }
 
