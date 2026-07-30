@@ -105,6 +105,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/chat', requireAuth, require('./routes/chat'));
   app.use('/api/ssh-credentials', requireAuth, require('./routes/ssh-credentials'));
   app.use('/api/settings', requireAuth, require('./routes/settings'));
+  app.use('/api/notification-rules', requireAuth, require('./routes/notification-rules'));
   app.use('/api/pfsense', requireAuth, require('./routes/pfsense'));
   app.use('/api/waf', requireAuth, require('./routes/waf'));
   app.use('/api/reports', requireAuth, require('./routes/reports'));
@@ -186,6 +187,7 @@ if (!process.env.SESSION_SECRET) {
     require('./pfsense-collector').start();
     require('./nginx-waf-collector').start();
     require('./crowdsec-collector').start();
+    require('./notification-dispatcher').start();
     require('./vuln-scanner').start();
     require('./trivy-scanner').start();
     require('./trivy-scanner').startVersionCheckScheduler();

@@ -5196,10 +5196,10 @@ async function renderSettings() {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
   try {
-    const s = await api('/settings');
+    const [s, rules] = await Promise.all([api('/settings'), api('/notification-rules')]);
     c.innerHTML = `
     <div class="page-header">
-      <div><div class="page-title">Cài đặt</div><div class="page-subtitle">Cấu hình AI key và đăng nhập SSO — lưu trong cơ sở dữ liệu, có hiệu lực ngay không cần khởi động lại server</div></div>
+      <div><div class="page-title">Cài đặt</div><div class="page-subtitle">Cấu hình AI key, đăng nhập SSO và kênh gửi thông báo — lưu trong cơ sở dữ liệu, có hiệu lực ngay không cần khởi động lại server</div></div>
     </div>
     <form id="settingsForm" onsubmit="saveSettings(event)" style="max-width:700px">
       <div class="card" style="margin-bottom:16px">
@@ -5230,10 +5230,48 @@ async function renderSettings() {
           <div class="form-group full"><label>User Filter</label><input type="text" name="ldap_user_filter" value="${s.ldap_user_filter || '(sAMAccountName={{username}})'}"></div>
         </div>
       </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Thông báo — Telegram</div>
+        <div class="form-grid">
+          <div class="form-group full"><label>Bot Token ${s.has_telegram_bot_token ? '(để trống nếu giữ nguyên)' : ''}</label>
+            <input type="password" name="telegram_bot_token" placeholder="${s.has_telegram_bot_token ? '••••••••' : '123456:ABC-DEF...'}" autocomplete="new-password"></div>
+          <div class="form-group full"><label>Chat ID</label><input type="text" name="telegram_chat_id" value="${s.telegram_chat_id || ''}" placeholder="-100123456789"></div>
+        </div>
+        <div style="margin-top:10px"><button type="button" class="btn btn-secondary btn-sm" onclick="testNotifyChannel('telegram', this)">Gửi thử</button></div>
+      </div>
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Thông báo — Email (SMTP)</div>
+        <div class="form-grid">
+          <div class="form-group"><label>SMTP Host</label><input type="text" name="smtp_host" value="${s.smtp_host || ''}" placeholder="smtp.gmail.com"></div>
+          <div class="form-group"><label>Port</label><input type="number" name="smtp_port" value="${s.smtp_port || 587}"></div>
+          <div class="form-group"><label>Username</label><input type="text" name="smtp_user" value="${s.smtp_user || ''}"></div>
+          <div class="form-group"><label>Password ${s.has_smtp_password ? '(để trống nếu giữ nguyên)' : ''}</label>
+            <input type="password" name="smtp_password" placeholder="${s.has_smtp_password ? '••••••••' : ''}" autocomplete="new-password"></div>
+          <div class="form-group"><label>Gửi từ (From)</label><input type="text" name="smtp_from" value="${s.smtp_from || ''}" placeholder="alert@example.com"></div>
+          <div class="form-group"><label>Gửi tới (To)</label><input type="text" name="smtp_to" value="${s.smtp_to || ''}" placeholder="admin@example.com"></div>
+          <div class="form-group"><label><input type="checkbox" name="smtp_secure" ${s.smtp_secure ? 'checked' : ''} style="width:auto;margin-right:6px">Dùng TLS/SSL (port 465)</label></div>
+        </div>
+        <div style="margin-top:10px"><button type="button" class="btn btn-secondary btn-sm" onclick="testNotifyChannel('smtp', this)">Gửi thử</button></div>
+      </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Lưu cài đặt</button>
       </div>
-    </form>`;
+    </form>
+
+    <div class="card" style="max-width:700px;margin-top:16px">
+      <div class="card-title">Loại cảnh báo gửi thông báo</div>
+      <div class="page-subtitle" style="margin-bottom:12px">Chọn loại cảnh báo nào sẽ gửi qua Telegram/Email khi phát sinh — bảng lưu riêng, không phụ thuộc form Cài đặt ở trên</div>
+      <table class="data-table">
+        <thead><tr><th>Loại cảnh báo</th><th style="text-align:center">Telegram</th><th style="text-align:center">Email</th></tr></thead>
+        <tbody id="notifRulesBody">${rules.map(r => `
+          <tr>
+            <td>${escHtml(r.label)}</td>
+            <td style="text-align:center"><input type="checkbox" data-key="${escHtml(r.type_key)}" data-channel="telegram" ${r.telegram_enabled ? 'checked' : ''}></td>
+            <td style="text-align:center"><input type="checkbox" data-key="${escHtml(r.type_key)}" data-channel="smtp" ${r.smtp_enabled ? 'checked' : ''}></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      <div class="form-actions"><button type="button" class="btn btn-primary" onclick="saveNotificationRules(this)">Lưu loại cảnh báo</button></div>
+    </div>`;
   } catch (e) { c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${e.message}</p></div>`; }
 }
 
@@ -5249,6 +5287,37 @@ async function saveSettings(e) {
     renderSettings();
   } catch (err) {
     toast(err.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+async function testNotifyChannel(channel, btn) {
+  btn.disabled = true;
+  try {
+    const res = await api(`/settings/test-${channel}`, 'POST');
+    toast(res.message, 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveNotificationRules(btn) {
+  btn.disabled = true;
+  const boxes = document.querySelectorAll('#notifRulesBody input[type=checkbox]');
+  const byKey = new Map();
+  boxes.forEach(b => {
+    const key = b.dataset.key;
+    if (!byKey.has(key)) byKey.set(key, { type_key: key, telegram_enabled: false, smtp_enabled: false });
+    byKey.get(key)[b.dataset.channel === 'telegram' ? 'telegram_enabled' : 'smtp_enabled'] = b.checked;
+  });
+  try {
+    await api('/notification-rules', 'PUT', { rules: [...byKey.values()] });
+    toast('Đã lưu loại cảnh báo', 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
     btn.disabled = false;
   }
 }

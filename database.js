@@ -1321,6 +1321,52 @@ async function ensureSchemaAndMigrations() {
   // NOTE: ADD INDEX on a 10M+ row table took ~67s in testing — expect the app to take noticeably
   // longer than usual to come up after this migration runs once.
   try { await pool.query("ALTER TABLE ssh_login_events ADD INDEX idx_ssh_events_failed_grouping (event_type(20), source_id, src_ip(45), occurred_at)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
+  // Outbound notification channels (Telegram/SMTP) for alerts — same singleton-row/plaintext-secret
+  // treatment as the AI key/LDAP/Harbor fields above (see routes/settings.js's sanitizeSettings for
+  // the has_* boolean pattern). notif_last_alert_id is notification-dispatcher.js's own polling
+  // cursor into the alerts table — same shape as crowdsec_settings.last_alert_id.
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN telegram_bot_token TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN telegram_chat_id TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_host TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_port INT DEFAULT 587"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_secure TINYINT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_user TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_password TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_from TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN smtp_to TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE app_settings ADD COLUMN notif_last_alert_id INT DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // Per alert-type opt-in for each channel — type_key matches alerts.metric exactly (see
+  // notification-dispatcher.js's TYPE_CATALOG, built from grepping every real `INSERT INTO alerts`
+  // call site in this codebase, not guessed). Both channels default OFF: notifications are opt-in,
+  // never silently on for a channel that was just configured for a different alert type.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notification_rules (
+      type_key VARCHAR(40) PRIMARY KEY,
+      label TEXT NOT NULL,
+      telegram_enabled TINYINT DEFAULT 0,
+      smtp_enabled TINYINT DEFAULT 0
+    )
+  `);
+  const notifTypes = [
+    ['ssh_bruteforce', 'SSH dò quét mật khẩu (brute-force)'],
+    ['ssh_foreign_login', 'Đăng nhập SSH từ IP nước ngoài'],
+    ['fail2ban_ban', 'Fail2ban tự động chặn IP'],
+    ['waf_scan', 'WAF phát hiện dò quét'],
+    ['waf_dos', 'WAF phát hiện tấn công DoS'],
+    ['waf_ddos', 'WAF phát hiện nghi ngờ DDoS'],
+    ['waf_crowdsec', 'CrowdSec phát hiện tấn công'],
+    ['outbound_foreign', 'Kết nối ra nước ngoài bất thường'],
+    ['reboot_required', 'VM cần khởi động lại (cập nhật kernel)'],
+    ['trivy_finding', 'Lỗ hổng container (Trivy)'],
+    ['vuln_finding', 'Lỗ hổng bảo mật (quét CVE)'],
+    ['cpu', 'Tài nguyên CPU vượt ngưỡng'],
+    ['ram', 'Tài nguyên RAM vượt ngưỡng'],
+    ['disk', 'Tài nguyên Disk vượt ngưỡng'],
+  ];
+  const insertNotifType = prepare('INSERT IGNORE INTO notification_rules (type_key, label) VALUES (?, ?)');
+  for (const [key, label] of notifTypes) await insertNotifType.run(key, label);
 }
 
 async function seedIfEmpty() {
