@@ -3671,6 +3671,14 @@ function renderWafEvents(search = '') {
           <option value="ddos">DDoS</option>
           <option value="manual_block">Chặn thủ công</option>
         </select>
+        <button class="btn btn-secondary btn-sm" style="margin-left:auto" onclick="exportWafEventsCsv(false)" title="Xuất theo đúng bộ lọc/tìm kiếm đang áp dụng">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất CSV
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="exportWafEventsCsv(true)" title="Xuất toàn bộ, bỏ qua mọi bộ lọc/tìm kiếm đang áp dụng">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Xuất toàn bộ
+        </button>
       </div>
       <div id="wafEventsBody"><div class="loading"><div class="spinner"></div></div></div>
     </div>`;
@@ -3711,6 +3719,41 @@ async function loadWafEvents(search) {
     const el = document.getElementById('wafEventsBody');
     if (el) el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
+}
+
+// full=false: exports exactly what's currently searched/filtered on screen (same params
+// loadWafEvents uses). full=true: ignores search/VM/loại filters entirely — the whole table, capped
+// at the server's own max (1000, see routes/waf.js's GET /events). Re-fetches from the server rather
+// than exporting wafEventRows/the current page, same reasoning as exportVulnFindingsCsv — the on-
+// screen table is paginated, so exporting the in-memory array would silently truncate to 1 page.
+async function exportWafEventsCsv(full) {
+  const params = full
+    ? new URLSearchParams({ limit: 1000 })
+    : new URLSearchParams({
+        search: document.getElementById('wafEventSearch')?.value || '',
+        vmId: wafEventFilter.vmId, eventType: wafEventFilter.eventType, limit: 1000,
+      });
+  let rows;
+  try { rows = await api(`/waf/events?${params}`); } catch (e) { toast(e.message, 'error'); return; }
+  if (!rows.length) { toast('Không có dữ liệu để xuất', 'error'); return; }
+  if (rows.length >= 1000) toast('Danh sách giới hạn 1000 dòng gần nhất', 'info');
+  const headers = ['Thời gian', 'VM', 'Domain', 'Loại', 'Nguồn', 'Dạng tấn công', 'IP nguồn', 'Quốc gia', 'Đường dẫn', 'Số lần', 'Trạng thái'];
+  const csvRows = rows.map(ev => [
+    formatTime(ev.occurred_at), ev.vm_name || '', ev.domain || '(không xác định)',
+    WAF_EVENT_LABEL[ev.event_type] || ev.event_type,
+    ev.source === 'crowdsec' ? `CrowdSec${ev.crowdsec_scenario ? ` (${ev.crowdsec_scenario})` : ''}` : 'NetAdmin',
+    ATTACK_CATEGORY_LABEL[ev.attack_category] || ev.attack_category || '',
+    ev.src_ip || '', ev.country || '', ev.path || '', ev.hit_count ?? '',
+    ev.blocked ? 'Đã chặn' : 'Chỉ cảnh báo',
+  ]);
+  const csv = [headers, ...csvRows].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `su-kien-waf-${full ? 'toan-bo' : 'da-loc'}-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function toggleWafEventSort(key) {
