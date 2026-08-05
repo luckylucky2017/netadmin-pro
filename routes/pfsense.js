@@ -211,7 +211,12 @@ router.delete('/firewalls/:id/vpn/openvpn/connection', requirePermission('pfsens
   try {
     const found = await resolveOpenvpnConnectionByRemoteHost(fw, remoteHost);
     if (!found) return res.status(404).json({ error: 'Kết nối này không còn tồn tại (có thể đã tự ngắt)' });
-    await client.request(fw, 'DELETE', `/status/openvpn/server/connection?parent_id=${found.parentId}&id=${found.id}`);
+    // Despite the OpenAPI schema listing parent_id/id as query params, pfSense's actual runtime only
+    // reads them from the JSON body on this DELETE — confirmed live: query-string form always fails
+    // with MODEL_REQUIRES_ID ("Field `id` is required") even when id is present in the URL; moving
+    // both fields into the body fixed it (a fake id then correctly 404s as MODEL_OBJECT_NOT_FOUND
+    // instead). A documentation bug in this pfSense-API version, not a client-side mistake.
+    await client.request(fw, 'DELETE', '/status/openvpn/server/connection', { parent_id: found.parentId, id: found.id });
     await logActivity(req.user, 'DELETE', 'pfsense_vpn_connection', fw.id, `${found.conn.common_name} (${remoteHost})`);
     res.json({ message: `Đã hủy kết nối OpenVPN của "${found.conn.common_name}"` });
   } catch (e) {
