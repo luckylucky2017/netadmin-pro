@@ -5802,8 +5802,8 @@ async function renderPfsenseVpnTab() {
         </div>
       </div>
       <table>
-        <thead><tr>${thSort('Loại', 'vpn_type', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tunnel', 'tunnel_name', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Trạng thái', 'status', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Địa chỉ IP client', 'remote_info', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('IP tunnel VPN', 'tunnel_ip', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Quốc gia', 'country', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Nhận (↓)', 'rate_recv_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Gửi (↑)', 'rate_sent_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tổng đã truyền', 'total_bytes', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Kết nối từ', 'connected_since', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}</tr></thead>
-        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="10"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
+        <thead><tr>${thSort('Loại', 'vpn_type', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tunnel', 'tunnel_name', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Trạng thái', 'status', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Địa chỉ IP client', 'remote_info', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('IP tunnel VPN', 'tunnel_ip', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Quốc gia', 'country', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Nhận (↓)', 'rate_recv_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Gửi (↑)', 'rate_sent_bps', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Tổng đã truyền', 'total_bytes', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}${thSort('Kết nối từ', 'connected_since', pfsenseVpnConnsSortState, 'togglePfsenseVpnConnsSort')}<th>Hành động</th></tr></thead>
+        <tbody id="pfsenseVpnConnsTableBody"><tr><td colspan="11"><div class="loading"><div class="spinner"></div></div></td></tr></tbody>
       </table>
       <div id="pfsenseVpnConnsPaginationBar"></div>
     </div>
@@ -5849,7 +5849,7 @@ async function loadPfsenseVpnData() {
     applyPermissionVisibility();
   } catch (e) {
     const el = document.getElementById('pfsenseVpnConnsTableBody');
-    if (el) el.innerHTML = `<tr><td colspan="10"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
+    if (el) el.innerHTML = `<tr><td colspan="11"><div class="empty-state"><h3>Lỗi tải VPN</h3><p>${e.message}</p></div></td></tr>`;
   }
 }
 
@@ -5867,7 +5867,7 @@ function renderPfsenseVpnConnsTable() {
   document.getElementById('pfVpnConnsTitle').textContent =
     `Kết nối VPN đang hoạt động (${conns.length})${foreignCount ? ` — ⚠ ${foreignCount} kết nối từ nước ngoài` : ''}`;
   if (!filtered.length) {
-    el.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
+    el.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--fg-muted)">Không có kết nối VPN nào đang hoạt động</td></tr>`;
     document.getElementById('pfsenseVpnConnsPaginationBar').innerHTML = '';
     return;
   }
@@ -5891,8 +5891,23 @@ function renderPfsenseVpnConnsTable() {
             <td style="color:var(--accent);font-family:'Fira Code',monospace">↑ ${fmtBps(c.rate_sent_bps)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">↓${fmtBytes(c.bytes_recv)} / ↑${fmtBytes(c.bytes_sent)}</td>
             <td style="font-size:12px;color:var(--fg-muted)">${c.connected_since ? formatTime(c.connected_since) : '—'}</td>
+            <td>${c.vpn_type === 'openvpn' ? `<button class="btn btn-secondary btn-sm" data-permission="pfsense.vpn.manage" title="Hủy kết nối ngay — client phải kết nối lại từ đầu" onclick="disconnectPfsenseVpn('${escAttr(c.remote_info)}', '${escAttr(c.tunnel_name)}', this)">Hủy kết nối</button>` : ''}</td>
           </tr>`).join('');
   document.getElementById('pfsenseVpnConnsPaginationBar').innerHTML = paginationBar(pfsenseVpnConnsPagination, filtered.length, 'pfsenseVpnConnsPagination', 'renderPfsenseVpnConnsTable');
+  applyPermissionVisibility();
+}
+
+async function disconnectPfsenseVpn(remoteHost, tunnelName, btn) {
+  if (!confirm(`Hủy kết nối VPN "${tunnelName}"?\n\nClient sẽ bị ngắt ngay lập tức và phải tự kết nối lại.`)) return;
+  btn.disabled = true;
+  try {
+    const result = await api(`/pfsense/firewalls/${pfsenseFirewallId}/vpn/openvpn/connection`, 'DELETE', { remoteHost });
+    toast(result.message || 'Đã hủy kết nối', 'success');
+    loadPfsenseVpnData();
+  } catch (e) {
+    toast(e.message, 'error');
+    btn.disabled = false;
+  }
 }
 
 function openEditOpenvpnServerForm(server) {

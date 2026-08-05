@@ -32,6 +32,24 @@ async function resolveLiveRuleId(fw, tracker) {
   return rule.id;
 }
 
+// The kill-connection endpoint (DELETE /status/openvpn/server/connection) addresses a live connection
+// by parent_id/id — 0-based array POSITIONS in the /status/openvpn/servers response, a completely
+// different index space from vpnid (confirmed live: a server with vpnid=1 showed up at parent_id=0)
+// and not something worth caching since positions shift as connections come and go. remote_host
+// (ip:port) is unique per live connection at any given moment, so it's the only identifier needed —
+// always re-resolved fresh, never from the cached pfsense_vpn_status table.
+async function resolveOpenvpnConnectionByRemoteHost(fw, remoteHost) {
+  const res = await client.request(fw, 'GET', '/status/openvpn/servers?limit=0');
+  const servers = res?.data || [];
+  for (let parentId = 0; parentId < servers.length; parentId++) {
+    const conns = servers[parentId].conns || [];
+    for (let id = 0; id < conns.length; id++) {
+      if (conns[id].remote_host === remoteHost) return { parentId, id, conn: conns[id] };
+    }
+  }
+  return null;
+}
+
 // Picks the OpenVPN server a user/cert/export operation targets. serverId is the server's vpnid
 // (what pfSense calls it elsewhere, e.g. status/openvpn/servers) — defaults to the first configured
 // server when omitted, which covers every real deployment seen so far (exactly 1 server).
@@ -177,6 +195,28 @@ router.get('/firewalls/:id/vpn', async (req, res) => {
   const fw = await requireFirewall(req, res); if (!fw) return;
   const rows = await db.prepare('SELECT vpn_type, tunnel_name, status, remote_info, connected_since, bytes_recv, bytes_sent, rate_recv_bps, rate_sent_bps, country, is_foreign, tunnel_ip, updated_at FROM pfsense_vpn_status WHERE firewall_id = ? ORDER BY is_foreign DESC, vpn_type ASC, tunnel_name ASC').all(fw.id);
   res.json(rows);
+});
+
+// Kills a live OpenVPN connection — the client's session drops immediately and they must
+// re-authenticate to reconnect; does NOT touch the server/user/CSO config (kicked-off client can
+// reconnect right away if their credentials still work — this is a "disconnect now", not a ban;
+// see ip-exceptions-style CSO/user disable for actually revoking access). IPsec has no equivalent
+// non-destructive kill in this pfSense API version (only full phase1/phase2 CRUD, which deletes the
+// tunnel's config) — confirmed against this firewall's own OpenAPI schema, so IPsec rows don't get
+// this action in the UI.
+router.delete('/firewalls/:id/vpn/openvpn/connection', requirePermission('pfsense.vpn.manage'), async (req, res) => {
+  const fw = await requireFirewall(req, res); if (!fw) return;
+  const remoteHost = String(req.body?.remoteHost || '').trim();
+  if (!remoteHost) return res.status(400).json({ error: 'Thiếu remoteHost' });
+  try {
+    const found = await resolveOpenvpnConnectionByRemoteHost(fw, remoteHost);
+    if (!found) return res.status(404).json({ error: 'Kết nối này không còn tồn tại (có thể đã tự ngắt)' });
+    await client.request(fw, 'DELETE', `/status/openvpn/server/connection?parent_id=${found.parentId}&id=${found.id}`);
+    await logActivity(req.user, 'DELETE', 'pfsense_vpn_connection', fw.id, `${found.conn.common_name} (${remoteHost})`);
+    res.json({ message: `Đã hủy kết nối OpenVPN của "${found.conn.common_name}"` });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
 });
 
 // ── Rule tường lửa — đọc từ cache, ghi trực tiếp lên pfSense thật rồi đồng bộ lại ──
