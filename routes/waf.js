@@ -379,6 +379,33 @@ router.post('/exceptions', requirePermission('waf.block'), async (req, res) => {
   res.json({ message: 'OK' });
 });
 
+router.patch('/exceptions/:id', requirePermission('waf.block'), async (req, res) => {
+  const row = await db.prepare('SELECT * FROM waf_ip_exceptions WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
+  const ip = String(req.body?.ip || '').trim();
+  const note = String(req.body?.note || '').trim().slice(0, 255) || null;
+  if (!isValidExceptionIp(ip)) {
+    return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
+  }
+  try {
+    await db.prepare('UPDATE waf_ip_exceptions SET ip = ?, note = ? WHERE id = ?').run(ip, note, row.id);
+  } catch (e) {
+    if (e.errno === 1062) return res.status(400).json({ error: 'IP/CIDR này đã có trong danh sách ngoại lệ' });
+    throw e;
+  }
+  await logActivity(req.user, 'UPDATE', 'waf_ip_exception', row.id, ip, `Sửa ngoại lệ IP WAF: ${row.ip} → ${ip}${note ? ' — ' + note : ''}`);
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
+  `).all();
+  // If the IP text itself changed, the new value needs the exact same "unban now" treatment POST
+  // gives a brand-new exception — a false positive being re-typed to fix a typo shouldn't have to
+  // wait for the next ban attempt to clear. A note-only edit skips this (nothing to unban).
+  if (ip !== row.ip) await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
+  await Promise.allSettled(vms.map(vm => wafManager.pushIgnoreIp(vm)));
+  res.json({ message: 'OK' });
+});
+
 router.delete('/exceptions/:id', requirePermission('waf.block'), async (req, res) => {
   const row = await db.prepare('SELECT * FROM waf_ip_exceptions WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Không tìm thấy' });

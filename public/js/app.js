@@ -4303,13 +4303,46 @@ async function loadWafExceptions() {
           <td>${r.note ? escHtml(r.note) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td>${r.created_by ? escHtml(r.created_by) : '—'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
-          <td><button class="btn-icon delete" data-permission="waf.block" title="Xóa ngoại lệ" onclick="deleteWafException(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button></td>
+          <td><div class="actions">
+            <button class="btn-icon edit" data-permission="waf.block" title="Sửa ngoại lệ" onclick='openEditWafExceptionForm(${JSON.stringify({ id: r.id, ip: r.ip, note: r.note || '' }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon delete" data-permission="waf.block" title="Xóa ngoại lệ" onclick="deleteWafException(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button>
+          </div></td>
         </tr>`).join('')}
       </tbody>
     </table>`;
     applyPermissionVisibility();
   } catch (e) {
     if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function openEditWafExceptionForm(ex) {
+  openModal('Sửa ngoại lệ IP', `
+    <form id="editWafExceptionForm" onsubmit="saveWafExceptionEdit(event, ${ex.id})">
+      <div class="form-grid">
+        <div class="form-group full"><label>IP / CIDR</label><input type="text" name="ip" value="${escAttr(ex.ip)}" required placeholder="203.0.113.5 hoặc 203.0.113.0/24"></div>
+        <div class="form-group full"><label>Ghi chú</label><input type="text" name="note" value="${escAttr(ex.note)}" placeholder="vd: IP văn phòng"></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">Lưu</button>
+      </div>
+    </form>`);
+}
+
+async function saveWafExceptionEdit(e, id) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  const fd = new FormData(e.target);
+  try {
+    await api(`/waf/exceptions/${id}`, 'PATCH', { ip: fd.get('ip').trim(), note: fd.get('note').trim() });
+    toast('Đã cập nhật ngoại lệ', 'success');
+    closeModal();
+    loadWafExceptions();
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
   }
 }
 
