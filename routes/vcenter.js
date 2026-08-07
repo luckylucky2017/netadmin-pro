@@ -51,6 +51,30 @@ router.get('/vms', async (req, res) => {
   res.json(await db.prepare(query).all(...params));
 });
 
+router.get('/hosts', async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT h.*, c.name as cluster_name
+    FROM vcenter_hosts h LEFT JOIN vcenter_clusters c ON c.id = h.vcenter_cluster_id
+    ORDER BY c.name ASC, h.name ASC
+  `).all();
+  res.json(rows);
+});
+
+// Only connection_state='connected' hosts count toward capacity — a disconnected host's last-known
+// numbers are stale and shouldn't be presented as "available" capacity.
+router.get('/hosts/stats', async (req, res) => {
+  const row = await db.prepare(`
+    SELECT
+      COUNT(*) as hostCount,
+      COALESCE(SUM(cpu_total_mhz), 0) as cpuTotalMhz,
+      COALESCE(SUM(cpu_used_mhz), 0) as cpuUsedMhz,
+      COALESCE(SUM(mem_total_mb), 0) as memTotalMb,
+      COALESCE(SUM(mem_used_mb), 0) as memUsedMb
+    FROM vcenter_hosts WHERE connection_state = 'connected'
+  `).get();
+  res.json(row);
+});
+
 router.get('/stats', async (req, res) => {
   const total = (await db.prepare('SELECT COUNT(*) as cnt FROM vcenter_vms').get()).cnt;
   const on = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE power_state='POWERED_ON'").get()).cnt;

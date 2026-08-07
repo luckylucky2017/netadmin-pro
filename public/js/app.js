@@ -1852,6 +1852,7 @@ async function renderVcenter(search = '') {
     </div>
     <div class="filter-tabs" id="vcenterTabs" style="margin-bottom:16px">
       <div class="filter-tab ${vcenterTab === 'vms' ? 'active' : ''}" data-tab="vms" onclick="setVcenterTab('vms')">Danh sách VM</div>
+      <div class="filter-tab ${vcenterTab === 'hosts' ? 'active' : ''}" data-tab="hosts" onclick="setVcenterTab('hosts')">Tài nguyên Host</div>
       <div class="filter-tab ${vcenterTab === 'clusters' ? 'active' : ''}" data-tab="clusters" onclick="setVcenterTab('clusters')">Cụm vCenter</div>
     </div>
     <div id="vcenterTabBody"></div>`;
@@ -1872,6 +1873,7 @@ function setVcenterTab(tab) {
 
 function renderVcenterTabBody(search) {
   if (vcenterTab === 'clusters') renderVcenterClustersTab();
+  else if (vcenterTab === 'hosts') renderVcenterHostsTab();
   else renderVcenterVmsTab(search);
 }
 
@@ -2016,6 +2018,73 @@ function renderVcenterRows() {
           </div></td>
         </tr>`).join('')}
       </tbody></table>${paginationBar(vcenterPagination, sortedVms.length, 'vcenterPagination', 'renderVcenterRows')}`;
+}
+
+// ── Tab: Tài nguyên Host (ESXi vật lý) ──
+function vcHostStateBadge(state) {
+  if (state === 'connected') return `<span class="status online"><span class="dot"></span>Connected</span>`;
+  if (state === 'disconnected') return `<span class="status offline"><span class="dot"></span>Disconnected</span>`;
+  return `<span class="status unknown"><span class="dot"></span>${escHtml(state || 'Unknown')}</span>`;
+}
+const fmtGhz = (mhz) => mhz == null ? '—' : `${(mhz / 1000).toFixed(2)} GHz`;
+const fmtGbFromMb = (mb) => mb == null ? '—' : `${(mb / 1024).toFixed(1)} GB`;
+
+async function renderVcenterHostsTab() {
+  const body = document.getElementById('vcenterTabBody');
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const [hosts, stats] = await Promise.all([api('/vcenter/hosts'), api('/vcenter/hosts/stats')]);
+    const cpuFreeMhz = Math.max(0, stats.cpuTotalMhz - stats.cpuUsedMhz);
+    const memFreeMb = Math.max(0, stats.memTotalMb - stats.memUsedMb);
+    const cpuUsedPct = stats.cpuTotalMhz ? (stats.cpuUsedMhz / stats.cpuTotalMhz) * 100 : 0;
+    const memUsedPct = stats.memTotalMb ? (stats.memUsedMb / stats.memTotalMb) * 100 : 0;
+    body.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/></svg></div>
+        <div class="stat-label">Tổng CPU (${stats.hostCount} host)</div>
+        <div class="stat-value blue">${fmtGhz(stats.cpuTotalMhz)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">Còn trống: ${fmtGhz(cpuFreeMhz)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon ${cpuUsedPct >= 90 ? 'red' : cpuUsedPct >= 70 ? 'yellow' : 'green'}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+        <div class="stat-label">CPU đang dùng</div>
+        <div class="stat-value ${cpuUsedPct >= 90 ? 'red' : cpuUsedPct >= 70 ? 'yellow' : 'green'}">${fmtGhz(stats.cpuUsedMhz)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">${cpuUsedPct.toFixed(1)}%</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="10" rx="1"/><line x1="6" y1="7" x2="6" y2="17"/><line x1="10" y1="7" x2="10" y2="17"/><line x1="14" y1="7" x2="14" y2="17"/><line x1="18" y1="7" x2="18" y2="17"/></svg></div>
+        <div class="stat-label">Tổng RAM</div>
+        <div class="stat-value blue">${fmtGbFromMb(stats.memTotalMb)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">Còn trống: ${fmtGbFromMb(memFreeMb)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon ${memUsedPct >= 90 ? 'red' : memUsedPct >= 70 ? 'yellow' : 'green'}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="10" rx="1"/><line x1="6" y1="7" x2="6" y2="17"/><line x1="10" y1="7" x2="10" y2="17"/><line x1="14" y1="7" x2="14" y2="17"/><line x1="18" y1="7" x2="18" y2="17"/></svg></div>
+        <div class="stat-label">RAM đang dùng</div>
+        <div class="stat-value ${memUsedPct >= 90 ? 'red' : memUsedPct >= 70 ? 'yellow' : 'green'}">${fmtGbFromMb(stats.memUsedMb)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">${memUsedPct.toFixed(1)}%</div>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Host</th><th>Cụm</th><th>Trạng thái</th><th>CPU</th><th>RAM</th><th>Cập nhật lúc</th></tr></thead>
+        <tbody>${!hosts.length ? `<tr><td colspan="7" style="text-align:center;color:var(--fg-muted)">Chưa có dữ liệu host — bấm "Đồng bộ ngay" ở trên</td></tr>` : hosts.map((h, i) => {
+          const hCpuPct = h.cpu_total_mhz ? (h.cpu_used_mhz / h.cpu_total_mhz) * 100 : null;
+          const hMemPct = h.mem_total_mb ? (h.mem_used_mb / h.mem_total_mb) * 100 : null;
+          return `
+        <tr>
+          <td style="color:var(--fg-dim)">${i + 1}</td>
+          <td style="font-weight:600">${escHtml(h.name)}</td>
+          <td><span class="tag">${escHtml(h.cluster_name || '—')}</span></td>
+          <td>${vcHostStateBadge(h.connection_state)}</td>
+          <td>${vcPctCell(hCpuPct, h.cpu_used_mhz != null && h.cpu_total_mhz != null ? `${fmtGhz(h.cpu_used_mhz)} / ${fmtGhz(h.cpu_total_mhz)}` : null)}</td>
+          <td>${vcPctCell(hMemPct, h.mem_used_mb != null && h.mem_total_mb != null ? `${fmtGbFromMb(h.mem_used_mb)} / ${fmtGbFromMb(h.mem_total_mb)}` : null)}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(h.last_synced_at)}</span></td>
+        </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+  } catch (e) { body.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`; }
 }
 
 // ── Tab: Cụm vCenter (kết nối) ──

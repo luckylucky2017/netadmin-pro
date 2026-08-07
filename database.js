@@ -1367,6 +1367,30 @@ async function ensureSchemaAndMigrations() {
   ];
   const insertNotifType = prepare('INSERT IGNORE INTO notification_rules (type_key, label) VALUES (?, ?)');
   for (const [key, label] of notifTypes) await insertNotifType.run(key, label);
+
+  // Physical ESXi host inventory + live capacity/usage — mirrors vcenter_vms' shape but at the host
+  // level (vcenter-collector.js's syncHosts). cpu_total_mhz is stored pre-computed (cpu_mhz_per_core
+  // × cpu_cores) so the frontend never has to redo that multiplication. Confirmed live against a real
+  // vCenter (SOAP RetrievePropertiesEx on HostSystem: summary.hardware.*/summary.quickStats.*) before
+  // writing this schema — see the "Tài nguyên Host" plan.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vcenter_hosts (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      moref VARCHAR(64) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      vcenter_cluster_id INT NOT NULL,
+      connection_state VARCHAR(20),
+      power_state VARCHAR(20),
+      cpu_cores INT,
+      cpu_mhz_per_core INT,
+      cpu_total_mhz INT,
+      cpu_used_mhz INT,
+      mem_total_mb BIGINT,
+      mem_used_mb BIGINT,
+      last_synced_at DATETIME,
+      UNIQUE KEY uq_vcenter_host (moref, vcenter_cluster_id)
+    )
+  `);
 }
 
 async function seedIfEmpty() {

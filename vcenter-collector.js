@@ -85,6 +85,74 @@ async function vmPerf(clusterId, moref) {
   return result;
 }
 
+// ── Physical ESXi host inventory + live capacity/usage ──
+// REST gives the host list (moref/name/connection/power state); SOAP RetrievePropertiesEx gives the
+// actual hardware capacity + quickStats usage — exact same 2-source split as VMs (REST inventory,
+// SOAP perf), just batched into ONE RetrievePropertiesEx call covering every host at once (multiple
+// objectSet entries in a single request) rather than one round-trip per host. Confirmed live against
+// a real vCenter before writing this — see the "Tài nguyên Host" plan for the raw XML.
+async function syncHosts(cluster) {
+  const hosts = await client.rest('GET', '/api/vcenter/host');
+  if (!hosts.length) return { clusterId: cluster.id, count: 0 };
+
+  const objectSet = hosts.map(h => `<vim25:objectSet><vim25:obj type="HostSystem">${h.host}</vim25:obj></vim25:objectSet>`).join('');
+  const xml = await client.soap(`<vim25:RetrievePropertiesEx>
+    <vim25:_this type="PropertyCollector">propertyCollector</vim25:_this>
+    <vim25:specSet>
+      <vim25:propSet><vim25:type>HostSystem</vim25:type>
+        <vim25:pathSet>summary.hardware.cpuMhz</vim25:pathSet>
+        <vim25:pathSet>summary.hardware.numCpuCores</vim25:pathSet>
+        <vim25:pathSet>summary.hardware.memorySize</vim25:pathSet>
+        <vim25:pathSet>summary.quickStats.overallCpuUsage</vim25:pathSet>
+        <vim25:pathSet>summary.quickStats.overallMemoryUsage</vim25:pathSet>
+      </vim25:propSet>
+      ${objectSet}
+    </vim25:specSet>
+    <vim25:options></vim25:options>
+  </vim25:RetrievePropertiesEx>`);
+
+  const statsByMoref = {};
+  const objBlocks = xml.match(/<objects>.*?<\/objects>/gs) || [];
+  for (const block of objBlocks) {
+    const moref = /<obj type="HostSystem">([^<]+)<\/obj>/.exec(block)?.[1];
+    if (!moref) continue;
+    const num = (name) => { const m = new RegExp(`<name>${name}</name><val[^>]*>(-?\\d+)</val>`).exec(block); return m ? Number(m[1]) : null; };
+    statsByMoref[moref] = {
+      cpuMhzPerCore: num('summary\\.hardware\\.cpuMhz'),
+      cpuCores: num('summary\\.hardware\\.numCpuCores'),
+      memTotalBytes: num('summary\\.hardware\\.memorySize'),
+      cpuUsedMhz: num('summary\\.quickStats\\.overallCpuUsage'),
+      memUsedMb: num('summary\\.quickStats\\.overallMemoryUsage'),
+    };
+  }
+
+  const upsert = db.prepare(`
+    INSERT INTO vcenter_hosts (moref, name, vcenter_cluster_id, connection_state, power_state, cpu_cores, cpu_mhz_per_core, cpu_total_mhz, cpu_used_mhz, mem_total_mb, mem_used_mb, last_synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name), connection_state = VALUES(connection_state), power_state = VALUES(power_state),
+      cpu_cores = VALUES(cpu_cores), cpu_mhz_per_core = VALUES(cpu_mhz_per_core), cpu_total_mhz = VALUES(cpu_total_mhz),
+      cpu_used_mhz = VALUES(cpu_used_mhz), mem_total_mb = VALUES(mem_total_mb), mem_used_mb = VALUES(mem_used_mb),
+      last_synced_at = CURRENT_TIMESTAMP
+  `);
+  for (const h of hosts) {
+    const s = statsByMoref[h.host] || {};
+    const cpuTotalMhz = (s.cpuMhzPerCore != null && s.cpuCores != null) ? s.cpuMhzPerCore * s.cpuCores : null;
+    const memTotalMb = s.memTotalBytes != null ? Math.round(s.memTotalBytes / (1024 * 1024)) : null;
+    await upsert.run(
+      h.host, h.name, cluster.id, (h.connection_state || '').toLowerCase(), h.power_state,
+      s.cpuCores ?? null, s.cpuMhzPerCore ?? null, cpuTotalMhz, s.cpuUsedMhz ?? null, memTotalMb, s.memUsedMb ?? null
+    );
+  }
+
+  const currentMorefs = new Set(hosts.map(h => h.host));
+  const known = await db.prepare('SELECT moref FROM vcenter_hosts WHERE vcenter_cluster_id = ?').all(cluster.id);
+  const stale = db.prepare('DELETE FROM vcenter_hosts WHERE vcenter_cluster_id = ? AND moref = ?');
+  for (const { moref } of known) if (!currentMorefs.has(moref)) await stale.run(cluster.id, moref);
+
+  return { clusterId: cluster.id, count: hosts.length };
+}
+
 // ── Inventory sync (REST) — one cluster ──
 async function syncOneCluster(cluster) {
   return registry.withClient(cluster.id, async () => {
@@ -106,6 +174,10 @@ async function syncOneCluster(cluster) {
     const known = await db.prepare('SELECT moref FROM vcenter_vms WHERE vcenter_cluster_id = ?').all(cluster.id);
     const stale = db.prepare('DELETE FROM vcenter_vms WHERE vcenter_cluster_id = ? AND moref = ?');
     await Promise.all(known.filter(({ moref }) => !currentMorefs.has(moref)).map(({ moref }) => stale.run(cluster.id, moref)));
+
+    // Best-effort: a host-sync failure (e.g. missing permission on HostSystem) shouldn't fail VM
+    // inventory sync, which is the more critical half of this cycle.
+    try { await syncHosts(cluster); } catch (e) { console.error(`[vcenter] Lỗi đồng bộ host (cụm ${cluster.name}):`, e.message); }
 
     await db.prepare("UPDATE vcenter_clusters SET status='ok', last_synced_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?").run(cluster.id);
     return { clusterId: cluster.id, count: vms.length };
@@ -182,4 +254,4 @@ function start(intervalMs = 60000) {
   return { stop: () => { stopped = true; } };
 }
 
-module.exports = { start, syncVMs, syncStats, syncOneCluster, vmPerf, guestDiskUsage, guestIdentity };
+module.exports = { start, syncVMs, syncStats, syncOneCluster, syncHosts, vmPerf, guestDiskUsage, guestIdentity };
