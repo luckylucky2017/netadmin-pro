@@ -1364,6 +1364,7 @@ async function ensureSchemaAndMigrations() {
     ['cpu', 'Tài nguyên CPU vượt ngưỡng'],
     ['ram', 'Tài nguyên RAM vượt ngưỡng'],
     ['disk', 'Tài nguyên Disk vượt ngưỡng'],
+    ['uptime_down', 'Giám sát Uptime — dịch vụ DOWN'],
   ];
   const insertNotifType = prepare('INSERT IGNORE INTO notification_rules (type_key, label) VALUES (?, ?)');
   for (const [key, label] of notifTypes) await insertNotifType.run(key, label);

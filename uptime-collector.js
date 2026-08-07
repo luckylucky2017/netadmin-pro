@@ -199,6 +199,17 @@ const updateMonitorCache = db.prepare(`
   WHERE id=?
 `);
 
+// Feeds into the same shared alerts table every other collector uses (see notification-dispatcher.js/
+// notification_rules) — only the DOWN transition raises a new open alert (mirrors alert-engine.js's
+// applyBreach: open once, resolve once, never one row per check tick) so "Uptime" can be toggled as
+// its own notifiable type without uptime-collector.js knowing anything about Telegram/SMTP.
+const openUptimeAlert = db.prepare("SELECT id FROM alerts WHERE source_type = 'monitor' AND source_id = ? AND metric = 'uptime_down' AND status != 'resolved'");
+const insertUptimeAlert = db.prepare(`
+  INSERT INTO alerts (category, severity, title, message, source_type, source_id, source_name, metric, metric_value, status)
+  VALUES ('uptime', 'critical', ?, ?, 'monitor', ?, ?, 'uptime_down', ?, 'open')
+`);
+const resolveUptimeAlert = db.prepare("UPDATE alerts SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?");
+
 async function checkMonitor(monitor) {
   const r = await performCheck(monitor);
   await insertCheck.run(monitor.id, r.status, r.status_code, r.response_ms, r.error);
@@ -207,6 +218,17 @@ async function checkMonitor(monitor) {
     r.cert_expires_at, r.cert_issuer, r.cert_valid_from, r.cert_subject, r.cert_serial, r.cert_fingerprint, r.cert_san, r.tls_protocol, r.tls_cipher,
     monitor.id
   );
+
+  const wasDown = monitor.current_status === 'down';
+  const isDown = r.status === 'down';
+  if (isDown && !wasDown) {
+    if (!(await openUptimeAlert.get(monitor.id))) {
+      await insertUptimeAlert.run(`Giám sát "${monitor.name}" đang DOWN`, r.error || 'Không phản hồi', monitor.id, monitor.name, r.error || 'down');
+    }
+  } else if (!isDown && wasDown) {
+    const existing = await openUptimeAlert.get(monitor.id);
+    if (existing) await resolveUptimeAlert.run(existing.id);
+  }
   return r;
 }
 
