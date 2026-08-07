@@ -1326,7 +1326,12 @@ async function deleteDevice(id) {
 }
 
 // ─── ALERTS ───────────────────────────────────────────────────────────────────
-let alertFilter = { severity: '', category: '', status: '' };
+// Defaults to 'active' (open + acknowledged, i.e. not yet resolved) instead of blank/all — opening
+// the page used to fetch the ENTIRE alerts table (49K+ rows, 94% already resolved; confirmed live
+// via EXPLAIN this was an unindexed full scan). 'active' is a synthetic value routes/alerts.js
+// translates to "status != 'resolved'", which idx_alerts_status_created can serve fast. The dropdown
+// still offers "Tất cả trạng thái" for anyone who genuinely wants to browse/search full history.
+let alertFilter = { severity: '', category: '', status: 'active' };
 let alertRows = [];
 let selectedAlertIds = new Set();
 let alertPagination = newPagination();
@@ -1387,10 +1392,11 @@ async function renderAlerts(search = '') {
           <option value="security">Bảo mật</option>
         </select>
         <select class="filter-select" id="alertStatusFilter" onchange="applyAlertFilter()">
-          <option value="">Tất cả trạng thái</option>
-          <option value="open">Đang mở</option>
-          <option value="acknowledged">Đã ghi nhận</option>
-          <option value="resolved">Đã xử lý</option>
+          <option value="active" ${alertFilter.status === 'active' ? 'selected' : ''}>Đang hoạt động (chưa xử lý)</option>
+          <option value="" ${alertFilter.status === '' ? 'selected' : ''}>Tất cả trạng thái</option>
+          <option value="open" ${alertFilter.status === 'open' ? 'selected' : ''}>Đang mở</option>
+          <option value="acknowledged" ${alertFilter.status === 'acknowledged' ? 'selected' : ''}>Đã ghi nhận</option>
+          <option value="resolved" ${alertFilter.status === 'resolved' ? 'selected' : ''}>Đã xử lý</option>
         </select>
       </div>
       <div class="filter-tabs" id="severityTabs">

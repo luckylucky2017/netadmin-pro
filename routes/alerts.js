@@ -3,15 +3,24 @@ const router = express.Router();
 const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 
+// No status filter used to mean "load all 49K+ rows, 94% of them 'resolved'" — confirmed live via
+// EXPLAIN this was a full table scan + filesort (~483ms, entire table shipped to the browser) since
+// the severity CASE expression in ORDER BY can't use an index. The LIMIT below caps the worst case
+// (an explicit full-history search), while the frontend now defaults to a status filter so the
+// COMMON case (opening the page) hits idx_alerts_status_created instead (confirmed live: 40ms).
 router.get('/', async (req, res) => {
-  const { search, severity, category, status } = req.query;
+  const { search, severity, category, status, limit } = req.query;
   let query = 'SELECT * FROM alerts WHERE 1=1';
   const params = [];
   if (search) { query += ' AND (title LIKE ? OR message LIKE ? OR source_name LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
   if (severity) { query += ' AND severity = ?'; params.push(severity); }
   if (category) { query += ' AND category = ?'; params.push(category); }
-  if (status) { query += ' AND status = ?'; params.push(status); }
-  query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC";
+  // 'active' isn't a real status value — it's the frontend's default view (open + acknowledged,
+  // i.e. "not yet resolved"), translated here rather than adding a 4th value to the status column.
+  if (status === 'active') { query += " AND status != 'resolved'"; }
+  else if (status) { query += ' AND status = ?'; params.push(status); }
+  query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC LIMIT ?";
+  params.push(Math.min(Number(limit) || 1000, 2000));
   res.json(await db.prepare(query).all(...params));
 });
 

@@ -1311,6 +1311,17 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_source_rule (source_type(50), source_id, rule_id, status)"); } catch (e) { if (e.errno !== 1061) throw e; }
   try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_status (status)"); } catch (e) { if (e.errno !== 1061) throw e; }
 
+  // "Cảnh báo" page perf fix — alerts hit 49K rows in ~30 days (94% already 'resolved') with GET
+  // /alerts having no LIMIT: confirmed live via EXPLAIN this was a full table scan + filesort (the
+  // severity CASE expression in ORDER BY can't use any index) taking ~483ms and shipping the entire
+  // table to the browser on every page load. idx_alerts_status_created lets the now-default
+  // status-filtered load (see routes/alerts.js) use an index instead (confirmed live: 40ms for the
+  // same query filtered to non-resolved alerts). idx_alerts_resolved_at is for
+  // alert-engine.js's pruneOldResolvedAlerts() — a range scan on resolved_at needs status in the
+  // index too, or MySQL falls back to scanning every 'resolved' row to check the date.
+  try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_status_created (status, created_at)"); } catch (e) { if (e.errno !== 1061) throw e; }
+  try { await pool.query("ALTER TABLE alerts ADD INDEX idx_alerts_resolved_at (status, resolved_at)"); } catch (e) { if (e.errno !== 1061) throw e; }
+
   // routes/security.js's GET /banned-ips aggregates ssh_login_events (WHERE event_type='failed'
   // GROUP BY source_id, src_ip) to show "why is this IP banned" context — with 10M+ rows in
   // production (continuous internet SSH brute-force scanning against the monitored fleet, ~27k

@@ -104,7 +104,20 @@ async function autoResolveStaleOpenAlerts() {
   `).run(AUTO_RESOLVE_AFTER_HOURS);
 }
 
-function start(intervalMs = 10000, autoResolveIntervalMs = 15 * 60 * 1000) {
+// Trang "Cảnh báo" bị chậm hẳn khi bảng alerts phình to (49K dòng chỉ sau ~30 ngày, 94% đã 'resolved'
+// — nhiều collector khác nhau ghi liên tục, không có gì tự dọn trước đây) — GET /alerts không giới
+// hạn kết quả nên tải cả bảng về mỗi lần mở trang. Xóa vĩnh viễn (không phải archive) alert đã xử lý
+// quá cũ — đã thống nhất với người dùng giữ 30 ngày là đủ, và toàn bộ dữ liệu hiện có cũng chỉ mới
+// trong 30 ngày nên đây là bước dọn để bảng không tiếp tục phình vô hạn, không phải xóa dữ liệu đang
+// dùng thật. Chỉ xóa 'resolved' — alert đang 'open'/'acknowledged' không bao giờ bị dọn dù cũ đến đâu.
+const ALERT_RETENTION_DAYS = 30;
+async function pruneOldResolvedAlerts() {
+  await db.prepare(`
+    DELETE FROM alerts WHERE status = 'resolved' AND resolved_at < DATE_SUB(NOW(), INTERVAL ? DAY)
+  `).run(ALERT_RETENTION_DAYS);
+}
+
+function start(intervalMs = 10000, autoResolveIntervalMs = 15 * 60 * 1000, pruneIntervalMs = 6 * 60 * 60 * 1000) {
   // Wrapped in .catch — evaluate() now hits MySQL over the network on every tick (every 10s), so a
   // transient connection hiccup must not become an unhandled promise rejection (which crashes the
   // whole Node process, unlike a synchronous throw from the old in-process SQLite calls).
@@ -114,7 +127,11 @@ function start(intervalMs = 10000, autoResolveIntervalMs = 15 * 60 * 1000) {
 
   const autoResolveTick = () => autoResolveStaleOpenAlerts().catch(e => console.error('[alert-engine] Lỗi tự động xử lý cảnh báo quá hạn:', e.message));
   autoResolveTick();
-  return setInterval(autoResolveTick, autoResolveIntervalMs);
+  setInterval(autoResolveTick, autoResolveIntervalMs);
+
+  const pruneTick = () => pruneOldResolvedAlerts().catch(e => console.error('[alert-engine] Lỗi dọn cảnh báo cũ:', e.message));
+  pruneTick();
+  return setInterval(pruneTick, pruneIntervalMs);
 }
 
-module.exports = { start, evaluate, autoResolveStaleOpenAlerts };
+module.exports = { start, evaluate, autoResolveStaleOpenAlerts, pruneOldResolvedAlerts };
