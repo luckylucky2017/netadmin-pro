@@ -171,7 +171,14 @@ function detectPerIpEvents(hits, config = fail2banConfig.DEFAULTS) {
       events.push({ type: 'scan', ip, hitCount: flagged.length, attackCategory: dominantCategory, sample });
     }
 
-    const sorted = [...ipHits].sort((a, b) => a.timestamp - b.timestamp);
+    // 206 (Partial Content) only ever happens for HTTP Range requests — mobile Safari/Chrome fetch
+    // video/audio in small byte-range chunks (confirmed live: iOS Safari streaming a single .mp4
+    // generated dozens of 64KB-chunk requests to the exact same URL within seconds), which the
+    // DoS window below would otherwise misread as a flood against one IP. A real DoS/flood attack
+    // wants to consume server resources per request, not politely ask for small ranges of a static
+    // file nginx serves cheaply via sendfile — excluding 206s here is safe, not a detection gap.
+    const dosHits = ipHits.filter(h => h.status !== 206);
+    const sorted = [...dosHits].sort((a, b) => a.timestamp - b.timestamp);
     let maxInWindow = 0, windowStart = 0;
     for (let i = 0; i < sorted.length; i++) {
       while (sorted[i].timestamp - sorted[windowStart].timestamp > config.waf_dos_window_sec * 1000) windowStart++;
