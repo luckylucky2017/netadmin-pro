@@ -2034,7 +2034,7 @@ async function renderVcenterHostsTab() {
   const body = document.getElementById('vcenterTabBody');
   body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
   try {
-    const [hosts, stats] = await Promise.all([api('/vcenter/hosts'), api('/vcenter/hosts/stats')]);
+    const [hosts, stats, datastores] = await Promise.all([api('/vcenter/hosts'), api('/vcenter/hosts/stats'), api('/vcenter/datastores')]);
     const cpuFreeMhz = Math.max(0, stats.cpuTotalMhz - stats.cpuUsedMhz);
     const memFreeMb = Math.max(0, stats.memTotalMb - stats.memUsedMb);
     const diskFreeBytes = Math.max(0, stats.diskTotalBytes - stats.diskUsedBytes);
@@ -2098,6 +2098,26 @@ async function renderVcenterHostsTab() {
           <td>${vcPctCell(hMemPct, h.mem_used_mb != null && h.mem_total_mb != null ? `${fmtGbFromMb(h.mem_used_mb)} / ${fmtGbFromMb(h.mem_total_mb)}` : null)}</td>
           <td>${vcPctCell(hDiskPct, h.disk_total_bytes ? `${fmtGbFromBytes(h.disk_used_bytes)} / ${fmtGbFromBytes(h.disk_total_bytes)}` : null)}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(h.last_synced_at)}</span></td>
+        </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>
+    <div class="table-wrap" style="margin-top:16px">
+      <div class="table-toolbar"><div style="font-size:13px;color:var(--fg-muted)">Chi tiết từng datastore — dung lượng riêng biệt (không cộng gộp), kèm host nào đang mount</div></div>
+      <table>
+        <thead><tr><th>#</th><th>Datastore</th><th>Loại</th><th>Host sử dụng</th><th>Cụm</th><th>Dung lượng</th><th>Cập nhật lúc</th></tr></thead>
+        <tbody>${!datastores.length ? `<tr><td colspan="7" style="text-align:center;color:var(--fg-muted)">Chưa có dữ liệu datastore</td></tr>` : datastores.map((d, i) => {
+          const dUsedBytes = d.capacity_bytes != null && d.free_bytes != null ? d.capacity_bytes - d.free_bytes : null;
+          const dPct = d.capacity_bytes ? (dUsedBytes / d.capacity_bytes) * 100 : null;
+          return `
+        <tr>
+          <td style="color:var(--fg-dim)">${i + 1}</td>
+          <td style="font-weight:600">${escHtml(d.name)}${d.is_accessible ? '' : ' <span class=\"status offline\" style=\"display:inline-flex\"><span class=\"dot\"></span>Không truy cập được</span>'}</td>
+          <td><span class="tag">${escHtml(d.type || '—')}</span></td>
+          <td style="font-size:13px;color:var(--fg-muted)">${d.host_names ? escHtml(d.host_names) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td><span class="tag">${escHtml(d.cluster_name || '—')}</span></td>
+          <td>${vcPctCell(dPct, d.capacity_bytes != null ? `${fmtGbFromBytes(dUsedBytes)} / ${fmtGbFromBytes(d.capacity_bytes)}` : null)}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(d.last_synced_at)}</span></td>
         </tr>`;
         }).join('')}</tbody>
       </table>

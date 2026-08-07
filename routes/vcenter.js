@@ -93,6 +93,24 @@ router.get('/hosts/stats', async (req, res) => {
   res.json(row);
 });
 
+// Per-datastore breakdown — GROUP_CONCAT the mounting host name(s) rather than 1 row per (host,
+// datastore) pair, since a datastore genuinely CAN be mounted by more than 1 host (shared storage),
+// even though every datastore in this fleet happens to be host-exclusive right now (confirmed live).
+router.get('/datastores', async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT d.id, d.name, d.type, d.capacity_bytes, d.free_bytes, d.is_accessible, d.last_synced_at,
+      c.name as cluster_name,
+      GROUP_CONCAT(h.name ORDER BY h.name SEPARATOR ', ') as host_names
+    FROM vcenter_datastores d
+    LEFT JOIN vcenter_clusters c ON c.id = d.vcenter_cluster_id
+    LEFT JOIN vcenter_host_datastores hd ON hd.datastore_id = d.id
+    LEFT JOIN vcenter_hosts h ON h.id = hd.host_id
+    GROUP BY d.id
+    ORDER BY c.name ASC, d.name ASC
+  `).all();
+  res.json(rows);
+});
+
 router.get('/stats', async (req, res) => {
   const total = (await db.prepare('SELECT COUNT(*) as cnt FROM vcenter_vms').get()).cnt;
   const on = (await db.prepare("SELECT COUNT(*) as cnt FROM vcenter_vms WHERE power_state='POWERED_ON'").get()).cnt;
