@@ -1392,6 +1392,34 @@ async function ensureSchemaAndMigrations() {
       UNIQUE KEY uq_vcenter_host (moref, vcenter_cluster_id)
     )
   `);
+
+  // Datastores are frequently SHARED across every host in a cluster (confirmed live: a 3-host
+  // cluster's hosts all mount the exact same 6 datastores) — storing them as their own distinct-by-
+  // moref table (not duplicated per host) is what makes a cluster-wide capacity total possible
+  // without double/triple-counting shared storage. vcenter_host_datastores is the many-to-many
+  // mount association (also confirmed live to genuinely differ per host in a different, single-host
+  // cluster where storage was local, not shared) — per-host figures come from joining through it.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vcenter_datastores (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      moref VARCHAR(64) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      type VARCHAR(20),
+      capacity_bytes BIGINT,
+      free_bytes BIGINT,
+      is_accessible TINYINT,
+      vcenter_cluster_id INT NOT NULL,
+      last_synced_at DATETIME,
+      UNIQUE KEY uq_vcenter_datastore (moref, vcenter_cluster_id)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vcenter_host_datastores (
+      host_id INT NOT NULL,
+      datastore_id INT NOT NULL,
+      PRIMARY KEY (host_id, datastore_id)
+    )
+  `);
 }
 
 async function seedIfEmpty() {

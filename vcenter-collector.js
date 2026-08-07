@@ -105,6 +105,7 @@ async function syncHosts(cluster) {
         <vim25:pathSet>summary.hardware.memorySize</vim25:pathSet>
         <vim25:pathSet>summary.quickStats.overallCpuUsage</vim25:pathSet>
         <vim25:pathSet>summary.quickStats.overallMemoryUsage</vim25:pathSet>
+        <vim25:pathSet>datastore</vim25:pathSet>
       </vim25:propSet>
       ${objectSet}
     </vim25:specSet>
@@ -112,6 +113,7 @@ async function syncHosts(cluster) {
   </vim25:RetrievePropertiesEx>`);
 
   const statsByMoref = {};
+  const datastoreMorefsByHost = {};
   const objBlocks = xml.match(/<objects>.*?<\/objects>/gs) || [];
   for (const block of objBlocks) {
     const moref = /<obj type="HostSystem">([^<]+)<\/obj>/.exec(block)?.[1];
@@ -124,6 +126,13 @@ async function syncHosts(cluster) {
       cpuUsedMhz: num('summary\\.quickStats\\.overallCpuUsage'),
       memUsedMb: num('summary\\.quickStats\\.overallMemoryUsage'),
     };
+    // HostSystem.datastore — the AUTHORITATIVE per-host mount list. NOTE: the REST endpoint
+    // `/api/vcenter/datastore?hosts=<id>` was tried first and confirmed live to be unreliable (it
+    // returned the SAME full cluster-wide datastore list for every host regardless of the filter,
+    // while this SOAP property correctly returned only the 3 datastores host-141 actually mounts) —
+    // this property is why datastores are fetched via SOAP, not REST.
+    const dsPropSet = /<name>datastore<\/name>.*?<\/propSet>/s.exec(block)?.[0] || '';
+    datastoreMorefsByHost[moref] = [...dsPropSet.matchAll(/<ManagedObjectReference[^>]*>([^<]+)<\/ManagedObjectReference>/g)].map(m => m[1]);
   }
 
   const upsert = db.prepare(`
@@ -150,7 +159,88 @@ async function syncHosts(cluster) {
   const stale = db.prepare('DELETE FROM vcenter_hosts WHERE vcenter_cluster_id = ? AND moref = ?');
   for (const { moref } of known) if (!currentMorefs.has(moref)) await stale.run(cluster.id, moref);
 
+  // Needs each host's internal (auto-increment) id for the vcenter_host_datastores join table, so
+  // this only runs after the upsert loop above has definitely created/updated every row.
+  await syncDatastoresForHosts(cluster, datastoreMorefsByHost);
+
   return { clusterId: cluster.id, count: hosts.length };
+}
+
+// Datastore capacity/free-space, fetched by SOAP RetrievePropertiesEx on exactly the distinct set of
+// morefs seen across every host's own `datastore` property (never the REST endpoint — see the
+// comment above on why). Distinct-by-moref storage is what makes hosts/stats' cluster-wide total
+// correct even when the same shared datastore is mounted by 3 different hosts.
+async function syncDatastoresForHosts(cluster, datastoreMorefsByHost) {
+  const allMorefs = [...new Set(Object.values(datastoreMorefsByHost).flat())];
+  const dsByMoref = {};
+  if (allMorefs.length) {
+    const objectSet = allMorefs.map(m => `<vim25:objectSet><vim25:obj type="Datastore">${m}</vim25:obj></vim25:objectSet>`).join('');
+    const xml = await client.soap(`<vim25:RetrievePropertiesEx>
+      <vim25:_this type="PropertyCollector">propertyCollector</vim25:_this>
+      <vim25:specSet>
+        <vim25:propSet><vim25:type>Datastore</vim25:type>
+          <vim25:pathSet>name</vim25:pathSet>
+          <vim25:pathSet>summary.type</vim25:pathSet>
+          <vim25:pathSet>summary.capacity</vim25:pathSet>
+          <vim25:pathSet>summary.freeSpace</vim25:pathSet>
+          <vim25:pathSet>summary.accessible</vim25:pathSet>
+        </vim25:propSet>
+        ${objectSet}
+      </vim25:specSet>
+      <vim25:options></vim25:options>
+    </vim25:RetrievePropertiesEx>`);
+    const objBlocks = xml.match(/<objects>.*?<\/objects>/gs) || [];
+    for (const block of objBlocks) {
+      const moref = /<obj type="Datastore">([^<]+)<\/obj>/.exec(block)?.[1];
+      if (!moref) continue;
+      const str = (name) => new RegExp(`<name>${name}</name><val[^>]*>([^<]*)</val>`).exec(block)?.[1] ?? null;
+      const num = (name) => { const v = str(name); return v == null ? null : Number(v); };
+      dsByMoref[moref] = {
+        name: str('name'), type: str('summary\\.type'),
+        capacity: num('summary\\.capacity'), free: num('summary\\.freeSpace'),
+        isAccessible: str('summary\\.accessible') === 'true' ? 1 : 0,
+      };
+    }
+  }
+
+  // is_accessible, not accessible — ACCESSIBLE is a reserved word in MySQL (confirmed live: a bare
+  // CREATE TABLE with that column name fails with a syntax error).
+  const upsertDs = db.prepare(`
+    INSERT INTO vcenter_datastores (moref, name, type, capacity_bytes, free_bytes, is_accessible, vcenter_cluster_id, last_synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name), type = VALUES(type), capacity_bytes = VALUES(capacity_bytes),
+      free_bytes = VALUES(free_bytes), is_accessible = VALUES(is_accessible), last_synced_at = CURRENT_TIMESTAMP
+  `);
+  for (const moref of allMorefs) {
+    const d = dsByMoref[moref];
+    if (!d) continue; // vanished between the host query and this one — skip, next cycle will catch it
+    await upsertDs.run(moref, d.name, d.type, d.capacity, d.free, d.isAccessible, cluster.id);
+  }
+  const staleDs = await db.prepare('SELECT id, moref FROM vcenter_datastores WHERE vcenter_cluster_id = ?').all(cluster.id);
+  const currentDsMorefs = new Set(allMorefs);
+  const deleteDs = db.prepare('DELETE FROM vcenter_datastores WHERE id = ?');
+  for (const { id, moref } of staleDs) if (!currentDsMorefs.has(moref)) await deleteDs.run(id);
+
+  // Rebuild the host↔datastore mount associations — small tables, so a full delete+reinsert per
+  // cluster sync is simpler and cheap enough vs. diffing, and can't leave stale rows behind.
+  const hostRows = await db.prepare('SELECT id, moref FROM vcenter_hosts WHERE vcenter_cluster_id = ?').all(cluster.id);
+  const dsRows = await db.prepare('SELECT id, moref FROM vcenter_datastores WHERE vcenter_cluster_id = ?').all(cluster.id);
+  const hostIdByMoref = new Map(hostRows.map(h => [h.moref, h.id]));
+  const dsIdByMoref = new Map(dsRows.map(d => [d.moref, d.id]));
+  const hostIds = hostRows.map(h => h.id);
+  if (hostIds.length) {
+    await db.prepare(`DELETE FROM vcenter_host_datastores WHERE host_id IN (${hostIds.map(() => '?').join(',')})`).run(...hostIds);
+  }
+  const insertAssoc = db.prepare('INSERT IGNORE INTO vcenter_host_datastores (host_id, datastore_id) VALUES (?, ?)');
+  for (const [hostMoref, dsMorefs] of Object.entries(datastoreMorefsByHost)) {
+    const hostId = hostIdByMoref.get(hostMoref);
+    if (!hostId) continue;
+    for (const dsMoref of dsMorefs) {
+      const dsId = dsIdByMoref.get(dsMoref);
+      if (dsId) await insertAssoc.run(hostId, dsId);
+    }
+  }
 }
 
 // ── Inventory sync (REST) — one cluster ──

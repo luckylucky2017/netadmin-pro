@@ -51,17 +51,30 @@ router.get('/vms', async (req, res) => {
   res.json(await db.prepare(query).all(...params));
 });
 
+// disk_total_bytes/disk_used_bytes here are THIS HOST's own mounted datastores summed — legitimate
+// per-host info, but not safe to sum across hosts (see /hosts/stats below for why).
 router.get('/hosts', async (req, res) => {
   const rows = await db.prepare(`
-    SELECT h.*, c.name as cluster_name
-    FROM vcenter_hosts h LEFT JOIN vcenter_clusters c ON c.id = h.vcenter_cluster_id
+    SELECT h.*, c.name as cluster_name,
+      COALESCE(ds.disk_total_bytes, 0) as disk_total_bytes,
+      COALESCE(ds.disk_total_bytes, 0) - COALESCE(ds.disk_free_bytes, 0) as disk_used_bytes
+    FROM vcenter_hosts h
+    LEFT JOIN vcenter_clusters c ON c.id = h.vcenter_cluster_id
+    LEFT JOIN (
+      SELECT hd.host_id, SUM(d.capacity_bytes) as disk_total_bytes, SUM(d.free_bytes) as disk_free_bytes
+      FROM vcenter_host_datastores hd JOIN vcenter_datastores d ON d.id = hd.datastore_id
+      GROUP BY hd.host_id
+    ) ds ON ds.host_id = h.id
     ORDER BY c.name ASC, h.name ASC
   `).all();
   res.json(rows);
 });
 
-// Only connection_state='connected' hosts count toward capacity — a disconnected host's last-known
-// numbers are stale and shouldn't be presented as "available" capacity.
+// Only connection_state='connected' hosts count toward CPU/RAM capacity — a disconnected host's
+// last-known numbers are stale and shouldn't be presented as "available" capacity. Disk capacity is
+// summed from vcenter_datastores DIRECTLY (distinct by moref), never by summing each host's own
+// disk_total_bytes — the same shared datastore mounted by 3 hosts would otherwise get counted 3x
+// (confirmed live: a real 3-host cluster's hosts all mount the exact same 6 datastores).
 router.get('/hosts/stats', async (req, res) => {
   const row = await db.prepare(`
     SELECT
@@ -72,6 +85,11 @@ router.get('/hosts/stats', async (req, res) => {
       COALESCE(SUM(mem_used_mb), 0) as memUsedMb
     FROM vcenter_hosts WHERE connection_state = 'connected'
   `).get();
+  const disk = await db.prepare(`
+    SELECT COALESCE(SUM(capacity_bytes), 0) as diskTotalBytes, COALESCE(SUM(capacity_bytes - free_bytes), 0) as diskUsedBytes
+    FROM vcenter_datastores WHERE is_accessible = 1
+  `).get();
+  Object.assign(row, disk);
   res.json(row);
 });
 

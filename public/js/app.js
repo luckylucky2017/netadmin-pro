@@ -2028,6 +2028,7 @@ function vcHostStateBadge(state) {
 }
 const fmtGhz = (mhz) => mhz == null ? '—' : `${(mhz / 1000).toFixed(2)} GHz`;
 const fmtGbFromMb = (mb) => mb == null ? '—' : `${(mb / 1024).toFixed(1)} GB`;
+const fmtGbFromBytes = (bytes) => bytes == null ? '—' : `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
 
 async function renderVcenterHostsTab() {
   const body = document.getElementById('vcenterTabBody');
@@ -2036,8 +2037,10 @@ async function renderVcenterHostsTab() {
     const [hosts, stats] = await Promise.all([api('/vcenter/hosts'), api('/vcenter/hosts/stats')]);
     const cpuFreeMhz = Math.max(0, stats.cpuTotalMhz - stats.cpuUsedMhz);
     const memFreeMb = Math.max(0, stats.memTotalMb - stats.memUsedMb);
+    const diskFreeBytes = Math.max(0, stats.diskTotalBytes - stats.diskUsedBytes);
     const cpuUsedPct = stats.cpuTotalMhz ? (stats.cpuUsedMhz / stats.cpuTotalMhz) * 100 : 0;
     const memUsedPct = stats.memTotalMb ? (stats.memUsedMb / stats.memTotalMb) * 100 : 0;
+    const diskUsedPct = stats.diskTotalBytes ? (stats.diskUsedBytes / stats.diskTotalBytes) * 100 : 0;
     body.innerHTML = `
     <div class="stats-grid">
       <div class="stat-card">
@@ -2064,13 +2067,27 @@ async function renderVcenterHostsTab() {
         <div class="stat-value ${memUsedPct >= 90 ? 'red' : memUsedPct >= 70 ? 'yellow' : 'green'}">${fmtGbFromMb(stats.memUsedMb)}</div>
         <div style="font-size:12px;color:var(--fg-dim)">${memUsedPct.toFixed(1)}%</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+        <div class="stat-label">Tổng Disk (Datastore)</div>
+        <div class="stat-value blue">${fmtGbFromBytes(stats.diskTotalBytes)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">Còn trống: ${fmtGbFromBytes(diskFreeBytes)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon ${diskUsedPct >= 90 ? 'red' : diskUsedPct >= 70 ? 'yellow' : 'green'}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+        <div class="stat-label">Disk đang dùng</div>
+        <div class="stat-value ${diskUsedPct >= 90 ? 'red' : diskUsedPct >= 70 ? 'yellow' : 'green'}">${fmtGbFromBytes(stats.diskUsedBytes)}</div>
+        <div style="font-size:12px;color:var(--fg-dim)">${diskUsedPct.toFixed(1)}%</div>
+      </div>
     </div>
+    <div style="font-size:12px;color:var(--fg-dim);margin:-4px 0 4px">Tổng Disk tính theo datastore duy nhất (không cộng trùng khi nhiều host cùng dùng chung 1 datastore) — cột Disk trong bảng dưới là dung lượng các datastore riêng của từng host.</div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>#</th><th>Host</th><th>Cụm</th><th>Trạng thái</th><th>CPU</th><th>RAM</th><th>Cập nhật lúc</th></tr></thead>
-        <tbody>${!hosts.length ? `<tr><td colspan="7" style="text-align:center;color:var(--fg-muted)">Chưa có dữ liệu host — bấm "Đồng bộ ngay" ở trên</td></tr>` : hosts.map((h, i) => {
+        <thead><tr><th>#</th><th>Host</th><th>Cụm</th><th>Trạng thái</th><th>CPU</th><th>RAM</th><th>Disk (Datastore)</th><th>Cập nhật lúc</th></tr></thead>
+        <tbody>${!hosts.length ? `<tr><td colspan="8" style="text-align:center;color:var(--fg-muted)">Chưa có dữ liệu host — bấm "Đồng bộ ngay" ở trên</td></tr>` : hosts.map((h, i) => {
           const hCpuPct = h.cpu_total_mhz ? (h.cpu_used_mhz / h.cpu_total_mhz) * 100 : null;
           const hMemPct = h.mem_total_mb ? (h.mem_used_mb / h.mem_total_mb) * 100 : null;
+          const hDiskPct = h.disk_total_bytes ? (h.disk_used_bytes / h.disk_total_bytes) * 100 : null;
           return `
         <tr>
           <td style="color:var(--fg-dim)">${i + 1}</td>
@@ -2079,6 +2096,7 @@ async function renderVcenterHostsTab() {
           <td>${vcHostStateBadge(h.connection_state)}</td>
           <td>${vcPctCell(hCpuPct, h.cpu_used_mhz != null && h.cpu_total_mhz != null ? `${fmtGhz(h.cpu_used_mhz)} / ${fmtGhz(h.cpu_total_mhz)}` : null)}</td>
           <td>${vcPctCell(hMemPct, h.mem_used_mb != null && h.mem_total_mb != null ? `${fmtGbFromMb(h.mem_used_mb)} / ${fmtGbFromMb(h.mem_total_mb)}` : null)}</td>
+          <td>${vcPctCell(hDiskPct, h.disk_total_bytes ? `${fmtGbFromBytes(h.disk_used_bytes)} / ${fmtGbFromBytes(h.disk_total_bytes)}` : null)}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(h.last_synced_at)}</span></td>
         </tr>`;
         }).join('')}</tbody>
