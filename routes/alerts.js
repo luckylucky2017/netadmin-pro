@@ -20,7 +20,12 @@ router.get('/', async (req, res) => {
   if (status === 'active') { query += " AND status != 'resolved'"; }
   else if (status) { query += ' AND status = ?'; params.push(status); }
   query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC LIMIT ?";
-  params.push(Math.min(Number(limit) || 1000, 2000));
+  // Default dropped 1000 -> 300 (still 15 client-side-paginated pages at 20/page — plenty before a
+  // refetch is needed) specifically to shrink the no-status-filter/search paths, which can't use an
+  // index (full scan either way) and were shipping up to 1000 full rows over the wire on every
+  // keystroke/auto-refresh. Cap trimmed 2000 -> 1000 to match — 2000 was never reachable other than
+  // via this same now-lower default anyway.
+  params.push(Math.min(Number(limit) || 300, 1000));
   res.json(await db.prepare(query).all(...params));
 });
 

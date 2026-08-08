@@ -134,6 +134,19 @@ function classifyAttackPattern(path) {
   return null;
 }
 
+// A real page load fetches dozens of these in a few seconds (confirmed live: a single real visitor
+// loading fds.vn's homepage pulled 68 distinct CSS/JS/image files within ~4s, all HTTP 200, all
+// different paths — every request-count-based DoS heuristic misreads this as a flood unless static
+// assets are excluded). nginx serves these straight off disk via sendfile — cheap per request — so a
+// burst of THESE specifically is not the same signal as a burst of requests hitting a dynamic
+// endpoint (PHP/API/search/login), which is what the DoS window is actually meant to catch.
+// Deliberately excludes .json — that extension is as likely to be a real (dynamic, expensive) API
+// response as a static manifest file, so it stays counted rather than risk masking an API flood.
+const STATIC_ASSET_EXT_RE = /\.(css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|otf|mp4|webm|ogg|mp3|wav)(\?|$)/i;
+function isStaticAssetPath(path) {
+  return !!path && STATIC_ASSET_EXT_RE.test(path);
+}
+
 // Payload-based categories (a real SQLi/XSS/RCE/LFI string is a strong signal even from just a
 // handful of requests) use a much lower threshold than generic scanning noise (a single stray 404
 // or a sensitive-file/CMS probe is common background bot traffic and needs volume to mean anything).
@@ -171,13 +184,14 @@ function detectPerIpEvents(hits, config = fail2banConfig.DEFAULTS) {
       events.push({ type: 'scan', ip, hitCount: flagged.length, attackCategory: dominantCategory, sample });
     }
 
-    // 206 (Partial Content) only ever happens for HTTP Range requests — mobile Safari/Chrome fetch
-    // video/audio in small byte-range chunks (confirmed live: iOS Safari streaming a single .mp4
-    // generated dozens of 64KB-chunk requests to the exact same URL within seconds), which the
-    // DoS window below would otherwise misread as a flood against one IP. A real DoS/flood attack
-    // wants to consume server resources per request, not politely ask for small ranges of a static
-    // file nginx serves cheaply via sendfile — excluding 206s here is safe, not a detection gap.
-    const dosHits = ipHits.filter(h => h.status !== 206);
+    // Excludes 2 confirmed-live false-positive sources from the DoS window, neither a detection gap:
+    // (1) 206 Partial Content — only ever happens for Range requests (mobile Safari/Chrome streaming
+    //     video/audio in small byte-range chunks — dozens of requests to the SAME url in seconds).
+    // (2) static-asset paths (see isStaticAssetPath) — a real page load pulls dozens of DIFFERENT
+    //     CSS/JS/image files in a few seconds; nginx serves them cheaply via sendfile, unlike a
+    //     dynamic endpoint. A genuine flood still shows up here (it targets "/" , an API, a search
+    //     box, etc. — never dozens of distinct static filenames).
+    const dosHits = ipHits.filter(h => h.status !== 206 && !isStaticAssetPath(h.path));
     const sorted = [...dosHits].sort((a, b) => a.timestamp - b.timestamp);
     let maxInWindow = 0, windowStart = 0;
     for (let i = 0; i < sorted.length; i++) {
@@ -838,7 +852,7 @@ module.exports = {
   start, collectAll, collectVm, retryUnbannedWafAlerts,
   parseNginxLine, parseNginxTimestamp, detectPerIpEvents, detectDdos,
   discoverDomainLogs, extractServerBlocks, parseServerBlockForLogs,
-  classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL,
+  classifyAttackPattern, ATTACK_SIGNATURES, ATTACK_CATEGORY_LABEL, isStaticAssetPath,
   buildBatchTailScript, parseBatchTailOutput, stripPartialFirstLine,
   classifyBrowser, classifyOs, statusClass, aggregateHitsForTraffic, computeTopIps,
 };
