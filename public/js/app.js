@@ -3944,6 +3944,7 @@ function renderWafBanned(search = '') {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <input type="text" id="wafBannedSearch" placeholder="Tìm theo VM, IP..." value="${search}">
         </div>
+        <button class="btn btn-secondary btn-sm" data-permission="waf.block" title="Gỡ chặn tạm thời tất cả IP Việt Nam đang bị chặn (fail2ban vẫn chặn lại nếu IP tái phạm)" onclick="wafUnblockAllVn(this)">Bỏ chặn tạm thời IP Việt Nam</button>
       </div>
       <div id="wafBannedBody"><div class="loading"><div class="spinner"></div></div></div>
     </div>`;
@@ -3951,6 +3952,7 @@ function renderWafBanned(search = '') {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => { wafBannedPagination.page = 1; loadWafBanned(); }, 300);
   });
+  applyPermissionVisibility();
   loadWafBanned(search);
 }
 
@@ -4049,6 +4051,24 @@ async function wafUnblockIpFromBannedTab(vmId, ip, btn) {
     if (result.ok) { toast(`Đã gỡ chặn ${ip}`, 'success'); loadWafBanned(); }
     else { toast(result.error || 'Không gỡ chặn được', 'error'); btn.disabled = false; }
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// Bulk "temporary unblock" for VN-country IPs — same fail2ban unbanip semantics as the single-row
+// "Gỡ chặn" button (not an exception, so a VN IP that re-triggers real detection gets re-banned
+// normally). Acts on ALL VN-country banned IPs system-wide (server queries the full table), not just
+// what the search box currently has visible — the confirm dialog says so explicitly to avoid
+// implying a scoped/partial action.
+async function wafUnblockAllVn(btn) {
+  if (!confirm('Gỡ chặn tạm thời TẤT CẢ IP Việt Nam đang bị chặn trên mọi VM (không chỉ các IP đang hiển thị)? IP vẫn có thể bị chặn lại nếu tái phạm.')) return;
+  btn.disabled = true;
+  try {
+    const result = await api('/waf/banned-ips/unblock-vn', 'POST', {});
+    if (result.total === 0) toast('Không có IP Việt Nam nào đang bị chặn', 'info');
+    else if (result.count > 0) toast(`Đã gỡ chặn tạm thời ${result.count}/${result.total} IP Việt Nam`, result.count === result.total ? 'success' : 'error');
+    else toast('Không gỡ chặn được IP nào', 'error');
+    loadWafBanned();
+  } catch (e) { toast(e.message, 'error'); }
+  finally { btn.disabled = false; }
 }
 
 // "Mở chặn thủ công + thêm ngoại lệ" — 1 nút thay vì phải gỡ chặn rồi qua tab Ngoại lệ IP thêm lại

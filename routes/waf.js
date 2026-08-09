@@ -332,6 +332,62 @@ router.post('/vms/:id/unblock-ip', requirePermission('waf.block'), async (req, r
   res.json(result);
 });
 
+// Bulk "temporary unblock" for VN-country banned IPs, scoped to the "IP đang bị chặn" tab. Same
+// unbanIp semantics as the single-IP button above (fail2ban unbanip — not an exception, so a VN IP
+// that re-triggers real detection gets re-banned normally). One SSH connection per affected VM
+// (not per IP) via unbanIpViaSsh, since a VM can have dozens of VN IPs banned at once.
+router.post('/banned-ips/unblock-vn', requirePermission('waf.block'), async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT b.vm_id, v.name AS vm_name, b.ip, agg.country
+    FROM waf_banned_ips b
+    JOIN vcenter_vms v ON v.id = b.vm_id
+    LEFT JOIN (
+      SELECT vm_id, src_ip,
+        SUBSTRING_INDEX(GROUP_CONCAT(country ORDER BY occurred_at DESC SEPARATOR ','), ',', 1) AS country
+      FROM waf_events
+      GROUP BY vm_id, src_ip
+    ) agg ON agg.vm_id = b.vm_id AND agg.src_ip = b.ip
+    WHERE agg.country = 'VN'
+  `).all();
+
+  if (!rows.length) return res.json({ message: 'Không có IP Việt Nam nào đang bị chặn', count: 0, total: 0, results: [] });
+
+  const byVm = new Map();
+  for (const r of rows) {
+    if (!byVm.has(r.vm_id)) byVm.set(r.vm_id, { vm_name: r.vm_name, ips: [] });
+    byVm.get(r.vm_id).ips.push(r.ip);
+  }
+  const vmIds = [...byVm.keys()];
+  const vms = await db.prepare(`
+    SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
+    WHERE id IN (${vmIds.map(() => '?').join(',')})
+  `).all(...vmIds);
+
+  const results = [];
+  for (const vm of vms) {
+    const { ips } = byVm.get(vm.id);
+    let ssh;
+    try {
+      ssh = await wafManager.connect(vm);
+      for (const ip of ips) {
+        const r = await wafManager.unbanIpViaSsh(ssh, ip).catch((e) => ({ ok: false, error: e.message }));
+        results.push({ vm_id: vm.id, vm_name: vm.name, ip, ok: r.ok, error: r.error });
+      }
+    } catch (e) {
+      for (const ip of ips) results.push({ vm_id: vm.id, vm_name: vm.name, ip, ok: false, error: `Không kết nối được SSH: ${e.message}` });
+    } finally {
+      if (ssh) ssh.dispose();
+    }
+  }
+
+  const successCount = results.filter((r) => r.ok).length;
+  for (const vm of vms) {
+    const okIps = results.filter((r) => r.vm_id === vm.id && r.ok).map((r) => r.ip);
+    if (okIps.length) await logActivity(req.user, 'UPDATE', 'vcenter_vm', vm.id, vm.name, `Gỡ chặn tạm thời ${okIps.length} IP Việt Nam khỏi WAF: ${okIps.join(', ')}`);
+  }
+  res.json({ message: 'OK', count: successCount, total: rows.length, results });
+});
+
 // ── IP exceptions (global allowlist — see waf-manager.js's banIp, checked before every ban) ────
 function isValidExceptionIp(value) {
   const cidrM = /^(.+)\/(\d{1,3})$/.exec(value);

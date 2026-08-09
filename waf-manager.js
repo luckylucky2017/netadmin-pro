@@ -342,5 +342,5 @@ async function listBannedIps(vm) {
 module.exports = {
   JAIL_NAME, SAFE_LOG_PATH_RE, checkStatus, installJail, stopJail, banIp, unbanIp, listBannedIps, SUDOERS_HINT,
   matchesException, isExceptedIp, getExceptions, pushIgnoreIp,
-  parseBannedIpsOutput, listBannedIpsViaSsh, unbanIpViaSsh, buildWafJailFilesScript,
+  parseBannedIpsOutput, listBannedIpsViaSsh, unbanIpViaSsh, buildWafJailFilesScript, connect,
 };
