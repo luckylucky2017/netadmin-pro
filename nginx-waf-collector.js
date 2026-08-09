@@ -509,7 +509,7 @@ async function recordTrafficAggregates(vm, domain, hits) {
   }
 }
 
-async function raiseWafAlert(vm, domain, ev, country, blockResult, config) {
+async function raiseWafAlert(vm, domain, ev, country, isForeign, blockResult, config) {
   const metric = ev.type === 'scan' ? 'waf_scan' : 'waf_dos';
   const already = await db.prepare(`
     SELECT id FROM alerts WHERE metric = ? AND source_type = 'vcenter_vm' AND source_id = ? AND metric_value = ? AND status = 'open'
@@ -519,11 +519,17 @@ async function raiseWafAlert(vm, domain, ev, country, blockResult, config) {
   const title = ev.type === 'scan'
     ? (categoryLabel ? `WAF phát hiện ${categoryLabel}` : 'WAF phát hiện dò quét')
     : 'WAF phát hiện tấn công DoS';
-  const action = vm.waf_auto_block
-    ? (blockResult?.ok ? ' — ĐÃ CHẶN IP qua fail2ban'
-      : blockResult?.excepted ? ' — bỏ qua, không chặn (IP nằm trong danh sách ngoại lệ)'
-      : ` — CHƯA chặn được (${blockResult?.error || 'lỗi không rõ'})`)
-    : ' — chỉ cảnh báo (tự động chặn đang tắt cho VM này)';
+  // Domestic (VN) IPs are never auto-banned regardless of vm.waf_auto_block — see processHits — to
+  // avoid a false-positive DoS/scan detection locking out real Vietnamese users/customers. Still
+  // fully monitored (event row + alert raised as normal); an admin can block manually from the WAF
+  // Events tab's "Chặn IP này ngay" button when the detection genuinely warrants it.
+  const action = !vm.waf_auto_block
+    ? ' — chỉ cảnh báo (tự động chặn đang tắt cho VM này)'
+    : !isForeign
+      ? ' — chỉ cảnh báo (IP nội địa Việt Nam, không tự động chặn — có thể chặn thủ công nếu cần)'
+      : (blockResult?.ok ? ' — ĐÃ CHẶN IP qua fail2ban'
+        : blockResult?.excepted ? ' — bỏ qua, không chặn (IP nằm trong danh sách ngoại lệ)'
+        : ` — CHƯA chặn được (${blockResult?.error || 'lỗi không rõ'})`);
   const site = domainLabel(domain, vm.name);
   const message = ev.type === 'scan'
     ? `IP ${ev.ip}${country ? ` (${country})` : ''} gửi ${ev.hitCount} request${categoryLabel ? ` nghi ${categoryLabel}` : ' lỗi/đường dẫn khả nghi'} tới "${site}" trên VM "${vm.name}"${action}`
@@ -584,13 +590,15 @@ async function processHits(vm, domain, domainLogId, hits) {
   for (const ev of perIpEvents) {
     const { country, isForeign } = classifyIp(ev.ip);
     let blockResult = null;
-    if (vm.waf_auto_block) blockResult = await wafManager.banIp(vm, ev.ip);
+    // Domestic (VN) IPs are excluded from auto-block — see raiseWafAlert's comment. Still logged and
+    // alerted normally, just left for an admin to block manually if the detection genuinely warrants it.
+    if (vm.waf_auto_block && isForeign) blockResult = await wafManager.banIp(vm, ev.ip);
     await insertEvent.run(
       vm.id, vm.name, domain, ev.type, ev.ip, country, isForeign,
       ev.sample.method, ev.sample.path, ev.sample.status, ev.sample.userAgent,
       ev.hitCount, blockResult?.ok ? 1 : 0, toSqlDatetime(ev.sample.timestamp), ev.attackCategory || null, null
     );
-    await raiseWafAlert(vm, domain, ev, country, blockResult, config);
+    await raiseWafAlert(vm, domain, ev, country, isForeign, blockResult, config);
   }
 
   const lastTs = hits[hits.length - 1].timestamp;
@@ -829,6 +837,9 @@ async function retryUnbannedWafAlerts() {
   for (const alert of pending) {
     const vm = vmById.get(alert.vm_id);
     if (!vm || !vm.ssh_credential_id || !vm.ip_address) continue;
+    // Domestic (VN) IPs are deliberately never auto-blocked (see processHits/raiseWafAlert) — their
+    // alert stays open (that's correct, not a failed ban attempt) but must not be swept up here.
+    if (!classifyIp(alert.ip).isForeign) continue;
     const result = await wafManager.banIp(vm, alert.ip).catch((e) => ({ ok: false, error: e.message }));
     if (result.ok) {
       await db.prepare("UPDATE alerts SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(alert.id);
