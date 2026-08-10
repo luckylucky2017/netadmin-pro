@@ -3161,7 +3161,7 @@ function renderOutboundRows() {
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td style="font-weight:600">${c.vm_name || '—'}</td>
           <td>${c.process_name ? reportsProcessDetail(c) : '<span style="font-size:12px;color:var(--fg-dim)">không xác định</span>'}</td>
-          <td><span style="font-family:monospace">${c.remote_ip}</span></td>
+          <td><span style="font-family:monospace">${c.remote_ip}</span>${c.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(c.remote_hostname)}</div>` : ''}</td>
           <td>${c.remote_port ?? '—'}</td>
           <td>${c.country || '—'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(c.first_seen)}</span></td>
@@ -9641,7 +9641,7 @@ function renderReportsOutboundRows() {
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.last_seen)}</span></td>
           <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
-          <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span></td>
+          <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span>${r.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(r.remote_hostname)}</div>` : ''}</td>
           <td>${r.remote_port ?? '—'}</td>
           <td>${escHtml(r.country || '—')}</td>
           <td>${reportsProcessDetail(r)}</td>
@@ -9659,8 +9659,8 @@ function exportReportsCsv() {
     rows = reportsData.wafDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country, r.attackCategory || '']);
     filenamePart = 'waf-blocked';
   } else if (reportsTab === 'outbound') {
-    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Cổng', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
-    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_port, r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
+    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Tên miền (reverse DNS)', 'Cổng', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
+    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_hostname || '', r.remote_port, r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
     filenamePart = 'outbound';
   } else {
     headers = ['Thời gian', 'VM', 'IP', 'Quốc gia'];

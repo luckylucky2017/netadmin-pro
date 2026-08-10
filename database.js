@@ -1055,6 +1055,15 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cmdline TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN cwd TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 
+  // Reverse-DNS (PTR) hostname for remote_ip — the domain/URL a curl/wget download hits is already
+  // visible via cmdline (parseDownloadDetail), but every OTHER process (apt, docker pull, a backend
+  // calling an API, etc.) only ever shows a bare IP with no indication of what service it actually
+  // is. Resolved once per new connection by outbound-connection-collector.js itself (Node's own DNS,
+  // not the VM's) and cached here — not re-resolved every poll, since a PTR record doesn't change
+  // minute-to-minute and re-querying a long-lived connection every cycle would just be wasted DNS
+  // traffic for no benefit.
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN remote_hostname TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.

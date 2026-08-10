@@ -4,9 +4,29 @@
 // can see every socket's local/remote address — only per-process ownership (`-p`) needs root, which
 // isn't needed here.
 const { NodeSSH } = require('node-ssh');
+const dns = require('dns');
 const db = require('./database');
 const { classifyIp } = require('./ssh-security-collector');
 const sshCredentials = require('./ssh-credentials');
+
+// Best-effort PTR lookup from the netadmin-pro server itself (not the monitored VM) — a domain hint
+// for the "what is this IP" question that applies to every process, not just curl/wget (which
+// already gets its actual URL from cmdline via parseDownloadDetail). Many IPs (internal, or public
+// IPs with no PTR record configured) will legitimately resolve to nothing — that's a normal, silent
+// outcome, not an error. A hard timeout guards against a slow/unresponsive resolver stalling the
+// whole collection cycle; dns.reverse itself has no built-in timeout.
+function reverseDnsLookup(ip, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, timeoutMs);
+    dns.reverse(ip, (err, hostnames) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(!err && hostnames && hostnames.length ? hostnames[0] : null);
+    });
+  });
+}
 
 // Must match MySQL's own CURRENT_TIMESTAMP format AND timezone. This server's MySQL has
 // time_zone=SYSTEM = Asia/Ho_Chi_Minh, so CURRENT_TIMESTAMP/NOW() already return GMT+7 wall-clock
@@ -217,8 +237,8 @@ const upsertSeen = db.prepare(`
     pid = COALESCE(?, pid), cmdline = COALESCE(?, cmdline), cwd = COALESCE(?, cwd) WHERE id = ?
 `);
 const insertNew = db.prepare(`
-  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd, remote_hostname)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const findExisting = db.prepare(`
   SELECT id FROM outbound_connections WHERE vm_id = ? AND remote_ip = ? AND remote_port = ?
@@ -237,15 +257,26 @@ async function collectVm(vm) {
     const procsByPid = parseProcs(result.stdout);
     const cwdsByPid = parseCwds(result.stdout);
 
+    // Figure out which connections are actually new BEFORE doing any PTR lookups, so an
+    // already-tracked long-lived connection never pays the DNS cost again — same "resolve once"
+    // philosophy as cmdline/cwd. Deduped by IP (not by connection) since several new connections can
+    // share a destination (e.g. multiple ports to the same CDN edge).
+    const existingByConn = new Map(await Promise.all(
+      outbound.map(async (conn) => [conn, await findExisting.get(vm.id, conn.remoteIp, conn.remotePort)])
+    ));
+    const newIps = [...new Set(outbound.filter((c) => !existingByConn.get(c)).map((c) => c.remoteIp))];
+    const hostnameByIp = new Map(await Promise.all(newIps.map(async (ip) => [ip, await reverseDnsLookup(ip)])));
+
     for (const conn of outbound) {
       const { country, isForeign } = classifyIp(conn.remoteIp);
       const cmdline = conn.pid ? procsByPid.get(conn.pid) || null : null;
       const cwd = conn.pid ? cwdsByPid.get(conn.pid) || null : null;
-      const existing = await findExisting.get(vm.id, conn.remoteIp, conn.remotePort);
+      const existing = existingByConn.get(conn);
       if (existing) {
         await upsertSeen.run(conn.processName, conn.pid, cmdline, cwd, existing.id);
       } else {
-        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd);
+        const remoteHostname = hostnameByIp.get(conn.remoteIp) || null;
+        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd, remoteHostname);
         if (isForeign) await raiseOutboundForeignAlert(vm, conn.remoteIp, conn.remotePort, country, conn.processName, conn.pid);
       }
     }

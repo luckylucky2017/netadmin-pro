@@ -101,7 +101,7 @@ async function fetchPeriod(sinceStr, untilStr) {
   // rules can't drift) turns a curl/wget cmdline into an actual {url, destination} — the specific
   // "what got downloaded and where did it land" detail the report needs, not just a bare process name.
   const outboundForeign = await db.prepare(`
-    SELECT vm_id, vm_name, remote_ip, remote_port, country, process_name, cmdline, cwd, first_seen, last_seen
+    SELECT vm_id, vm_name, remote_ip, remote_port, country, process_name, cmdline, cwd, remote_hostname, first_seen, last_seen
     FROM outbound_connections
     WHERE is_foreign = 1 AND last_seen >= ? AND last_seen < ?
     ORDER BY last_seen DESC
