@@ -9589,22 +9589,30 @@ function renderReportsWafRows() {
       </tbody></table>${paginationBar(reportsWafPagination, sorted.length, 'reportsWafPagination', 'renderReportsWafRows')}`;
 }
 
-// Process name always shown first (full raw cmdline as a hover tooltip, for anyone who wants the
-// exact invocation rather than the parsed interpretation). When outbound-connection-collector.js's
-// parseDownloadDetail() found a curl/wget URL, adds a 2nd line with the download URL and — when
-// available — the resolved destination path; falls back to "(tên file mặc định theo URL)" when no
-// explicit -o/-O/-P was used, since the exact filename curl/wget would choose isn't re-derived here
-// (e.g. a server's Content-Disposition header can override it).
+// Process name shown first, then — for ANY process that had a cmdline captured (ps -eo args= covers
+// every process, not just curl/wget) — the full raw command line as directly visible, wrapped text,
+// not just a hover tooltip: a rclone/ffmpeg/java/etc. invocation's exact flags are otherwise
+// invisible unless you know to hover. When outbound-connection-collector.js's parseDownloadDetail()
+// additionally found a curl/wget URL, an extra highlighted line shows the parsed download URL and —
+// when available — the resolved destination path (falls back to "(tên file mặc định theo URL)" when
+// no explicit -o/-O/-P was used, since the exact filename curl/wget would choose isn't re-derived
+// here — e.g. a server's Content-Disposition header can override it) as a quick-glance summary on
+// top of, not instead of, the full raw line below it.
 function reportsProcessDetail(r) {
   const pidSuffix = r.pid ? `<span style="font-size:11px;color:var(--fg-dim)"> (PID ${r.pid})</span>` : '';
-  const procLine = `<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${r.cmdline ? escAttr(r.cmdline) : ''}">${r.process_name ? escHtml(r.process_name) : '—'}${pidSuffix}</div>`;
-  if (!r.downloadUrl) return procLine;
-  const destLine = r.downloadDest
-    ? `<span style="color:var(--fg-dim)">→ ${escHtml(r.downloadDest)}</span>`
-    : `<span style="color:var(--fg-dim);font-style:italic">→ (tên file mặc định theo URL, trong thư mục làm việc${r.cwd ? ` ${escHtml(r.cwd)}` : ''})</span>`;
-  return `${procLine}<div style="font-size:11px;margin-top:3px;max-width:320px;word-break:break-all" title="${escAttr(r.downloadUrl)}">
-      <span style="color:var(--yellow);font-weight:600">⭳</span> ${escHtml(r.downloadUrl)}<br>${destLine}
-    </div>`;
+  const parts = [`<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}${pidSuffix}</div>`];
+  if (r.downloadUrl) {
+    const destLine = r.downloadDest
+      ? `<span style="color:var(--fg-dim)">→ ${escHtml(r.downloadDest)}</span>`
+      : `<span style="color:var(--fg-dim);font-style:italic">→ (tên file mặc định theo URL, trong thư mục làm việc${r.cwd ? ` ${escHtml(r.cwd)}` : ''})</span>`;
+    parts.push(`<div style="font-size:11px;margin-top:3px;max-width:360px;word-break:break-all">
+        <span style="color:var(--yellow);font-weight:600">⭳</span> ${escHtml(r.downloadUrl)}<br>${destLine}
+      </div>`);
+  }
+  if (r.cmdline) {
+    parts.push(`<div style="font-size:11px;color:var(--fg-dim);margin-top:3px;max-width:400px;word-break:break-all;font-family:monospace">${escHtml(r.cmdline)}</div>`);
+  }
+  return parts.join('');
 }
 
 function renderReportsOutboundTab() {
