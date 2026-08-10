@@ -4,6 +4,7 @@ const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 const fail2banManager = require('../fail2ban-manager');
 const fail2banConfig = require('../fail2ban-config');
+const { parseDownloadDetail } = require('../outbound-connection-collector');
 
 router.get('/events', async (req, res) => {
   const { vmId, eventType, foreignOnly, search, limit } = req.query;
@@ -69,7 +70,17 @@ router.get('/outbound', async (req, res) => {
   if (foreignOnly === 'true') query += ' AND is_foreign = 1';
   if (search) { query += ' AND (vm_name LIKE ? OR remote_ip LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
   query += ' ORDER BY is_foreign DESC, last_seen DESC LIMIT 500';
-  res.json(await db.prepare(query).all(...params));
+  const rows = await db.prepare(query).all(...params);
+  // Same curl/wget cmdline -> {url, destination} enrichment as routes/reports.js's foreign-security
+  // report, so the "Kết nối ra ngoài" tab's Process column can show the actual URL being
+  // downloaded/uploaded, not just the bare process name — parseDownloadDetail is shared with the
+  // collector itself so the parsing rules can't drift between the two call sites.
+  rows.forEach((r) => {
+    const detail = parseDownloadDetail(r.process_name, r.cmdline, r.cwd);
+    r.downloadUrl = detail?.url || null;
+    r.downloadDest = detail?.destination || null;
+  });
+  res.json(rows);
 });
 
 router.get('/outbound/stats', async (req, res) => {

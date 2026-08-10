@@ -3160,7 +3160,7 @@ function renderOutboundRows() {
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
           <td style="font-weight:600">${c.vm_name || '—'}</td>
-          <td>${c.process_name ? `<span style="font-family:monospace">${c.process_name}</span><span style="font-size:11px;color:var(--fg-dim)"> (PID ${c.pid})</span>` : '<span style="font-size:12px;color:var(--fg-dim)">không xác định</span>'}</td>
+          <td>${c.process_name ? reportsProcessDetail(c) : '<span style="font-size:12px;color:var(--fg-dim)">không xác định</span>'}</td>
           <td><span style="font-family:monospace">${c.remote_ip}</span></td>
           <td>${c.remote_port ?? '—'}</td>
           <td>${c.country || '—'}</td>
@@ -9596,7 +9596,8 @@ function renderReportsWafRows() {
 // explicit -o/-O/-P was used, since the exact filename curl/wget would choose isn't re-derived here
 // (e.g. a server's Content-Disposition header can override it).
 function reportsProcessDetail(r) {
-  const procLine = `<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${r.cmdline ? escAttr(r.cmdline) : ''}">${r.process_name ? escHtml(r.process_name) : '—'}</div>`;
+  const pidSuffix = r.pid ? `<span style="font-size:11px;color:var(--fg-dim)"> (PID ${r.pid})</span>` : '';
+  const procLine = `<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${r.cmdline ? escAttr(r.cmdline) : ''}">${r.process_name ? escHtml(r.process_name) : '—'}${pidSuffix}</div>`;
   if (!r.downloadUrl) return procLine;
   const destLine = r.downloadDest
     ? `<span style="color:var(--fg-dim)">→ ${escHtml(r.downloadDest)}</span>`
