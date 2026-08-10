@@ -102,8 +102,14 @@ body { background: var(--bg); color: var(--fg); font-family: 'Fira Sans', system
    8-10 columns with nowrap headers that don't fit narrower viewports. With plain `hidden`, the
    extra columns were silently clipped with no way to reach them; this keeps the page itself from
    scrolling horizontally (body already sets overflow-x: hidden) while letting each wide table
-   scroll within its own container instead of breaking the layout. */
-.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow-x: auto; overflow-y: hidden; }
+   scroll within its own container instead of breaking the layout.
+   overflow-y: auto + max-height — every long table/report block (CrowdSec Decisions/Metrics, WAF
+   events, alerts, etc.) used to just keep growing and push the whole PAGE to scroll, often past
+   several screens for an unpaginated table. Capping each .table-wrap at a fixed height and scrolling
+   internally instead means the page's own scroll stays short and any one table's content is reached
+   with a quick scroll right there, not a long trip down the whole page. th below gets position:
+   sticky so column headers stay visible while scrolling within that shorter, faster motion. */
+.table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow-x: auto; overflow-y: auto; max-height: 65vh; }
 .table-toolbar { display: flex; align-items: center; gap: 12px; padding: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .search-box { display: flex; align-items: center; gap: 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; flex: 1; min-width: 200px; }
 .search-box input { background: none; border: none; outline: none; color: var(--fg); font-size: 14px; width: 100%; padding: 8px 0; }
@@ -111,7 +117,7 @@ body { background: var(--bg); color: var(--fg); font-family: 'Fira Sans', system
 .filter-select { background: var(--surface2); border: 1px solid var(--border); color: var(--fg); font-size: 13px; padding: 8px 12px; border-radius: var(--radius); cursor: pointer; outline: none; }
 .filter-select:focus { border-color: var(--accent); }
 table { width: 100%; border-collapse: collapse; }
-th { background: var(--surface2); padding: 11px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--surface2); padding: 11px 16px; text-align: left; font-size: 11px; font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0; z-index: 2; }
 td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: rgba(255,255,255,0.02); }

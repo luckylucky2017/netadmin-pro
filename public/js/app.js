@@ -4578,7 +4578,7 @@ async function renderCrowdsecMetricsTab() {
   try {
     const { text } = await api('/crowdsec/metrics');
     const b = document.getElementById('crowdsecMetricsBody');
-    if (b) b.innerHTML = `<pre style="overflow-x:auto;font-size:12px;line-height:1.5;margin:0">${escHtml(text || '')}</pre>`;
+    if (b) b.innerHTML = `<pre style="overflow:auto;max-height:65vh;font-size:12px;line-height:1.5;margin:0">${escHtml(text || '')}</pre>`;
   } catch (e) {
     const b = document.getElementById('crowdsecMetricsBody');
     if (b) b.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
