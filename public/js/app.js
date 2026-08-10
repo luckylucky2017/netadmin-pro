@@ -9649,10 +9649,31 @@ function reportsProcessDetail(r) {
     </button>`;
 }
 
+// navigator.clipboard only exists in a "secure context" (HTTPS or localhost) — undefined when this
+// app is reached over plain HTTP by IP, which is how it's actually accessed here, so a bare
+// navigator.clipboard.writeText() call throws "Cannot read properties of undefined". Falls back to
+// the older execCommand('copy') path (works over HTTP too, deprecated but still functional in every
+// current browser) via a temporary off-screen textarea.
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('execCommand("copy") thất bại');
+}
+
 async function copyProcessDetail(btn) {
   const text = btn.dataset.copy || '';
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     toast('Đã sao chép chi tiết tiến trình', 'success');
   } catch (e) {
     toast(`Không sao chép được: ${e.message}`, 'error');
