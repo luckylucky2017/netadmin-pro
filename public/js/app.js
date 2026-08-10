@@ -4310,6 +4310,7 @@ async function renderCrowdsec() {
     <div class="filter-tabs" id="crowdsecTabs" style="margin-bottom:16px">
       <div class="filter-tab ${crowdsecTab === 'overview' ? 'active' : ''}" data-tab="overview" onclick="setCrowdsecTab('overview')">Tổng quan</div>
       <div class="filter-tab ${crowdsecTab === 'decisions' ? 'active' : ''}" data-tab="decisions" onclick="setCrowdsecTab('decisions')">Decisions${sshOk ? '' : ' 🔒'}</div>
+      <div class="filter-tab ${crowdsecTab === 'scenarios' ? 'active' : ''}" data-tab="scenarios" onclick="setCrowdsecTab('scenarios')">Scenarios${sshOk ? '' : ' 🔒'}</div>
       <div class="filter-tab ${crowdsecTab === 'bouncers' ? 'active' : ''}" data-tab="bouncers" onclick="setCrowdsecTab('bouncers')">Bouncers${sshOk ? '' : ' 🔒'}</div>
       <div class="filter-tab ${crowdsecTab === 'machines' ? 'active' : ''}" data-tab="machines" onclick="setCrowdsecTab('machines')">Machines${sshOk ? '' : ' 🔒'}</div>
       <div class="filter-tab ${crowdsecTab === 'metrics' ? 'active' : ''}" data-tab="metrics" onclick="setCrowdsecTab('metrics')">Metrics${sshOk ? '' : ' 🔒'}</div>
@@ -4330,6 +4331,7 @@ function setCrowdsecTab(tab) {
 
 function renderCrowdsecTabBody() {
   if (crowdsecTab === 'decisions') return renderCrowdsecDecisionsTab();
+  if (crowdsecTab === 'scenarios') return renderCrowdsecScenariosTab();
   if (crowdsecTab === 'bouncers') return renderCrowdsecBouncersTab();
   if (crowdsecTab === 'machines') return renderCrowdsecMachinesTab();
   if (crowdsecTab === 'metrics') return renderCrowdsecMetricsTab();
@@ -4510,6 +4512,116 @@ async function crowdsecDeleteDecision(id, value, btn) {
     toast(`Đã gỡ chặn ${value || id}`, 'success');
     loadCrowdsecDecisions();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ── Scenarios (installed attack-detection scenarios + hub update check/apply/daily auto-update) ──
+async function renderCrowdsecScenariosTab() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  if (!crowdsecStatusCache?.sshManagement?.available) { body.innerHTML = crowdsecSshGateHtml(); return; }
+  body.innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Cập nhật hub CrowdSec</div>
+      <div id="crowdsecHubSettingsBody"><div class="loading"><div class="spinner"></div></div></div>
+      <div id="crowdsecHubCheckResult" style="margin-top:12px"></div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <div style="font-size:13px;color:var(--fg-dim)">Danh sách scenario (kịch bản phát hiện tấn công) đang cài đặt trên máy chủ CrowdSec</div>
+        <button class="btn btn-secondary btn-sm" onclick="loadCrowdsecScenarios()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Làm mới
+        </button>
+      </div>
+      <div id="crowdsecScenariosBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  loadCrowdsecHubSettings();
+  loadCrowdsecScenarios();
+}
+
+async function loadCrowdsecHubSettings() {
+  const el = document.getElementById('crowdsecHubSettingsBody');
+  if (!el) return;
+  try {
+    const s = await api('/crowdsec/hub/settings');
+    el.innerHTML = `
+      <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+        <label class="toggle-switch" title="Tự động chạy cscli hub update + upgrade mỗi ngày (kiểm tra mỗi 6h, chỉ áp dụng khi đã quá 23h kể từ lần cập nhật gần nhất)">
+          <input type="checkbox" id="crowdsecHubAutoUpdate" ${s.hubAutoUpdate ? 'checked' : ''} onchange="saveCrowdsecHubAutoUpdate(this)">
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:13px">Tự động cập nhật hàng ngày</span>
+        <span style="font-size:12px;color:var(--fg-dim)">Lần cập nhật gần nhất: ${s.lastHubUpgradeAt ? formatTime(s.lastHubUpgradeAt) : 'Chưa từng'}</span>
+        <div style="flex:1"></div>
+        <button class="btn btn-secondary btn-sm" onclick="crowdsecCheckHubUpdates(this)">Kiểm tra cập nhật</button>
+        <button class="btn btn-primary btn-sm" data-permission="waf.manage" onclick="crowdsecUpgradeHubNow(this)">Cập nhật ngay</button>
+      </div>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+async function saveCrowdsecHubAutoUpdate(checkbox) {
+  checkbox.disabled = true;
+  try {
+    await api('/crowdsec/hub/settings', 'PATCH', { hubAutoUpdate: checkbox.checked });
+    toast(checkbox.checked ? 'Đã bật tự động cập nhật hàng ngày' : 'Đã tắt tự động cập nhật hàng ngày', 'success');
+  } catch (e) { toast(e.message, 'error'); checkbox.checked = !checkbox.checked; }
+  checkbox.disabled = false;
+}
+
+async function crowdsecCheckHubUpdates(btn) {
+  const result = document.getElementById('crowdsecHubCheckResult');
+  btn.disabled = true;
+  if (result) result.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const r = await api('/crowdsec/hub/check');
+    if (result) result.innerHTML = `<pre style="overflow:auto;max-height:40vh;font-size:12px;line-height:1.5;margin:0;background:var(--surface2);padding:12px;border-radius:var(--radius)">${escHtml(r.text || '')}</pre>`;
+  } catch (e) {
+    if (result) result.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+  btn.disabled = false;
+}
+
+async function crowdsecUpgradeHubNow(btn) {
+  if (!confirm('Cập nhật hub CrowdSec ngay? Sẽ tải phiên bản mới nhất cho các scenario/collection/parser đã cài và reload dịch vụ crowdsec.')) return;
+  const result = document.getElementById('crowdsecHubCheckResult');
+  btn.disabled = true;
+  if (result) result.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const r = await api('/crowdsec/hub/upgrade', 'POST');
+    toast(r.ok ? 'Đã cập nhật hub CrowdSec' : 'Cập nhật gặp lỗi, xem chi tiết bên dưới', r.ok ? 'success' : 'error');
+    if (result) result.innerHTML = `<pre style="overflow:auto;max-height:40vh;font-size:12px;line-height:1.5;margin:0;background:var(--surface2);padding:12px;border-radius:var(--radius)">${escHtml(r.text || '')}</pre>`;
+    loadCrowdsecHubSettings();
+    loadCrowdsecScenarios();
+  } catch (e) {
+    toast(e.message, 'error');
+    if (result) result.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+  btn.disabled = false;
+}
+
+async function loadCrowdsecScenarios() {
+  const body = document.getElementById('crowdsecScenariosBody');
+  if (!body) return;
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const rows = await api('/crowdsec/scenarios');
+    if (!rows?.length) { body.innerHTML = `<div class="empty-state"><h3>Không có scenario nào đang cài đặt</h3></div>`; return; }
+    body.innerHTML = `<table>
+        <thead><tr><th>Scenario</th><th>Mô tả</th><th>Phiên bản</th><th>Trạng thái</th></tr></thead>
+        <tbody>${rows.map(s => `
+          <tr>
+            <td style="font-weight:600;font-family:monospace;font-size:13px">${escHtml(s.name || '—')}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(s.description || '—')}</span></td>
+            <td style="font-family:monospace;font-size:12px">${escHtml(s.local_version || '—')}</td>
+            <td>${(s.status || '').includes('enabled') ? '<span class="status online"><span class="dot"></span>Đang bật</span>' : `<span class="status unknown"><span class="dot"></span>${escHtml(s.status || '—')}</span>`}</td>
+          </tr>`).join('')}
+        </tbody></table>`;
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
 }
 
 // ── Bouncers ────────────────────────────────────────────────────────────────────────────────

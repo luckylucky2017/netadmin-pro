@@ -120,7 +120,48 @@ async function getMetricsText(vm) {
   }
 }
 
+// "list" with no -a flag shows only what's actually INSTALLED on this hub (matches "danh sách các
+// Attack Scenarios đã cài đặt" — installed, not the full hub catalog of everything available).
+function listScenarios(vm) {
+  return runCscliJson(vm, 'scenarios list');
+}
+
+// Runs an arbitrary shell snippet and captures combined stdout+stderr as text — for hub
+// update/upgrade, whose useful output is human-readable progress/plan text, not structured JSON
+// (confirmed live: `hub upgrade --dry-run -o json` still prints the same human text, -o json isn't
+// honored for the dry-run plan).
+async function runRaw(vm, shellCmd) {
+  let ssh;
+  try {
+    ssh = await connect(vm);
+    const result = await ssh.execCommand(shellCmd);
+    return { ok: result.code === 0, text: (result.stdout || '') + (result.stderr ? `\n${result.stderr}` : ''), code: result.code };
+  } catch (e) {
+    return { ok: false, text: `Không kết nối được SSH: ${e.message}`, code: null };
+  } finally {
+    if (ssh) ssh.dispose();
+  }
+}
+
+// Refreshes the catalog index from hub.crowdsec.net, then prints the upgrade plan WITHOUT applying
+// it (--dry-run) — "Nothing to do, the hub index is up to date." when nothing needs upgrading,
+// confirmed live. Safe to call as often as wanted, purely informational.
+function checkHubUpdates(vm) {
+  return runRaw(vm, 'sudo -n cscli hub update 2>&1; echo "---PLAN---"; sudo -n cscli hub upgrade --dry-run 2>&1');
+}
+
+// Actually applies pending scenario/collection/parser upgrades, then reloads (not restarts) the
+// crowdsec service — `systemctl reload` maps to `crowdsec -t && kill -HUP $MAINPID` (confirmed from
+// the real unit file), which re-validates config and picks up newly-upgraded scenarios/parsers
+// without dropping the running process or its in-memory alert/decision state.
+async function upgradeHub(vm) {
+  const result = await runRaw(vm, 'sudo -n cscli hub update 2>&1; echo "---UPGRADE---"; sudo -n cscli hub upgrade 2>&1');
+  if (result.ok) await runRaw(vm, 'sudo -n systemctl reload crowdsec 2>&1');
+  return result;
+}
+
 module.exports = {
   getManagedVm, listDecisions, addDecision, deleteDecisionById, deleteDecisionByIp,
+  listScenarios, checkHubUpdates, upgradeHub,
   listBouncers, listMachines, getMetricsText,
 };

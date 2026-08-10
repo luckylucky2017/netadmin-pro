@@ -1082,6 +1082,13 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN bytes_sent BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN bytes_received BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
 
+  // Daily CrowdSec hub auto-update opt-in (default OFF — auto-upgrading detection scenarios is a
+  // behavior change to production security tooling, not something to silently enable) + a timestamp
+  // cursor so crowdsec-hub-updater.js's periodic tick knows whether a day has actually elapsed since
+  // the last run, not just "has the app been up for >24h" (which would drift after every restart).
+  try { await pool.query("ALTER TABLE crowdsec_settings ADD COLUMN hub_auto_update INT NOT NULL DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE crowdsec_settings ADD COLUMN last_hub_upgrade_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.

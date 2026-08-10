@@ -188,6 +188,7 @@ if (!process.env.SESSION_SECRET) {
     require('./pfsense-collector').start();
     require('./nginx-waf-collector').start();
     require('./crowdsec-collector').start();
+    require('./crowdsec-hub-updater').start();
     require('./notification-dispatcher').start();
     require('./vuln-scanner').start();
     require('./trivy-scanner').start();

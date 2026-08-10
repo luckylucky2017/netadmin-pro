@@ -129,6 +129,45 @@ router.get('/metrics', requirePermission('waf.manage'), async (req, res) => {
   res.json({ text: result.text });
 });
 
+router.get('/scenarios', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.listScenarios(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json(result.data?.scenarios || []);
+});
+
+router.get('/hub/settings', requirePermission('waf.manage'), async (req, res) => {
+  const settings = await db.prepare('SELECT hub_auto_update, last_hub_upgrade_at FROM crowdsec_settings WHERE id = 1').get();
+  res.json({ hubAutoUpdate: !!settings?.hub_auto_update, lastHubUpgradeAt: settings?.last_hub_upgrade_at || null });
+});
+
+router.patch('/hub/settings', requirePermission('waf.manage'), async (req, res) => {
+  const hubAutoUpdate = req.body?.hubAutoUpdate ? 1 : 0;
+  await db.prepare('UPDATE crowdsec_settings SET hub_auto_update = ? WHERE id = 1').run(hubAutoUpdate);
+  await logActivity(req.user, 'UPDATE', 'crowdsec_settings', 1, 'CrowdSec', `${hubAutoUpdate ? 'Bật' : 'Tắt'} tự động cập nhật hub CrowdSec hàng ngày`);
+  res.json({ message: 'OK' });
+});
+
+// Refreshes the hub index then reports the upgrade plan WITHOUT applying it — purely informational,
+// safe to call anytime.
+router.get('/hub/check', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.checkHubUpdates(vm);
+  res.json({ ok: result.ok, text: result.text });
+});
+
+// Actually applies pending upgrades (scenarios/collections/parsers) and reloads the service.
+router.post('/hub/upgrade', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.upgradeHub(vm);
+  await db.prepare('UPDATE crowdsec_settings SET last_hub_upgrade_at = CURRENT_TIMESTAMP WHERE id = 1').run();
+  await logActivity(req.user, 'UPDATE', 'crowdsec_hub', vm.id, vm.name, `Cập nhật thủ công hub CrowdSec: ${result.ok ? 'thành công' : 'lỗi'}`);
+  res.json({ ok: result.ok, text: result.text });
+});
+
 // Live query proxy — NOT the local waf_events mirror (which only has what crowdsec-collector.js has
 // already ingested for VMs with a resolved machine_id match); this hits the hub directly, so it shows
 // everything the hub has, including alerts from a machine_id that isn't (yet) mapped to a VM here.
