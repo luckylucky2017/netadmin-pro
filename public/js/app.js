@@ -9589,30 +9589,39 @@ function renderReportsWafRows() {
       </tbody></table>${paginationBar(reportsWafPagination, sorted.length, 'reportsWafPagination', 'renderReportsWafRows')}`;
 }
 
-// Process name shown first, then — for ANY process that had a cmdline captured (ps -eo args= covers
-// every process, not just curl/wget) — the full raw command line as directly visible, wrapped text,
-// not just a hover tooltip: a rclone/ffmpeg/java/etc. invocation's exact flags are otherwise
-// invisible unless you know to hover. When outbound-connection-collector.js's parseDownloadDetail()
-// additionally found a curl/wget URL, an extra highlighted line shows the parsed download URL and —
-// when available — the resolved destination path (falls back to "(tên file mặc định theo URL)" when
-// no explicit -o/-O/-P was used, since the exact filename curl/wget would choose isn't re-derived
-// here — e.g. a server's Content-Disposition header can override it) as a quick-glance summary on
-// top of, not instead of, the full raw line below it.
+// Compact by design: just the process name + PID on one line. The full detail (raw cmdline — every
+// process, not just curl/wget, since ps -eo args= captures all of them — plus, for curl/wget, the
+// parsed download URL/destination) lives in the title attribute (hover tooltip) so the table stays
+// scannable instead of every row blowing up into multi-line text. A copy-icon button next to it
+// puts that same full text on the clipboard in one click, for anyone who wants to paste a
+// rclone/ffmpeg/etc. invocation's exact flags into a terminal or ticket rather than hover-reading it.
 function reportsProcessDetail(r) {
-  const pidSuffix = r.pid ? `<span style="font-size:11px;color:var(--fg-dim)"> (PID ${r.pid})</span>` : '';
-  const parts = [`<div style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.process_name ? escHtml(r.process_name) : '—'}${pidSuffix}</div>`];
+  const pidSuffix = r.pid ? ` (PID ${r.pid})` : '';
+  const label = `${r.process_name || '—'}${pidSuffix}`;
+  if (!r.cmdline && !r.downloadUrl) {
+    return `<span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${escHtml(label)}</span>`;
+  }
+  const detailLines = [];
   if (r.downloadUrl) {
-    const destLine = r.downloadDest
-      ? `<span style="color:var(--fg-dim)">→ ${escHtml(r.downloadDest)}</span>`
-      : `<span style="color:var(--fg-dim);font-style:italic">→ (tên file mặc định theo URL, trong thư mục làm việc${r.cwd ? ` ${escHtml(r.cwd)}` : ''})</span>`;
-    parts.push(`<div style="font-size:11px;margin-top:3px;max-width:360px;word-break:break-all">
-        <span style="color:var(--yellow);font-weight:600">⭳</span> ${escHtml(r.downloadUrl)}<br>${destLine}
-      </div>`);
+    detailLines.push(`URL: ${r.downloadUrl}`);
+    detailLines.push(r.downloadDest ? `Lưu vào: ${r.downloadDest}` : `Lưu vào: (tên file mặc định theo URL${r.cwd ? `, trong thư mục ${r.cwd}` : ''})`);
   }
-  if (r.cmdline) {
-    parts.push(`<div style="font-size:11px;color:var(--fg-dim);margin-top:3px;max-width:400px;word-break:break-all;font-family:monospace">${escHtml(r.cmdline)}</div>`);
+  if (r.cmdline) detailLines.push(r.cmdline);
+  const fullDetail = detailLines.join('\n');
+  return `<span style="font-size:12px;font-family:monospace;color:var(--fg-muted)" title="${escAttr(fullDetail)}">${escHtml(label)}</span>
+    <button class="btn-icon" style="width:20px;height:20px;padding:2px;vertical-align:middle" title="Sao chép chi tiết đầy đủ" data-copy="${escAttr(fullDetail)}" onclick="copyProcessDetail(this)">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>`;
+}
+
+async function copyProcessDetail(btn) {
+  const text = btn.dataset.copy || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Đã sao chép chi tiết tiến trình', 'success');
+  } catch (e) {
+    toast(`Không sao chép được: ${e.message}`, 'error');
   }
-  return parts.join('');
 }
 
 function renderReportsOutboundTab() {
