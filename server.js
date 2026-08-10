@@ -108,6 +108,7 @@ if (!process.env.SESSION_SECRET) {
   app.use('/api/notification-rules', requireAuth, require('./routes/notification-rules'));
   app.use('/api/pfsense', requireAuth, require('./routes/pfsense'));
   app.use('/api/waf', requireAuth, require('./routes/waf'));
+  app.use('/api/crowdsec', requireAuth, require('./routes/crowdsec'));
   app.use('/api/reports', requireAuth, require('./routes/reports'));
   app.use('/api/fail2ban-config', requireAuth, require('./routes/fail2ban-config'));
   app.use('/api/vuln', requireAuth, require('./routes/vuln'));

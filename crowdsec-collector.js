@@ -186,4 +186,4 @@ function start(intervalMs = 45000) {
   return setInterval(tick, intervalMs);
 }
 
-module.exports = { start, pollAlerts, fetchNewAlerts, ingestAlert };
+module.exports = { start, pollAlerts, fetchNewAlerts, ingestAlert, getToken, login, firstEventMeta, USER_AGENT };

@@ -454,7 +454,7 @@ document.getElementById('btnPingAll').onclick = async () => {
 };
 
 // Render page
-const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, fail2banConfig: renderFail2banConfig, vuln: renderVuln, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, mikrotik: renderMikrotik, reports: renderReports };
+const PAGES = { dashboard: renderDashboard, servers: renderServers, devices: renderDevices, alerts: renderAlerts, rules: renderRules, vcenter: renderVcenter, security: renderSecurity, waf: renderWaf, crowdsec: renderCrowdsec, fail2banConfig: renderFail2banConfig, vuln: renderVuln, activity: renderActivity, users: renderUsers, roles: renderRoles, monitors: renderUptimeMonitors, credentials: renderCredentials, settings: renderSettings, pfsense: renderPfsense, mikrotik: renderMikrotik, reports: renderReports };
 function renderPage(page) {
   if (PAGES[page]) PAGES[page]();
 }
@@ -4276,6 +4276,165 @@ async function saveCrowdsecSettings(btn) {
     toast('Đã lưu cấu hình CrowdSec LAPI', 'success');
     closeModal();
   } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ─── CROWDSEC DASHBOARD ─────────────────────────────────────────────────────────────────────────
+// Read-only by design: the configured credential is a CrowdSec MACHINE (watcher) token, which the
+// hub only lets query ITS OWN submitted alerts — GET /v1/decisions (hub-wide active bans) and
+// bouncer/machine management both come back 403 with this token type (confirmed live against the
+// real hub). Managing decisions/bouncers directly would need a bouncer API key or `cscli` over SSH
+// on the CrowdSec server, neither of which is wired up — this page is the alerts/status visibility
+// that's actually achievable today, not a claim of full CrowdSec administration.
+let crowdsecAlertsSearch = '';
+let crowdsecStatusCache = null;
+
+async function renderCrowdsec() {
+  const c = document.getElementById('pageContent');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
+  try {
+    crowdsecStatusCache = await api('/crowdsec/status');
+    c.innerHTML = `
+    <div class="page-header">
+      <div><div class="page-title">CrowdSec</div><div class="page-subtitle">Trạng thái hub CrowdSec và các alert đang được ghi nhận — chỉ xem, xem "Cấu hình CrowdSec LAPI" ở trang Giám sát WAF để đổi kết nối/gán agent cho VM</div></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" data-permission="waf.manage" onclick="openCrowdsecSettingsModal()">Cấu hình LAPI</button>
+        <button class="btn btn-secondary btn-sm" onclick="renderCrowdsec()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Làm mới
+        </button>
+      </div>
+    </div>
+    <div id="crowdsecBody"></div>`;
+    renderCrowdsecBody();
+  } catch (e) {
+    c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function crowdsecStatusBadge() {
+  const s = crowdsecStatusCache;
+  if (!s?.configured) return { cls: 'unknown', label: 'Chưa cấu hình' };
+  if (s.reachable) return { cls: 'online', label: 'Đang kết nối' };
+  return { cls: 'offline', label: 'Mất kết nối' };
+}
+
+function renderCrowdsecBody() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  const s = crowdsecStatusCache;
+  const status = crowdsecStatusBadge();
+  const mappedCount = s?.mappedVms?.length || 0;
+  const unmappedCount = s?.unmappedVms?.length || 0;
+
+  body.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon ${status.cls === 'online' ? 'green' : status.cls === 'offline' ? 'red' : 'blue'}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/></svg></div>
+        <div class="stat-label">Trạng thái hub</div>
+        <div class="stat-value"><span class="status ${status.cls}"><span class="dot"></span>${status.label}</span></div>
+        ${s?.lapiUrl ? `<div style="font-size:11px;color:var(--fg-dim);font-family:monospace;margin-top:4px">${escHtml(s.lapiUrl)}</div>` : ''}
+        ${s?.error ? `<div style="font-size:11px;color:var(--red);margin-top:4px">${escHtml(s.error)}</div>` : ''}
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><line x1="7" y1="20" x2="17" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></svg></div>
+        <div class="stat-label">VM đã gán agent</div>
+        <div class="stat-value blue">${mappedCount}</div>
+        ${unmappedCount ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:4px">${unmappedCount} VM bật WAF nhưng chưa gán</div>` : ''}
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+        <div class="stat-label">Alert ID gần nhất đã đồng bộ</div>
+        <div class="stat-value green">${s?.lastAlertId ?? '—'}</div>
+        <div style="font-size:11px;color:var(--fg-dim);margin-top:4px">Đồng bộ vào "Sự kiện"/"Cảnh báo" mỗi 45s</div>
+      </div>
+    </div>
+    ${!s?.configured ? `
+      <div class="empty-state"><h3>Chưa cấu hình CrowdSec LAPI</h3><p>Bấm "Cấu hình LAPI" ở trên để nhập địa chỉ hub và thông tin đăng nhập machine.</p></div>
+    ` : `
+      ${mappedCount || unmappedCount ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/></svg> VM giám sát WAF — trạng thái gán agent CrowdSec</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>VM</th><th>Machine-id trên hub</th><th>Tự động chặn</th></tr></thead>
+          <tbody>
+            ${[...(s.mappedVms || []), ...(s.unmappedVms || [])].map(v => `
+              <tr>
+                <td style="font-weight:600">${escHtml(v.name)}</td>
+                <td style="font-family:monospace;font-size:12px">${v.crowdsec_machine_id ? escHtml(v.crowdsec_machine_id) : '<span style="color:var(--fg-dim)">Chưa gán</span>'}</td>
+                <td>${v.crowdsec_machine_id ? `<span class="status ${v.crowdsec_auto_block ? 'online' : 'warning'}"><span class="dot"></span>${v.crowdsec_auto_block ? 'Bật' : 'Chỉ cảnh báo'}</span>` : '<span style="color:var(--fg-dim)">—</span>'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table></div>
+      </div>` : ''}
+      <div class="table-wrap">
+        <div class="table-toolbar">
+          <div class="search-box">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="crowdsecAlertsSearch" placeholder="Tìm theo IP hoặc scenario (vd: crowdsecurity/http-probing)..." value="${escAttr(crowdsecAlertsSearch)}">
+          </div>
+        </div>
+        <div id="crowdsecAlertsBody"><div class="loading"><div class="spinner"></div></div></div>
+      </div>
+    `}`;
+  applyPermissionVisibility();
+  if (s?.configured) {
+    document.getElementById('crowdsecAlertsSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { crowdsecAlertsSearch = e.target.value; loadCrowdsecAlerts(); }, 400);
+    });
+    loadCrowdsecAlerts();
+  }
+}
+
+// Scenario names are dotted paths (crowdsecurity/http-probing) and IPs are unambiguous by shape —
+// a single search box routes to the right LAPI filter param without asking the user to pick one.
+function crowdsecSearchParams() {
+  const q = crowdsecAlertsSearch.trim();
+  if (!q) return {};
+  return /^[\da-f.:]+$/i.test(q) ? { ip: q } : { scenario: q };
+}
+
+async function loadCrowdsecAlerts() {
+  const body = document.getElementById('crowdsecAlertsBody');
+  if (!body) return;
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const params = new URLSearchParams({ limit: '100', ...crowdsecSearchParams() });
+    const rows = await api(`/crowdsec/alerts?${params}`);
+    renderCrowdsecAlertsTable(rows);
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function crowdsecDecisionBadge(decisions) {
+  if (!decisions?.length) return '<span style="color:var(--fg-dim)">—</span>';
+  return decisions.map(d =>
+    `<span class="severity critical" title="Nguồn: ${escAttr(d.origin || '—')}"><span class="dot"></span>${escHtml(d.type || 'ban')} · ${escHtml(d.duration || '')}</span>`
+  ).join(' ');
+}
+
+function renderCrowdsecAlertsTable(rows) {
+  const body = document.getElementById('crowdsecAlertsBody');
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không có alert nào</h3><p>${crowdsecAlertsSearch ? 'Thử từ khoá khác' : 'Hub chưa ghi nhận alert nào gần đây'}</p></div>`;
+    return;
+  }
+  body.innerHTML = `<table>
+      <thead><tr><th>Thời gian</th><th>VM</th><th>Scenario</th><th>IP nguồn</th><th>Quốc gia / ASN</th><th>HTTP</th><th>Số lần</th><th>Quyết định CrowdSec</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.createdAt)}</span></td>
+          <td style="font-weight:600">${r.vmName ? escHtml(r.vmName) : `<span style="color:var(--fg-dim)" title="machine_id: ${escAttr(r.machineId || '—')}">Chưa rõ VM</span>`}</td>
+          <td><span style="font-size:12px" title="${escAttr(r.scenario || '')}">${escHtml((r.scenario || '—').replace(/^crowdsecurity\//, ''))}</span></td>
+          <td>${r.ip ? `<span style="font-family:monospace">${escHtml(r.ip)}</span>` : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${r.country ? escHtml(r.country) : '—'}${r.asName ? ` · ${escHtml(r.asName)}` : ''}</span></td>
+          <td><span style="font-size:12px;font-family:monospace;color:var(--fg-muted)">${r.httpVerb ? `${escHtml(r.httpVerb)} ${escHtml((r.httpPath || '').slice(0, 40))}${r.httpStatus ? ` (${escHtml(String(r.httpStatus))})` : ''}` : '—'}</span></td>
+          <td>${r.eventsCount ?? '—'}</td>
+          <td>${crowdsecDecisionBadge(r.decisions)}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
 }
 
 async function openWafDomainsModal(vmId) {
