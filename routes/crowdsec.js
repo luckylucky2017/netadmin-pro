@@ -137,6 +137,27 @@ router.get('/scenarios', requirePermission('waf.manage'), async (req, res) => {
   res.json(result.data?.scenarios || []);
 });
 
+// Full hub catalog (installed + not-yet-installed) — confirmed live: 783 total vs 55 installed —
+// for the "browse/search and install without cscli" picker. Not-installed items have empty
+// local_version, which the frontend uses to distinguish them.
+router.get('/scenarios/all', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.listAllScenarios(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json(result.data?.scenarios || []);
+});
+
+router.post('/scenarios/install', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const name = String(req.body?.name || '').trim();
+  const result = await crowdsecManager.installScenario(vm, name);
+  if (!result.ok) return res.status(400).json({ error: result.text });
+  await logActivity(req.user, 'CREATE', 'crowdsec_scenario', null, name, `Cài đặt scenario CrowdSec: ${name}`);
+  res.json({ ok: true, text: result.text });
+});
+
 router.get('/hub/settings', requirePermission('waf.manage'), async (req, res) => {
   const settings = await db.prepare('SELECT hub_auto_update, last_hub_upgrade_at FROM crowdsec_settings WHERE id = 1').get();
   res.json({ hubAutoUpdate: !!settings?.hub_auto_update, lastHubUpgradeAt: settings?.last_hub_upgrade_at || null });

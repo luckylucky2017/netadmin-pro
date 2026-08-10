@@ -126,6 +126,29 @@ function listScenarios(vm) {
   return runCscliJson(vm, 'scenarios list');
 }
 
+// "-a" shows the FULL hub catalog (confirmed live: 783 total vs 55 installed) — not-yet-installed
+// items have an empty local_version, which the frontend uses to tell them apart from installed ones.
+function listAllScenarios(vm) {
+  return runCscliJson(vm, 'scenarios list -a');
+}
+
+// Scenario names are "namespace/item-name" (e.g. crowdsecurity/http-probing) — validated strictly
+// since this gets interpolated directly into a shell command string; the regex is also what keeps
+// this from being a command-injection vector via a crafted name.
+const SCENARIO_NAME_RE = /^[\w.-]+\/[\w.-]+$/;
+
+// Installing prints an action plan + "Run 'sudo systemctl reload crowdsec' for the new
+// configuration to be effective" on a real change, or "Nothing to install or remove." (still exit 0)
+// if it's already installed — both confirmed live, both are legitimate successes from the caller's
+// perspective, so this always reloads after a successful install rather than trying to distinguish
+// the two cases.
+async function installScenario(vm, name) {
+  if (!SCENARIO_NAME_RE.test(name || '')) return { ok: false, text: 'Tên scenario không hợp lệ' };
+  const result = await runRaw(vm, `sudo -n cscli scenarios install ${name} 2>&1`);
+  if (result.ok) await runRaw(vm, 'sudo -n systemctl reload crowdsec 2>&1');
+  return result;
+}
+
 // Runs an arbitrary shell snippet and captures combined stdout+stderr as text — for hub
 // update/upgrade, whose useful output is human-readable progress/plan text, not structured JSON
 // (confirmed live: `hub upgrade --dry-run -o json` still prints the same human text, -o json isn't
@@ -162,6 +185,6 @@ async function upgradeHub(vm) {
 
 module.exports = {
   getManagedVm, listDecisions, addDecision, deleteDecisionById, deleteDecisionByIp,
-  listScenarios, checkHubUpdates, upgradeHub,
+  listScenarios, listAllScenarios, installScenario, checkHubUpdates, upgradeHub,
   listBouncers, listMachines, getMetricsText,
 };

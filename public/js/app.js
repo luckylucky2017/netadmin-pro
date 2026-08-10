@@ -4528,6 +4528,8 @@ async function renderCrowdsecScenariosTab() {
     <div class="table-wrap">
       <div class="table-toolbar">
         <div style="font-size:13px;color:var(--fg-dim)">Danh sách scenario (kịch bản phát hiện tấn công) đang cài đặt trên máy chủ CrowdSec</div>
+        <div style="flex:1"></div>
+        <button class="btn btn-primary btn-sm" data-permission="waf.manage" onclick="openCrowdsecInstallScenarioModal()">+ Cài đặt scenario mới</button>
         <button class="btn btn-secondary btn-sm" onclick="loadCrowdsecScenarios()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           Làm mới
@@ -4622,6 +4624,85 @@ async function loadCrowdsecScenarios() {
   } catch (e) {
     body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
+}
+
+// Full hub catalog (installed + not-yet-installed, confirmed live: 783 total vs 55 installed) —
+// fetched once and cached client-side when the modal opens, then filtered locally on every
+// keystroke instead of round-tripping the server per search (the list itself doesn't change
+// mid-session, and 783 plain-object items is trivial to .filter() in JS).
+let crowdsecAllScenariosCache = null;
+let crowdsecScenarioSearch = '';
+
+async function openCrowdsecInstallScenarioModal() {
+  openModal('Cài đặt scenario mới', `<div class="loading"><div class="spinner"></div></div>`, 'detail-modal');
+  try {
+    crowdsecAllScenariosCache = await api('/crowdsec/scenarios/all');
+    crowdsecScenarioSearch = '';
+    const modalBody = document.getElementById('modalBody');
+    modalBody.innerHTML = `
+      <div class="search-box" style="margin-bottom:12px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="crowdsecScenarioSearchInput" placeholder="Tìm theo tên hoặc mô tả (vd: sql injection, wordpress, ssh)..." autofocus>
+      </div>
+      <div style="font-size:12px;color:var(--fg-dim);margin-bottom:8px">${crowdsecAllScenariosCache.length} scenario trong hub — gõ để tìm kiếm</div>
+      <div id="crowdsecScenarioPickerBody" style="max-height:50vh;overflow-y:auto"></div>`;
+    document.getElementById('crowdsecScenarioSearchInput').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { crowdsecScenarioSearch = e.target.value; renderCrowdsecScenarioPicker(); }, 200);
+    });
+    renderCrowdsecScenarioPicker();
+  } catch (e) {
+    document.getElementById('modalBody').innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function renderCrowdsecScenarioPicker() {
+  const body = document.getElementById('crowdsecScenarioPickerBody');
+  if (!body || !crowdsecAllScenariosCache) return;
+  const q = crowdsecScenarioSearch.trim().toLowerCase();
+  const filtered = q
+    ? crowdsecAllScenariosCache.filter(s => (s.name || '').toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q))
+    : crowdsecAllScenariosCache.filter(s => !s.local_version); // no search yet -> lead with what's actually installable
+  const capped = filtered.slice(0, 200);
+  if (!capped.length) {
+    body.innerHTML = `<div class="empty-state"><h3>Không tìm thấy scenario nào</h3></div>`;
+    return;
+  }
+  body.innerHTML = `<table>
+      <thead><tr><th>Scenario</th><th>Mô tả</th><th>Trạng thái</th><th></th></tr></thead>
+      <tbody>${capped.map(s => {
+        const installed = !!s.local_version;
+        return `
+        <tr>
+          <td style="font-weight:600;font-family:monospace;font-size:12px">${escHtml(s.name || '—')}</td>
+          <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(s.description || '—')}</span></td>
+          <td>${installed ? '<span class="status online"><span class="dot"></span>Đã cài đặt</span>' : '<span class="status unknown"><span class="dot"></span>Chưa cài</span>'}</td>
+          <td>${installed ? '' : `<button class="btn btn-primary btn-sm" onclick="crowdsecInstallScenario('${escAttr(s.name)}', this)">Cài đặt</button>`}</td>
+        </tr>`;
+      }).join('')}
+      </tbody></table>
+      ${filtered.length > capped.length ? `<div style="font-size:12px;color:var(--fg-dim);padding:8px 4px">Hiển thị ${capped.length}/${filtered.length} kết quả — gõ thêm để thu hẹp tìm kiếm</div>` : ''}`;
+}
+
+async function crowdsecInstallScenario(name, btn) {
+  if (!confirm(`Cài đặt scenario "${name}"? Sẽ tải về từ hub CrowdSec và reload dịch vụ crowdsec để áp dụng.`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Đang cài...';
+  try {
+    const r = await api('/crowdsec/scenarios/install', 'POST', { name });
+    if (r.ok) {
+      toast(`Đã cài đặt ${name}`, 'success');
+      // Reflect the new install state in the cached catalog so the picker updates without a refetch.
+      const item = crowdsecAllScenariosCache?.find(s => s.name === name);
+      if (item) item.local_version = 'installed';
+      renderCrowdsecScenarioPicker();
+      loadCrowdsecScenarios();
+    } else {
+      toast('Cài đặt gặp lỗi', 'error');
+    }
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false;
+  btn.textContent = 'Cài đặt';
 }
 
 // ── Bouncers ────────────────────────────────────────────────────────────────────────────────
