@@ -4606,11 +4606,25 @@ async function loadCrowdsecAlerts() {
   }
 }
 
+// A single alert normally has exactly 1 decision, but CrowdSec can attach several (escalating
+// repeat-offender bans, multiple decision types on one alert) — with no cap, that many .severity
+// badges (each `white-space:nowrap`, so they can't shrink) just kept wrapping onto their own new
+// line forever, growing the row/column past the table's bounds instead of the table's own scroll
+// container. Capped to the first 3 + a "+N khác" summary badge (full list still in its tooltip),
+// wrapped in a fixed-width flex box so a busy row grows sideways/wraps within a bound, not endlessly
+// downward.
 function crowdsecDecisionBadge(decisions) {
   if (!decisions?.length) return '<span style="color:var(--fg-dim)">—</span>';
-  return decisions.map(d =>
+  const MAX_SHOWN = 3;
+  const shown = decisions.slice(0, MAX_SHOWN);
+  const rest = decisions.slice(MAX_SHOWN);
+  const badges = shown.map(d =>
     `<span class="severity critical" title="Nguồn: ${escAttr(d.origin || '—')}"><span class="dot"></span>${escHtml(d.type || 'ban')} · ${escHtml(d.duration || '')}</span>`
-  ).join(' ');
+  ).join('');
+  const moreBadge = rest.length
+    ? `<span class="severity low" title="${escAttr(rest.map(d => `${d.type || 'ban'} · ${d.duration || ''}`).join('\n'))}">+${rest.length} khác</span>`
+    : '';
+  return `<div style="display:flex;flex-wrap:wrap;gap:4px;max-width:220px">${badges}${moreBadge}</div>`;
 }
 
 function renderCrowdsecAlertsTable(rows) {
