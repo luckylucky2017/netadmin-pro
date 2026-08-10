@@ -1380,6 +1380,18 @@ async function ensureSchemaAndMigrations() {
   const insertNotifType = prepare('INSERT IGNORE INTO notification_rules (type_key, label) VALUES (?, ?)');
   for (const [key, label] of notifTypes) await insertNotifType.run(key, label);
 
+  // Resolve notifications: an alert type (uptime_down, waf_scan, etc.) should also notify when the
+  // underlying alert transitions back to resolved (e.g. Down -> Up), not just when it opens —
+  // tracked via a boolean rather than an id/timestamp cursor because resolutions don't happen in id
+  // order (an older alert can resolve after a newer one already got polled). Backfilled to 1 for
+  // every alert already resolved before this migration ran (inside the same try block, so it only
+  // executes the one time the ALTER itself succeeds), so upgrading doesn't blast a resolve-
+  // notification backlog for every pre-existing resolved alert.
+  try {
+    await pool.query("ALTER TABLE alerts ADD COLUMN resolved_notified TINYINT DEFAULT 0");
+    await pool.query("UPDATE alerts SET resolved_notified = 1 WHERE status = 'resolved'");
+  } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Physical ESXi host inventory + live capacity/usage — mirrors vcenter_vms' shape but at the host
   // level (vcenter-collector.js's syncHosts). cpu_total_mhz is stored pre-computed (cpu_mhz_per_core
   // × cpu_cores) so the frontend never has to redo that multiplication. Confirmed live against a real
