@@ -4279,23 +4279,26 @@ async function saveCrowdsecSettings(btn) {
 }
 
 // ─── CROWDSEC DASHBOARD ─────────────────────────────────────────────────────────────────────────
-// Read-only by design: the configured credential is a CrowdSec MACHINE (watcher) token, which the
-// hub only lets query ITS OWN submitted alerts — GET /v1/decisions (hub-wide active bans) and
-// bouncer/machine management both come back 403 with this token type (confirmed live against the
-// real hub). Managing decisions/bouncers directly would need a bouncer API key or `cscli` over SSH
-// on the CrowdSec server, neither of which is wired up — this page is the alerts/status visibility
-// that's actually achievable today, not a claim of full CrowdSec administration.
+// "Tổng quan" is LAPI-based (read-only): the configured credential is a CrowdSec MACHINE (watcher)
+// token, which the hub only lets query ITS OWN submitted alerts — GET /v1/decisions (hub-wide active
+// bans) and bouncer/machine management both come back 403 with this token type (confirmed live).
+// "Decisions"/"Bouncers"/"Machines"/"Metrics" instead go through crowdsec-manager.js (`cscli` over
+// SSH on the hub itself) — real management, once the hub VM has an SSH credential assigned (status
+// card below says so if it doesn't yet).
 let crowdsecAlertsSearch = '';
 let crowdsecStatusCache = null;
+const CROWDSEC_TAB_KEY = 'netadmin_crowdsecTab';
+let crowdsecTab = loadSavedTab(CROWDSEC_TAB_KEY, 'overview');
 
 async function renderCrowdsec() {
   const c = document.getElementById('pageContent');
   c.innerHTML = `<div class="loading"><div class="spinner"></div> Đang tải...</div>`;
   try {
     crowdsecStatusCache = await api('/crowdsec/status');
+    const sshOk = !!crowdsecStatusCache?.sshManagement?.available;
     c.innerHTML = `
     <div class="page-header">
-      <div><div class="page-title">CrowdSec</div><div class="page-subtitle">Trạng thái hub CrowdSec và các alert đang được ghi nhận — chỉ xem, xem "Cấu hình CrowdSec LAPI" ở trang Giám sát WAF để đổi kết nối/gán agent cho VM</div></div>
+      <div><div class="page-title">CrowdSec</div><div class="page-subtitle">Trạng thái hub CrowdSec, alert, và quản lý decisions/bouncers/machines qua cscli</div></div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary btn-sm" data-permission="waf.manage" onclick="openCrowdsecSettingsModal()">Cấu hình LAPI</button>
         <button class="btn btn-secondary btn-sm" onclick="renderCrowdsec()">
@@ -4304,11 +4307,33 @@ async function renderCrowdsec() {
         </button>
       </div>
     </div>
+    <div class="filter-tabs" id="crowdsecTabs" style="margin-bottom:16px">
+      <div class="filter-tab ${crowdsecTab === 'overview' ? 'active' : ''}" data-tab="overview" onclick="setCrowdsecTab('overview')">Tổng quan</div>
+      <div class="filter-tab ${crowdsecTab === 'decisions' ? 'active' : ''}" data-tab="decisions" onclick="setCrowdsecTab('decisions')">Decisions${sshOk ? '' : ' 🔒'}</div>
+      <div class="filter-tab ${crowdsecTab === 'bouncers' ? 'active' : ''}" data-tab="bouncers" onclick="setCrowdsecTab('bouncers')">Bouncers${sshOk ? '' : ' 🔒'}</div>
+      <div class="filter-tab ${crowdsecTab === 'machines' ? 'active' : ''}" data-tab="machines" onclick="setCrowdsecTab('machines')">Machines${sshOk ? '' : ' 🔒'}</div>
+      <div class="filter-tab ${crowdsecTab === 'metrics' ? 'active' : ''}" data-tab="metrics" onclick="setCrowdsecTab('metrics')">Metrics${sshOk ? '' : ' 🔒'}</div>
+    </div>
     <div id="crowdsecBody"></div>`;
-    renderCrowdsecBody();
+    renderCrowdsecTabBody();
   } catch (e) {
     c.innerHTML = `<div class="empty-state"><h3>Lỗi tải dữ liệu</h3><p>${escHtml(e.message)}</p></div>`;
   }
+}
+
+function setCrowdsecTab(tab) {
+  crowdsecTab = tab;
+  saveTab(CROWDSEC_TAB_KEY, tab);
+  document.querySelectorAll('#crowdsecTabs .filter-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderCrowdsecTabBody();
+}
+
+function renderCrowdsecTabBody() {
+  if (crowdsecTab === 'decisions') return renderCrowdsecDecisionsTab();
+  if (crowdsecTab === 'bouncers') return renderCrowdsecBouncersTab();
+  if (crowdsecTab === 'machines') return renderCrowdsecMachinesTab();
+  if (crowdsecTab === 'metrics') return renderCrowdsecMetricsTab();
+  return renderCrowdsecOverviewTab();
 }
 
 function crowdsecStatusBadge() {
@@ -4318,7 +4343,14 @@ function crowdsecStatusBadge() {
   return { cls: 'offline', label: 'Mất kết nối' };
 }
 
-function renderCrowdsecBody() {
+// Common "SSH chưa gán" gate shared by the 4 cscli-backed tabs — same wording/action everywhere so
+// switching tabs while unconfigured doesn't feel like 4 different error messages.
+function crowdsecSshGateHtml() {
+  const vmName = crowdsecStatusCache?.sshManagement?.vmName;
+  return `<div class="empty-state"><h3>Chưa gán tài khoản kết nối SSH</h3><p>${vmName ? `Máy chủ CrowdSec (${escHtml(vmName)})` : 'Máy chủ CrowdSec'} cần một "Tài khoản kết nối" SSH (trang Tài khoản kết nối) trước khi có thể quản lý decisions/bouncers/machines qua cscli. Gán ở trang Giám sát WAF → Quản lý giám sát, hoặc trang Tài khoản kết nối.</p></div>`;
+}
+
+function renderCrowdsecOverviewTab() {
   const body = document.getElementById('crowdsecBody');
   if (!body) return;
   const s = crowdsecStatusCache;
@@ -4342,10 +4374,10 @@ function renderCrowdsecBody() {
         ${unmappedCount ? `<div style="font-size:11px;color:var(--fg-dim);margin-top:4px">${unmappedCount} VM bật WAF nhưng chưa gán</div>` : ''}
       </div>
       <div class="stat-card">
-        <div class="stat-icon green"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
-        <div class="stat-label">Alert ID gần nhất đã đồng bộ</div>
-        <div class="stat-value green">${s?.lastAlertId ?? '—'}</div>
-        <div style="font-size:11px;color:var(--fg-dim);margin-top:4px">Đồng bộ vào "Sự kiện"/"Cảnh báo" mỗi 45s</div>
+        <div class="stat-icon ${s?.sshManagement?.available ? 'green' : 'red'}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+        <div class="stat-label">Quản lý qua SSH/cscli</div>
+        <div class="stat-value"><span class="status ${s?.sshManagement?.available ? 'online' : 'unknown'}"><span class="dot"></span>${s?.sshManagement?.available ? 'Sẵn sàng' : 'Chưa gán SSH'}</span></div>
+        <div style="font-size:11px;color:var(--fg-dim);margin-top:4px">Xem tab Decisions/Bouncers/Machines/Metrics</div>
       </div>
     </div>
     ${!s?.configured ? `
@@ -4383,6 +4415,173 @@ function renderCrowdsecBody() {
       searchTimeout = setTimeout(() => { crowdsecAlertsSearch = e.target.value; loadCrowdsecAlerts(); }, 400);
     });
     loadCrowdsecAlerts();
+  }
+}
+
+// ── Decisions (cscli decisions list/add/delete over SSH) ──────────────────────────────────────
+async function renderCrowdsecDecisionsTab() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  if (!crowdsecStatusCache?.sshManagement?.available) { body.innerHTML = crowdsecSshGateHtml(); return; }
+  body.innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> Thêm quyết định chặn thủ công</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <label style="font-size:13px;font-weight:600">IP/CIDR
+          <input type="text" id="crowdsecAddIp" placeholder="1.2.3.4" style="display:block;margin-top:4px;font-family:monospace;min-width:160px">
+        </label>
+        <label style="font-size:13px;font-weight:600">Thời gian
+          <input type="text" id="crowdsecAddDuration" placeholder="4h" value="4h" style="display:block;margin-top:4px;font-family:monospace;width:100px">
+        </label>
+        <label style="font-size:13px;font-weight:600;flex:1;min-width:200px">Lý do
+          <input type="text" id="crowdsecAddReason" placeholder="netadmin-pro manual" style="display:block;margin-top:4px;width:100%">
+        </label>
+        <button class="btn btn-primary btn-sm" data-permission="waf.block" onclick="crowdsecAddDecision(this)">Chặn</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <div class="table-toolbar">
+        <button class="btn btn-secondary btn-sm" onclick="loadCrowdsecDecisions()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Làm mới
+        </button>
+      </div>
+      <div id="crowdsecDecisionsBody"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  applyPermissionVisibility();
+  loadCrowdsecDecisions();
+}
+
+async function loadCrowdsecDecisions() {
+  const body = document.getElementById('crowdsecDecisionsBody');
+  if (!body) return;
+  body.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+  try {
+    const groups = await api('/crowdsec/decisions');
+    // cscli decisions list returns one row per ALERT, each with its own decisions[] — flatten to
+    // one row per actual decision, since that's the level "Gỡ chặn" acts on (--id is a decision id).
+    const rows = [];
+    for (const g of (groups || [])) {
+      for (const d of (g.decisions || [])) rows.push({ ...d, alertId: g.id });
+    }
+    if (!rows.length) {
+      body.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg><h3>Không có decision nào đang hoạt động</h3></div>`;
+      return;
+    }
+    body.innerHTML = `<table>
+        <thead><tr><th>IP/Giá trị</th><th>Loại</th><th>Thời gian còn lại</th><th>Scope</th><th>Nguồn</th><th>Hành động</th></tr></thead>
+        <tbody>${rows.map(d => `
+          <tr>
+            <td style="font-family:monospace">${escHtml(d.value || '—')}</td>
+            <td><span class="severity critical"><span class="dot"></span>${escHtml(d.type || 'ban')}</span></td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${escHtml(d.duration || '—')}</span></td>
+            <td>${escHtml(d.scope || '—')}</td>
+            <td><span style="font-size:12px;color:var(--fg-dim)">${escHtml(d.origin || '—')}</span></td>
+            <td><button class="btn btn-secondary btn-sm" data-permission="waf.block" onclick="crowdsecDeleteDecision(${d.id}, '${escAttr(d.value || '')}', this)">Gỡ chặn</button></td>
+          </tr>`).join('')}
+        </tbody></table>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+async function crowdsecAddDecision(btn) {
+  const ip = document.getElementById('crowdsecAddIp')?.value.trim() || '';
+  const duration = document.getElementById('crowdsecAddDuration')?.value.trim() || '4h';
+  const reason = document.getElementById('crowdsecAddReason')?.value.trim() || '';
+  if (!ip) { toast('Nhập IP/CIDR', 'error'); return; }
+  btn.disabled = true;
+  try {
+    await api('/crowdsec/decisions', 'POST', { ip, duration, reason });
+    toast(`Đã chặn ${ip} qua CrowdSec`, 'success');
+    document.getElementById('crowdsecAddIp').value = '';
+    document.getElementById('crowdsecAddReason').value = '';
+    loadCrowdsecDecisions();
+  } catch (e) { toast(e.message, 'error'); }
+  btn.disabled = false;
+}
+
+async function crowdsecDeleteDecision(id, value, btn) {
+  if (!confirm(`Gỡ chặn ${value || `decision #${id}`}?`)) return;
+  btn.disabled = true;
+  try {
+    await api(`/crowdsec/decisions/${id}`, 'DELETE');
+    toast(`Đã gỡ chặn ${value || id}`, 'success');
+    loadCrowdsecDecisions();
+  } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+}
+
+// ── Bouncers ────────────────────────────────────────────────────────────────────────────────
+async function renderCrowdsecBouncersTab() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  if (!crowdsecStatusCache?.sshManagement?.available) { body.innerHTML = crowdsecSshGateHtml(); return; }
+  body.innerHTML = `<div class="table-wrap"><div id="crowdsecBouncersBody"><div class="loading"><div class="spinner"></div></div></div></div>`;
+  try {
+    const rows = await api('/crowdsec/bouncers');
+    const b = document.getElementById('crowdsecBouncersBody');
+    if (!b) return;
+    if (!rows?.length) { b.innerHTML = `<div class="empty-state"><h3>Chưa có bouncer nào đăng ký</h3></div>`; return; }
+    b.innerHTML = `<table>
+        <thead><tr><th>Tên</th><th>Loại</th><th>Phiên bản</th><th>IP</th><th>Lần pull gần nhất</th><th>Trạng thái</th></tr></thead>
+        <tbody>${rows.map(bc => `
+          <tr>
+            <td style="font-weight:600">${escHtml(bc.name || '—')}</td>
+            <td>${escHtml(bc.type || '—')}</td>
+            <td style="font-family:monospace;font-size:12px">${escHtml(bc.version || '—')}</td>
+            <td style="font-family:monospace">${escHtml(bc.ip_address || '—')}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${bc.last_pull ? formatTime(bc.last_pull) : '—'}</span></td>
+            <td>${bc.revoked ? '<span class="status offline"><span class="dot"></span>Đã thu hồi</span>' : '<span class="status online"><span class="dot"></span>Hoạt động</span>'}</td>
+          </tr>`).join('')}
+        </tbody></table>`;
+  } catch (e) {
+    const b = document.getElementById('crowdsecBouncersBody');
+    if (b) b.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+// ── Machines ────────────────────────────────────────────────────────────────────────────────
+async function renderCrowdsecMachinesTab() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  if (!crowdsecStatusCache?.sshManagement?.available) { body.innerHTML = crowdsecSshGateHtml(); return; }
+  body.innerHTML = `<div class="table-wrap"><div id="crowdsecMachinesBody"><div class="loading"><div class="spinner"></div></div></div></div>`;
+  try {
+    const rows = await api('/crowdsec/machines');
+    const b = document.getElementById('crowdsecMachinesBody');
+    if (!b) return;
+    if (!rows?.length) { b.innerHTML = `<div class="empty-state"><h3>Chưa có machine nào đăng ký</h3></div>`; return; }
+    b.innerHTML = `<table>
+        <thead><tr><th>Machine-id</th><th>IP</th><th>Phiên bản</th><th>Nhịp tim gần nhất</th><th>Trạng thái</th></tr></thead>
+        <tbody>${rows.map(m => `
+          <tr>
+            <td style="font-weight:600;font-family:monospace">${escHtml(m.machineId || '—')}</td>
+            <td style="font-family:monospace">${escHtml(m.ipAddress || '—')}</td>
+            <td style="font-family:monospace;font-size:12px">${escHtml(m.version || '—')}</td>
+            <td><span style="font-size:12px;color:var(--fg-muted)">${m.last_heartbeat ? formatTime(m.last_heartbeat) : '—'}</span></td>
+            <td>${m.isValidated ? '<span class="status online"><span class="dot"></span>Đã xác thực</span>' : '<span class="status warning"><span class="dot"></span>Chưa xác thực</span>'}</td>
+          </tr>`).join('')}
+        </tbody></table>`;
+  } catch (e) {
+    const b = document.getElementById('crowdsecMachinesBody');
+    if (b) b.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+// ── Metrics (raw `cscli metrics` text — a multi-table report, not meant to be re-parsed) ──────
+async function renderCrowdsecMetricsTab() {
+  const body = document.getElementById('crowdsecBody');
+  if (!body) return;
+  if (!crowdsecStatusCache?.sshManagement?.available) { body.innerHTML = crowdsecSshGateHtml(); return; }
+  body.innerHTML = `<div class="card"><div id="crowdsecMetricsBody"><div class="loading"><div class="spinner"></div></div></div></div>`;
+  try {
+    const { text } = await api('/crowdsec/metrics');
+    const b = document.getElementById('crowdsecMetricsBody');
+    if (b) b.innerHTML = `<pre style="overflow-x:auto;font-size:12px;line-height:1.5;margin:0">${escHtml(text || '')}</pre>`;
+  } catch (e) {
+    const b = document.getElementById('crowdsecMetricsBody');
+    if (b) b.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
   }
 }
 

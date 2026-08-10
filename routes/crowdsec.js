@@ -3,16 +3,18 @@
 // so a page load can show LIVE hub state without waiting for/depending on the poll cycle. Reuses the
 // collector's own token cache (getToken) rather than logging in again.
 //
-// Scope is deliberately read-only: the configured credential is a CrowdSec MACHINE (watcher) token,
-// which the hub only lets query its own submitted alerts — GET /v1/decisions (the hub-wide active-ban
-// list) and bouncer/machine management both come back 403 "access forbidden" with this token (verified
-// live against the real hub). Actually managing decisions/bouncers needs either a bouncer API key or
-// running `cscli` directly via SSH on the CrowdSec server — neither is wired up yet.
+// /status and /alerts are LAPI-based (read-only): the configured credential is a CrowdSec MACHINE
+// (watcher) token, which the hub only lets query its own submitted alerts — GET /v1/decisions (the
+// hub-wide active-ban list) and bouncer/machine management both come back 403 "access forbidden"
+// with this token (verified live). /decisions, /bouncers, /machines, /metrics below instead go
+// through crowdsec-manager.js (`cscli` over SSH on the hub server itself, once an SSH credential is
+// assigned to it) — real management, not restricted by the LAPI token's scope.
 const express = require('express');
 const router = express.Router();
 const db = require('../database');
-const { requirePermission } = require('../auth');
+const { requirePermission, logActivity } = require('../auth');
 const crowdsec = require('../crowdsec-collector');
+const crowdsecManager = require('../crowdsec-manager');
 
 async function lapiFetch(settings, path) {
   const token = await crowdsec.getToken(settings);
@@ -49,7 +51,82 @@ router.get('/status', requirePermission('waf.manage'), async (req, res) => {
   const mapped = vms.filter((v) => v.crowdsec_machine_id);
   const unmapped = vms.filter((v) => !v.crowdsec_machine_id);
 
-  res.json({ ...base, reachable, error, mappedVms: mapped, unmappedVms: unmapped });
+  const managedVm = await crowdsecManager.getManagedVm();
+  const sshManagement = { available: !!managedVm?.ssh_credential_id, vmName: managedVm?.name || null };
+
+  res.json({ ...base, reachable, error, mappedVms: mapped, unmappedVms: unmapped, sshManagement });
+});
+
+// ── SSH/cscli-backed real management — see crowdsec-manager.js's header for why this can't go
+// through the LAPI machine token used above. Every route here 404s cleanly (rather than a confusing
+// SSH error) if the hub VM has no SSH credential assigned yet.
+async function getManagedVmOr404(res) {
+  const vm = await crowdsecManager.getManagedVm();
+  if (!vm) { res.status(404).json({ error: 'Chưa xác định được VM máy chủ CrowdSec (kiểm tra cấu hình LAPI URL)' }); return null; }
+  if (!vm.ssh_credential_id) { res.status(400).json({ error: 'Máy chủ CrowdSec chưa được gán tài khoản kết nối SSH' }); return null; }
+  return vm;
+}
+
+router.get('/decisions', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.listDecisions(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json(result.data);
+});
+
+router.post('/decisions', requirePermission('waf.block'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const { ip, duration, reason } = req.body || {};
+  const result = await crowdsecManager.addDecision(vm, { ip, duration, reason });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  await logActivity(req.user, 'CREATE', 'crowdsec_decision', null, ip, `Thêm quyết định chặn CrowdSec: ${ip} (${duration || '4h'})${reason ? ` — ${reason}` : ''}`);
+  res.json({ message: 'OK' });
+});
+
+router.delete('/decisions/:id', requirePermission('waf.block'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.deleteDecisionById(vm, req.params.id);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  await logActivity(req.user, 'DELETE', 'crowdsec_decision', Number(req.params.id) || null, req.params.id, `Gỡ quyết định CrowdSec #${req.params.id}`);
+  res.json({ message: 'OK' });
+});
+
+router.delete('/decisions', requirePermission('waf.block'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const ip = String(req.query.ip || '').trim();
+  if (!ip) return res.status(400).json({ error: 'Thiếu IP' });
+  const result = await crowdsecManager.deleteDecisionByIp(vm, ip);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  await logActivity(req.user, 'DELETE', 'crowdsec_decision', null, ip, `Gỡ quyết định CrowdSec cho IP ${ip}`);
+  res.json({ message: 'OK' });
+});
+
+router.get('/bouncers', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.listBouncers(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json(result.data);
+});
+
+router.get('/machines', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.listMachines(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json(result.data);
+});
+
+router.get('/metrics', requirePermission('waf.manage'), async (req, res) => {
+  const vm = await getManagedVmOr404(res);
+  if (!vm) return;
+  const result = await crowdsecManager.getMetricsText(vm);
+  if (!result.ok) return res.status(502).json({ error: result.error });
+  res.json({ text: result.text });
 });
 
 // Live query proxy — NOT the local waf_events mirror (which only has what crowdsec-collector.js has
