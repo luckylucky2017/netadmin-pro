@@ -1072,6 +1072,16 @@ async function ensureSchemaAndMigrations() {
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN protocol VARCHAR(8) NOT NULL DEFAULT 'tcp'"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN app_protocol VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
 
+  // Cumulative TCP bytes sent/received for the socket, straight from the kernel (ss -i's
+  // bytes_sent/bytes_received TCP_INFO counters) — answers "is this process pulling data in or
+  // pushing it out" without inspecting packet contents (which would mean decrypting TLS). UDP
+  // connections don't get these (ss has no equivalent counters for connectionless sockets) and stay
+  // NULL. Unlike process_name/cmdline/remote_hostname, these are live-growing counters refreshed on
+  // EVERY poll (COALESCE only to survive a single transient scan hiccup), not resolved once at
+  // connection creation.
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN bytes_sent BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN bytes_received BIGINT"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.

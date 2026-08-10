@@ -47,6 +47,16 @@ function toSqlDatetime(date) {
 // same as before) so the connection data itself never breaks just because process attribution
 // isn't available on a given VM yet.
 //
+// ESTAB additionally uses `-i` (TCP_INFO): answers "is this process pulling data in or pushing it
+// out" by reading the kernel's own cumulative bytes_sent/bytes_received counters for the socket —
+// confirmed live to work through the same sudo -n path — rather than guessing from process name or
+// packet inspection (which would mean decrypting TLS, out of scope). `-i` prints each connection as
+// TWO lines: the usual summary line, then an indented continuation line (always starts with a literal
+// tab — never any other line does) carrying "bytes_sent:N ... bytes_received:M ...". parseScan below
+// attaches that continuation line to whichever outbound entry the summary line just before it
+// produced (or discards it if that summary line itself was filtered out, e.g. an inbound/loopback
+// row) — see the `pendingEstabEntry` tracking.
+//
 // ===PROCS===/===CWD=== added so the report can show what a curl/wget download's actual URL and
 // destination path were, not just the bare process name — `ss -p` only gives the short process
 // name, never its arguments. `ps -eo pid=,args=` (full command line) covers every process in one
@@ -65,7 +75,7 @@ const SCAN_SCRIPT = `
 echo "===LISTEN==="
 ss -tnH state listening 2>/dev/null
 echo "===ESTAB==="
-sudo -n ss -tnpH state established 2>/dev/null || ss -tnH state established 2>/dev/null
+sudo -n ss -tnpiH state established 2>/dev/null || ss -tniH state established 2>/dev/null
 echo "===UDP==="
 sudo -n ss -unpaH 2>/dev/null || ss -unaH 2>/dev/null
 echo "===PROCS==="
@@ -116,7 +126,25 @@ function parseScan(stdout) {
   const listenPorts = new Set();
   const outbound = [];
   let section = null;
+  // Tracks the outbound entry the most recent ESTAB summary line produced, so the very next line
+  // (its `-i` continuation line, if any) can attach bytes_sent/bytes_received to the right entry —
+  // null when that summary line was filtered out (inbound/loopback), so a continuation line for a
+  // SKIPPED connection doesn't get misattributed to whatever entry came before it.
+  let pendingEstabEntry = null;
   for (const raw of stdout.split('\n')) {
+    // Must check BEFORE trimming: ss's `-i` continuation line is the only line that starts with a
+    // literal tab, which is how it's told apart from a real summary line (which could otherwise also
+    // split into >=4 whitespace-separated tokens and be misread as one).
+    if (section === 'estab' && raw.startsWith('\t')) {
+      if (pendingEstabEntry) {
+        const sentM = /bytes_sent:(\d+)/.exec(raw);
+        const recvM = /bytes_received:(\d+)/.exec(raw);
+        if (sentM) pendingEstabEntry.bytesSent = Number(sentM[1]);
+        if (recvM) pendingEstabEntry.bytesReceived = Number(recvM[1]);
+        pendingEstabEntry = null;
+      }
+      continue;
+    }
     const line = raw.trim();
     if (!line) continue;
     if (line === '===LISTEN===') { section = 'listen'; continue; }
@@ -131,12 +159,15 @@ function parseScan(stdout) {
         const { port } = splitAddrPort(localAddr);
         if (port) listenPorts.add(port);
       } else {
+        pendingEstabEntry = null; // reset per summary line; set below only if this one is kept
         const { port: localPort } = splitAddrPort(localAddr);
         if (!localPort || listenPorts.has(localPort)) continue; // inbound to a service on this VM
         const { ip: remoteIp, port: remotePort } = splitAddrPort(peerAddr);
         if (isLoopback(remoteIp)) continue;
         const { processName, pid } = parseProcessInfo(rest.join(' '));
-        outbound.push({ remoteIp, remotePort: Number(remotePort) || null, processName, pid, protocol: 'tcp' });
+        const entry = { remoteIp, remotePort: Number(remotePort) || null, processName, pid, protocol: 'tcp' };
+        outbound.push(entry);
+        pendingEstabEntry = entry;
       }
     } else if (section === 'udp') {
       // No "state x" filter here (see SCAN_SCRIPT comment), so the State column is still present:
@@ -296,11 +327,12 @@ async function raiseOutboundForeignAlert(vm, remoteIp, remotePort, country, proc
 // already exited by the time this poll ran) rather than blanking out previously-known attribution.
 const upsertSeen = db.prepare(`
   UPDATE outbound_connections SET last_seen = CURRENT_TIMESTAMP, process_name = COALESCE(?, process_name),
-    pid = COALESCE(?, pid), cmdline = COALESCE(?, cmdline), cwd = COALESCE(?, cwd) WHERE id = ?
+    pid = COALESCE(?, pid), cmdline = COALESCE(?, cmdline), cwd = COALESCE(?, cwd),
+    bytes_sent = COALESCE(?, bytes_sent), bytes_received = COALESCE(?, bytes_received) WHERE id = ?
 `);
 const insertNew = db.prepare(`
-  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd, remote_hostname, protocol, app_protocol)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd, remote_hostname, protocol, app_protocol, bytes_sent, bytes_received)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 // Identity is still (vm, remote_ip, remote_port) only — same as the table's uq_outbound constraint,
 // deliberately NOT widened to include protocol. A TCP and UDP connection sharing the exact same
@@ -340,13 +372,15 @@ async function collectVm(vm) {
       const cmdline = conn.pid ? procsByPid.get(conn.pid) || null : null;
       const cwd = conn.pid ? cwdsByPid.get(conn.pid) || null : null;
       const existing = existingByConn.get(conn);
+      const bytesSent = conn.bytesSent ?? null;
+      const bytesReceived = conn.bytesReceived ?? null;
       if (existing) {
-        await upsertSeen.run(conn.processName, conn.pid, cmdline, cwd, existing.id);
+        await upsertSeen.run(conn.processName, conn.pid, cmdline, cwd, bytesSent, bytesReceived, existing.id);
       } else {
         const remoteHostname = hostnameByIp.get(conn.remoteIp) || null;
         const downloadUrl = parseDownloadDetail(conn.processName, cmdline, cwd)?.url || null;
         const appProtocol = guessAppProtocol(conn.protocol, conn.remotePort, downloadUrl);
-        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd, remoteHostname, conn.protocol, appProtocol);
+        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd, remoteHostname, conn.protocol, appProtocol, bytesSent, bytesReceived);
         if (isForeign) await raiseOutboundForeignAlert(vm, conn.remoteIp, conn.remotePort, country, conn.processName, conn.pid);
       }
     }

@@ -3153,7 +3153,7 @@ function renderOutboundRows() {
   const rowOffset = (outboundPagination.page - 1) * outboundPagination.pageSize;
 
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', outboundSortState, 'toggleOutboundSort')}${thSort('Process', 'process_name', outboundSortState, 'toggleOutboundSort')}${thSort('IP đích', 'remote_ip', outboundSortState, 'toggleOutboundSort')}${thSort('Cổng', 'remote_port', outboundSortState, 'toggleOutboundSort')}${thSort('Giao thức', 'protocol', outboundSortState, 'toggleOutboundSort')}${thSort('Quốc gia', 'country', outboundSortState, 'toggleOutboundSort')}${thSort('Lần đầu thấy', 'first_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Lần cuối thấy', 'last_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Trạng thái', 'is_active', outboundSortState, 'toggleOutboundSort')}<th>Cảnh báo</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', outboundSortState, 'toggleOutboundSort')}${thSort('Process', 'process_name', outboundSortState, 'toggleOutboundSort')}${thSort('IP đích', 'remote_ip', outboundSortState, 'toggleOutboundSort')}${thSort('Cổng', 'remote_port', outboundSortState, 'toggleOutboundSort')}${thSort('Giao thức', 'protocol', outboundSortState, 'toggleOutboundSort')}<th>Lưu lượng</th>${thSort('Quốc gia', 'country', outboundSortState, 'toggleOutboundSort')}${thSort('Lần đầu thấy', 'first_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Lần cuối thấy', 'last_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Trạng thái', 'is_active', outboundSortState, 'toggleOutboundSort')}<th>Cảnh báo</th></tr></thead>
       <tbody>${conns.map((c, i) => {
         const active = !!c.is_active;
         return `
@@ -3164,6 +3164,7 @@ function renderOutboundRows() {
           <td><span style="font-family:monospace">${c.remote_ip}</span>${c.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(c.remote_hostname)}</div>` : ''}</td>
           <td>${c.remote_port ?? '—'}</td>
           <td>${outboundProtocolBadge(c)}</td>
+          <td>${outboundDirectionBadge(c)}</td>
           <td>${c.country || '—'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(c.first_seen)}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(c.last_seen)}</span></td>
@@ -9603,6 +9604,26 @@ function outboundProtocolBadge(c) {
   return `<span style="font-family:monospace;font-size:11px;color:var(--fg-dim)">${proto}</span>${appBadge}`;
 }
 
+// Straight from the kernel's own TCP_INFO counters for the socket (ss -i's bytes_sent/bytes_received
+// — see outbound-connection-collector.js), not a packet-content guess: answers "is this process
+// pulling data in or pushing it out" without needing to decrypt TLS to look inside the traffic.
+// UDP connections have no such counters (ss exposes none for connectionless sockets) and show "—".
+// A >=2x lopsidedness between the two directions gets an explicit "Đẩy ra"/"Lấy về" label; anything
+// closer to even is labeled "Hai chiều" rather than force-picking a dominant side that isn't real.
+function outboundDirectionBadge(c) {
+  const sent = c.bytes_sent, recv = c.bytes_received;
+  if (sent == null && recv == null) return '<span style="color:var(--fg-dim)">—</span>';
+  const s = sent || 0, r = recv || 0;
+  let label, cls;
+  if (s > r * 2) { label = 'Đẩy ra'; cls = 'warning'; }
+  else if (r > s * 2) { label = 'Lấy về'; cls = 'online'; }
+  else { label = 'Hai chiều'; cls = 'unknown'; }
+  return `<div style="font-size:11px;font-family:monospace;white-space:nowrap" title="Tổng dữ liệu đã trao đổi trên kết nối này (bộ đếm TCP của kernel)">
+      <span style="color:var(--fg-muted)">↑ ${fmtBytes(s)}</span> <span style="color:var(--fg-dim)">·</span> <span style="color:var(--fg-muted)">↓ ${fmtBytes(r)}</span>
+    </div>
+    <span class="status ${cls}" style="margin-top:2px"><span class="dot"></span>${label}</span>`;
+}
+
 // Compact by design: just the process name + PID on one line. The full detail (raw cmdline — every
 // process, not just curl/wget, since ps -eo args= captures all of them — plus, for curl/wget, the
 // parsed download URL/destination) lives in the title attribute (hover tooltip) so the table stays
@@ -9666,7 +9687,7 @@ function renderReportsOutboundRows() {
   const rows = paginateRows(sorted, reportsOutboundPagination);
   const rowOffset = (reportsOutboundPagination.page - 1) * reportsOutboundPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th><th>Giao thức</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình / chi tiết tải file</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th><th>Giao thức</th><th>Lưu lượng</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình / chi tiết tải file</th></tr></thead>
       <tbody>${rows.map((r, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -9675,6 +9696,7 @@ function renderReportsOutboundRows() {
           <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span>${r.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(r.remote_hostname)}</div>` : ''}</td>
           <td>${r.remote_port ?? '—'}</td>
           <td>${outboundProtocolBadge(r)}</td>
+          <td>${outboundDirectionBadge(r)}</td>
           <td>${escHtml(r.country || '—')}</td>
           <td>${reportsProcessDetail(r)}</td>
         </tr>`).join('')}
@@ -9691,8 +9713,8 @@ function exportReportsCsv() {
     rows = reportsData.wafDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country, r.attackCategory || '']);
     filenamePart = 'waf-blocked';
   } else if (reportsTab === 'outbound') {
-    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Tên miền (reverse DNS)', 'Cổng', 'Giao thức', 'Ứng dụng (suy đoán)', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
-    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_hostname || '', r.remote_port, (r.protocol || 'tcp').toUpperCase(), r.app_protocol || '', r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
+    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Tên miền (reverse DNS)', 'Cổng', 'Giao thức', 'Ứng dụng (suy đoán)', 'Byte đã gửi', 'Byte đã nhận', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
+    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_hostname || '', r.remote_port, (r.protocol || 'tcp').toUpperCase(), r.app_protocol || '', r.bytes_sent ?? '', r.bytes_received ?? '', r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
     filenamePart = 'outbound';
   } else {
     headers = ['Thời gian', 'VM', 'IP', 'Quốc gia'];
