@@ -1064,6 +1064,14 @@ async function ensureSchemaAndMigrations() {
   // traffic for no benefit.
   try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN remote_hostname TEXT"); } catch (e) { if (e.errno !== 1060) throw e; }
 
+  // Transport (tcp/udp — outbound-connection-collector.js now scans both, not just TCP) and a
+  // best-effort application-layer label (HTTP/HTTPS/DNS/SSH/... — from the curl/wget URL scheme when
+  // known, else a well-known-port guess; see guessAppProtocol). protocol defaults to 'tcp' so every
+  // pre-existing row (all TCP, from before UDP scanning existed) backfills correctly without a
+  // separate UPDATE. Deliberately NOT added to uq_outbound — see findExisting's comment.
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN protocol VARCHAR(8) NOT NULL DEFAULT 'tcp'"); } catch (e) { if (e.errno !== 1060) throw e; }
+  try { await pool.query("ALTER TABLE outbound_connections ADD COLUMN app_protocol VARCHAR(20)"); } catch (e) { if (e.errno !== 1060) throw e; }
+
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT
   // IGNORE so this is a no-op on every restart after the first.

@@ -53,11 +53,21 @@ function toSqlDatetime(date) {
 // call; the CWD loop is scoped to just curl/wget PIDs (matched by exact `comm`, not a substring of
 // args) since that's a second `readlink` per match and every other process's cwd is irrelevant
 // here. Same sudo -n-then-fallback shape as the ss call above.
+// UDP has no TCP-style LISTEN/ESTABLISHED state filter that reliably works the same way across
+// kernels, so instead of "state established" we grab EVERY UDP socket (-a) and classify by its own
+// State column ourselves in parseScan: "ESTAB" means the process called connect() and has a fixed
+// peer (a real outbound target — DNS-over-UDP resolvers, NTP clients, QUIC/HTTP3, etc.); "UNCONN"
+// means it's just bound to a local port with no fixed peer (the common case for e.g. a DNS
+// server/client using sendto() per-packet) and is excluded, same as it would be if it showed up as
+// a TCP LISTEN. Unlike the TCP branches above, this section is NOT run through a "state x" filter,
+// so ss keeps its State column here — one extra leading field parseScan has to account for.
 const SCAN_SCRIPT = `
 echo "===LISTEN==="
 ss -tnH state listening 2>/dev/null
 echo "===ESTAB==="
 sudo -n ss -tnpH state established 2>/dev/null || ss -tnH state established 2>/dev/null
+echo "===UDP==="
+sudo -n ss -unpaH 2>/dev/null || ss -unaH 2>/dev/null
 echo "===PROCS==="
 sudo -n ps -eo pid=,args= 2>/dev/null || ps -eo pid=,args= 2>/dev/null
 echo "===CWD==="
@@ -94,6 +104,14 @@ function parseProcessInfo(tail) {
 // section to something other than 'listen'/'estab' so their lines are safely skipped by the
 // ss-column parsing below) — without this, a `ps`/readlink output line that happens to split into
 // >=4 whitespace-separated columns could get misread as an ESTAB socket line.
+// Loopback check used to be an exact match on '127.0.0.1' — misses the whole 127.0.0.0/8 range
+// (e.g. the '127.0.0.53'/'127.0.0.54' systemd-resolved stub addresses seen live on this fleet),
+// which matters more now that UDP is scanned too (those stubs are UDP:53, the single most common
+// UDP socket on any of these VMs).
+function isLoopback(ip) {
+  return !ip || ip.startsWith('127.') || ip === '::1';
+}
+
 function parseScan(stdout) {
   const listenPorts = new Set();
   const outbound = [];
@@ -103,21 +121,35 @@ function parseScan(stdout) {
     if (!line) continue;
     if (line === '===LISTEN===') { section = 'listen'; continue; }
     if (line === '===ESTAB===') { section = 'estab'; continue; }
+    if (line === '===UDP===') { section = 'udp'; continue; }
     if (line === '===PROCS===' || line === '===CWD===') { section = 'other'; continue; }
-    if (section !== 'listen' && section !== 'estab') continue;
-    const cols = line.split(/\s+/);
-    if (cols.length < 4) continue;
-    const [, , localAddr, peerAddr, ...rest] = cols;
-    if (section === 'listen') {
-      const { port } = splitAddrPort(localAddr);
-      if (port) listenPorts.add(port);
-    } else if (section === 'estab') {
+    if (section === 'listen' || section === 'estab') {
+      const cols = line.split(/\s+/);
+      if (cols.length < 4) continue;
+      const [, , localAddr, peerAddr, ...rest] = cols;
+      if (section === 'listen') {
+        const { port } = splitAddrPort(localAddr);
+        if (port) listenPorts.add(port);
+      } else {
+        const { port: localPort } = splitAddrPort(localAddr);
+        if (!localPort || listenPorts.has(localPort)) continue; // inbound to a service on this VM
+        const { ip: remoteIp, port: remotePort } = splitAddrPort(peerAddr);
+        if (isLoopback(remoteIp)) continue;
+        const { processName, pid } = parseProcessInfo(rest.join(' '));
+        outbound.push({ remoteIp, remotePort: Number(remotePort) || null, processName, pid, protocol: 'tcp' });
+      }
+    } else if (section === 'udp') {
+      // No "state x" filter here (see SCAN_SCRIPT comment), so the State column is still present:
+      // State RecvQ SendQ LocalAddr PeerAddr [process] — one extra leading field vs the TCP branches.
+      const cols = line.split(/\s+/);
+      if (cols.length < 5 || cols[0] !== 'ESTAB') continue; // UNCONN = no fixed peer, not outbound
+      const [, , , localAddr, peerAddr, ...rest] = cols;
       const { port: localPort } = splitAddrPort(localAddr);
-      if (!localPort || listenPorts.has(localPort)) continue; // inbound to a service on this VM
+      if (!localPort) continue;
       const { ip: remoteIp, port: remotePort } = splitAddrPort(peerAddr);
-      if (!remoteIp || remoteIp === '127.0.0.1' || remoteIp === '::1') continue;
+      if (isLoopback(remoteIp) || !remoteIp || remoteIp.includes('*')) continue;
       const { processName, pid } = parseProcessInfo(rest.join(' '));
-      outbound.push({ remoteIp, remotePort: Number(remotePort) || null, processName, pid });
+      outbound.push({ remoteIp, remotePort: Number(remotePort) || null, processName, pid, protocol: 'udp' });
     }
   }
   return outbound;
@@ -217,6 +249,36 @@ function parseDownloadDetail(processName, cmdline, cwd) {
   return { url, destination };
 }
 
+// Best-effort application-layer protocol label — answers "is this HTTP/HTTPS/DNS/SSH/etc." for
+// every connection, not just curl/wget's already-known URL scheme. Two sources, most-reliable first:
+// (1) the URL scheme from a curl/wget invocation (ground truth, when available); (2) a well-known
+// port lookup (a convention, not a guarantee — something could run a non-HTTP protocol on 443 — but
+// right in the overwhelming majority of real traffic and the only signal available for processes
+// that aren't curl/wget). Returns null rather than guessing wildly when neither source has an answer.
+const WELL_KNOWN_TCP_PORTS = {
+  20: 'FTP-DATA', 21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 80: 'HTTP',
+  110: 'POP3', 119: 'NNTP', 143: 'IMAP', 389: 'LDAP', 443: 'HTTPS', 445: 'SMB',
+  465: 'SMTPS', 514: 'Syslog', 587: 'SMTP', 636: 'LDAPS', 990: 'FTPS', 993: 'IMAPS',
+  995: 'POP3S', 1433: 'MSSQL', 1521: 'Oracle', 2049: 'NFS', 2181: 'ZooKeeper',
+  3306: 'MySQL', 3389: 'RDP', 5432: 'PostgreSQL', 5671: 'AMQPS', 5672: 'AMQP',
+  5984: 'CouchDB', 6379: 'Redis', 8080: 'HTTP', 8443: 'HTTPS', 8883: 'MQTTS',
+  9092: 'Kafka', 9200: 'Elasticsearch', 9300: 'Elasticsearch', 27017: 'MongoDB',
+};
+const WELL_KNOWN_UDP_PORTS = {
+  53: 'DNS', 67: 'DHCP', 68: 'DHCP', 69: 'TFTP', 123: 'NTP', 161: 'SNMP',
+  443: 'QUIC/HTTP3', 500: 'IPsec/IKE', 514: 'Syslog', 1194: 'OpenVPN', 4500: 'IPsec/NAT-T',
+  51820: 'WireGuard',
+};
+function guessAppProtocol(protocol, remotePort, downloadUrl) {
+  if (downloadUrl) {
+    const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(downloadUrl)?.[1]?.toLowerCase();
+    if (scheme) return scheme.toUpperCase();
+  }
+  if (!remotePort) return null;
+  const table = protocol === 'udp' ? WELL_KNOWN_UDP_PORTS : WELL_KNOWN_TCP_PORTS;
+  return table[remotePort] || null;
+}
+
 async function raiseOutboundForeignAlert(vm, remoteIp, remotePort, country, processName, pid) {
   const procText = processName ? ` bởi tiến trình "${processName}"${pid ? ` (PID ${pid})` : ''}` : '';
   await db.prepare(`
@@ -237,9 +299,15 @@ const upsertSeen = db.prepare(`
     pid = COALESCE(?, pid), cmdline = COALESCE(?, cmdline), cwd = COALESCE(?, cwd) WHERE id = ?
 `);
 const insertNew = db.prepare(`
-  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd, remote_hostname)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO outbound_connections (vm_id, vm_name, remote_ip, remote_port, country, is_foreign, process_name, pid, cmdline, cwd, remote_hostname, protocol, app_protocol)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
+// Identity is still (vm, remote_ip, remote_port) only — same as the table's uq_outbound constraint,
+// deliberately NOT widened to include protocol. A TCP and UDP connection sharing the exact same
+// remote ip:port (e.g. QUIC/HTTP3 falling back to TCP on the same :443) is rare enough in practice
+// that widening the unique key isn't worth the migration risk on a table that can grow large; in
+// that rare case they collapse into one tracked row (whichever was seen first), which is an accepted
+// tradeoff, not a crash — inserting a 2nd row for the same key would violate uq_outbound otherwise.
 const findExisting = db.prepare(`
   SELECT id FROM outbound_connections WHERE vm_id = ? AND remote_ip = ? AND remote_port = ?
 `);
@@ -276,7 +344,9 @@ async function collectVm(vm) {
         await upsertSeen.run(conn.processName, conn.pid, cmdline, cwd, existing.id);
       } else {
         const remoteHostname = hostnameByIp.get(conn.remoteIp) || null;
-        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd, remoteHostname);
+        const downloadUrl = parseDownloadDetail(conn.processName, cmdline, cwd)?.url || null;
+        const appProtocol = guessAppProtocol(conn.protocol, conn.remotePort, downloadUrl);
+        await insertNew.run(vm.id, vm.name, conn.remoteIp, conn.remotePort, country, isForeign, conn.processName, conn.pid, cmdline, cwd, remoteHostname, conn.protocol, appProtocol);
         if (isForeign) await raiseOutboundForeignAlert(vm, conn.remoteIp, conn.remotePort, country, conn.processName, conn.pid);
       }
     }
@@ -313,4 +383,4 @@ function start(intervalMs = 60000) {
   return setInterval(tick, intervalMs);
 }
 
-module.exports = { start, collectAll, collectVm, parseScan, splitAddrPort, parseProcessInfo, parseProcs, parseCwds, parseDownloadDetail };
+module.exports = { start, collectAll, collectVm, parseScan, splitAddrPort, parseProcessInfo, parseProcs, parseCwds, parseDownloadDetail, guessAppProtocol };

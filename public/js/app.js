@@ -3153,7 +3153,7 @@ function renderOutboundRows() {
   const rowOffset = (outboundPagination.page - 1) * outboundPagination.pageSize;
 
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('VM', 'vm_name', outboundSortState, 'toggleOutboundSort')}${thSort('Process', 'process_name', outboundSortState, 'toggleOutboundSort')}${thSort('IP đích', 'remote_ip', outboundSortState, 'toggleOutboundSort')}${thSort('Cổng', 'remote_port', outboundSortState, 'toggleOutboundSort')}${thSort('Quốc gia', 'country', outboundSortState, 'toggleOutboundSort')}${thSort('Lần đầu thấy', 'first_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Lần cuối thấy', 'last_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Trạng thái', 'is_active', outboundSortState, 'toggleOutboundSort')}<th>Cảnh báo</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('VM', 'vm_name', outboundSortState, 'toggleOutboundSort')}${thSort('Process', 'process_name', outboundSortState, 'toggleOutboundSort')}${thSort('IP đích', 'remote_ip', outboundSortState, 'toggleOutboundSort')}${thSort('Cổng', 'remote_port', outboundSortState, 'toggleOutboundSort')}${thSort('Giao thức', 'protocol', outboundSortState, 'toggleOutboundSort')}${thSort('Quốc gia', 'country', outboundSortState, 'toggleOutboundSort')}${thSort('Lần đầu thấy', 'first_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Lần cuối thấy', 'last_seen', outboundSortState, 'toggleOutboundSort')}${thSort('Trạng thái', 'is_active', outboundSortState, 'toggleOutboundSort')}<th>Cảnh báo</th></tr></thead>
       <tbody>${conns.map((c, i) => {
         const active = !!c.is_active;
         return `
@@ -3163,6 +3163,7 @@ function renderOutboundRows() {
           <td>${c.process_name ? reportsProcessDetail(c) : '<span style="font-size:12px;color:var(--fg-dim)">không xác định</span>'}</td>
           <td><span style="font-family:monospace">${c.remote_ip}</span>${c.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(c.remote_hostname)}</div>` : ''}</td>
           <td>${c.remote_port ?? '—'}</td>
+          <td>${outboundProtocolBadge(c)}</td>
           <td>${c.country || '—'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(c.first_seen)}</span></td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(c.last_seen)}</span></td>
@@ -9589,6 +9590,19 @@ function renderReportsWafRows() {
       </tbody></table>${paginationBar(reportsWafPagination, sorted.length, 'reportsWafPagination', 'renderReportsWafRows')}`;
 }
 
+// TCP/UDP always shown (outbound-connection-collector.js now scans both); the app-layer guess
+// (HTTP/HTTPS/DNS/SSH/...) is a convention-based label, not a certainty — from the curl/wget URL
+// scheme when known, else a well-known-port lookup (see guessAppProtocol) — so it's styled as a
+// plain neutral pill, not a semantic color, and the title spells out that it's a guess for anyone
+// who hovers.
+function outboundProtocolBadge(c) {
+  const proto = (c.protocol || 'tcp').toUpperCase();
+  const appBadge = c.app_protocol
+    ? `<span class="status unknown" style="margin-left:4px" title="Suy đoán từ URL (curl/wget) hoặc cổng phổ biến — không phải chắc chắn 100%"><span class="dot"></span>${escHtml(c.app_protocol)}</span>`
+    : '';
+  return `<span style="font-family:monospace;font-size:11px;color:var(--fg-dim)">${proto}</span>${appBadge}`;
+}
+
 // Compact by design: just the process name + PID on one line. The full detail (raw cmdline — every
 // process, not just curl/wget, since ps -eo args= captures all of them — plus, for curl/wget, the
 // parsed download URL/destination) lives in the title attribute (hover tooltip) so the table stays
@@ -9652,7 +9666,7 @@ function renderReportsOutboundRows() {
   const rows = paginateRows(sorted, reportsOutboundPagination);
   const rowOffset = (reportsOutboundPagination.page - 1) * reportsOutboundPagination.pageSize;
   body.innerHTML = `<table>
-      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình / chi tiết tải file</th></tr></thead>
+      <thead><tr><th>#</th>${thSort('Lần cuối thấy', 'last_seen', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('VM', 'vm_name', reportsOutboundSortState, 'toggleReportsOutboundSort')}${thSort('IP đích', 'remote_ip', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Cổng</th><th>Giao thức</th>${thSort('Quốc gia', 'country', reportsOutboundSortState, 'toggleReportsOutboundSort')}<th>Tiến trình / chi tiết tải file</th></tr></thead>
       <tbody>${rows.map((r, i) => `
         <tr>
           <td style="color:var(--fg-dim)">${rowOffset + i + 1}</td>
@@ -9660,6 +9674,7 @@ function renderReportsOutboundRows() {
           <td style="font-weight:600">${escHtml(r.vm_name || '—')}</td>
           <td><span style="font-family:monospace">${escHtml(r.remote_ip)}</span>${r.remote_hostname ? `<div style="font-size:11px;color:var(--fg-muted);word-break:break-all" title="Tên miền tra ngược (reverse DNS) từ IP đích">${escHtml(r.remote_hostname)}</div>` : ''}</td>
           <td>${r.remote_port ?? '—'}</td>
+          <td>${outboundProtocolBadge(r)}</td>
           <td>${escHtml(r.country || '—')}</td>
           <td>${reportsProcessDetail(r)}</td>
         </tr>`).join('')}
@@ -9676,8 +9691,8 @@ function exportReportsCsv() {
     rows = reportsData.wafDetails.map(r => [r.created_at, r.vm_name, r.ip, r.country, r.attackCategory || '']);
     filenamePart = 'waf-blocked';
   } else if (reportsTab === 'outbound') {
-    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Tên miền (reverse DNS)', 'Cổng', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
-    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_hostname || '', r.remote_port, r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
+    headers = ['Lần cuối thấy', 'VM', 'IP đích', 'Tên miền (reverse DNS)', 'Cổng', 'Giao thức', 'Ứng dụng (suy đoán)', 'Quốc gia', 'Tiến trình', 'URL tải file', 'Lưu vào', 'Cmdline đầy đủ'];
+    rows = reportsData.outboundDetails.map(r => [r.last_seen, r.vm_name, r.remote_ip, r.remote_hostname || '', r.remote_port, (r.protocol || 'tcp').toUpperCase(), r.app_protocol || '', r.country, r.process_name || '', r.downloadUrl || '', r.downloadDest || '', r.cmdline || '']);
     filenamePart = 'outbound';
   } else {
     headers = ['Thời gian', 'VM', 'IP', 'Quốc gia'];
