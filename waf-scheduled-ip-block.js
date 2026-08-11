@@ -48,9 +48,21 @@ async function applyRule(rule) {
     return;
   }
 
-  const result = desiredState === 'blocked'
-    ? await wafManager.banIp(vm, rule.ip)
-    : await wafManager.unbanIp(vm, rule.ip);
+  let result;
+  if (desiredState === 'blocked') {
+    result = await wafManager.banIp(vm, rule.ip);
+  } else {
+    // unbanIp treats "IP wasn't banned to begin with" as a failure (fail2ban's own unbanip returns
+    // "0", not "1", when there was nothing to remove — confirmed live during rollout testing) even
+    // though the actual desired outcome (IP not banned) already holds. Checking the live banned list
+    // first avoids both that false failure (which would otherwise leave last_state stuck at null
+    // forever, retrying every tick with nothing to actually do) and an unnecessary SSH round-trip
+    // when the IP is already not banned.
+    const { ips, error } = await wafManager.listBannedIps(vm);
+    if (error) { result = { ok: false, error }; }
+    else if (!ips.includes(rule.ip)) { result = { ok: true }; }
+    else { result = await wafManager.unbanIp(vm, rule.ip); }
+  }
 
   if (!result.ok) {
     const err = result.excepted ? 'IP nằm trong danh sách Ngoại lệ — không thể chặn' : (result.error || 'Lỗi không rõ');
