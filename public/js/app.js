@@ -3678,6 +3678,7 @@ async function renderWaf(search = '') {
       <div class="filter-tab ${wafTab === 'banned' ? 'active' : ''}" data-tab="banned" onclick="setWafTab('banned')">IP đang bị chặn</div>
       <div class="filter-tab ${wafTab === 'manage' ? 'active' : ''}" data-tab="manage" onclick="setWafTab('manage')">Quản lý giám sát</div>
       <div class="filter-tab ${wafTab === 'exceptions' ? 'active' : ''}" data-tab="exceptions" onclick="setWafTab('exceptions')">Ngoại lệ IP</div>
+      <div class="filter-tab ${wafTab === 'scheduled' ? 'active' : ''}" data-tab="scheduled" onclick="setWafTab('scheduled')">Chặn theo giờ</div>
       <div class="filter-tab ${wafTab === 'traffic' ? 'active' : ''}" data-tab="traffic" onclick="setWafTab('traffic')">Lưu lượng</div>
     </div>
     <div id="wafTabBody"></div>`;
@@ -3725,6 +3726,7 @@ function renderWafTabBody(search = '') {
   if (wafTab === 'manage') renderWafManage();
   else if (wafTab === 'exceptions') renderWafExceptions();
   else if (wafTab === 'banned') renderWafBanned(search);
+  else if (wafTab === 'scheduled') renderWafScheduledBlocks();
   else if (wafTab === 'traffic') renderWafTraffic();
   else renderWafEvents(search);
 }
@@ -4998,6 +5000,139 @@ async function deleteWafException(id, ip) {
     await api(`/waf/exceptions/${id}`, 'DELETE');
     toast(`Đã xóa ngoại lệ ${ip}`, 'success');
     loadWafExceptions();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// ── "Chặn theo giờ" — scheduled per-IP time-of-day access windows. IMPORTANT: enforcement is via
+// fail2ban at the VM/jail level, NOT per-domain (iptables has no concept of virtual hosts) — the
+// "domain" field is only a label for what the IP is meant to access; if the VM hosts other domains,
+// this blocks the IP from ALL of them too. Made explicit in the tab's own intro text so it's never
+// a surprise later.
+async function renderWafScheduledBlocks() {
+  document.getElementById('wafTabBody').innerHTML = `
+    <div class="table-wrap">
+      <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
+        <p style="margin-bottom:0">Chỉ IP chỉ định mới được truy cập trong khung giờ cho phép — ngoài khung giờ đó, IP sẽ bị chặn qua fail2ban. <strong>Lưu ý:</strong> chặn áp dụng ở cấp VM/jail (giống mọi chặn WAF khác), KHÔNG giới hạn riêng theo domain — nếu VM đang chạy nhiều domain, IP sẽ bị chặn khỏi TẤT CẢ domain trên VM đó, không chỉ domain ghi nhãn ở đây. Hệ thống tự kiểm tra mỗi phút và chặn/gỡ chặn khi tới đúng mốc giờ.</p>
+      </div>
+      <div class="table-toolbar" data-permission="waf.block">
+        <button class="btn btn-primary btn-sm" onclick="openWafScheduledBlockForm()">+ Thêm lịch chặn theo giờ</button>
+      </div>
+      <div id="wafScheduledBlocksWrap"><div class="loading"><div class="spinner"></div></div></div>
+    </div>`;
+  applyPermissionVisibility();
+  loadWafScheduledBlocks();
+}
+
+async function loadWafScheduledBlocks() {
+  const wrap = document.getElementById('wafScheduledBlocksWrap');
+  try {
+    const rows = await api('/waf/scheduled-ip-blocks');
+    if (!wrap) return;
+    if (!rows.length) {
+      wrap.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/></svg><h3>Chưa có lịch chặn theo giờ nào</h3></div>`;
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr><th>IP</th><th>VM</th><th>Domain (nhãn)</th><th>Khung giờ cho phép</th><th>Trạng thái hiện tại</th><th>Bật</th><th>Hành động</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
+          <td>${escHtml(r.vm_name || '—')}</td>
+          <td>${r.domain ? escHtml(r.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml((r.allowed_start || '').slice(0, 5))}–${escHtml((r.allowed_end || '').slice(0, 5))}</td>
+          <td>${!r.enabled
+            ? '<span class="status unknown"><span class="dot"></span>Đã tắt</span>'
+            : r.last_error
+              ? `<span class="status offline" title="${escAttr(r.last_error)}"><span class="dot"></span>Lỗi</span>`
+              : r.currentlyAllowed
+                ? '<span class="status online"><span class="dot"></span>Đang cho phép</span>'
+                : '<span class="severity critical"><span class="dot"></span>Đang chặn</span>'}</td>
+          <td><label class="toggle-switch" data-permission="waf.block"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleWafScheduledBlock(${r.id}, this)"><span class="toggle-slider"></span></label></td>
+          <td><div class="actions">
+            <button class="btn-icon edit" data-permission="waf.block" title="Sửa" onclick='openWafScheduledBlockForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+            <button class="btn-icon delete" data-permission="waf.block" title="Xóa" onclick="deleteWafScheduledBlock(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button>
+          </div></td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+    applyPermissionVisibility();
+  } catch (e) {
+    if (wrap) wrap.innerHTML = `<div class="empty-state"><h3>Lỗi</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+function openWafScheduledBlockForm(rule) {
+  const vmOptions = wafState.vms.filter(v => v.waf_enabled).map(v =>
+    `<option value="${v.id}" ${rule && String(rule.vm_id) === String(v.id) ? 'selected' : ''}>${escHtml(v.name)}</option>`
+  ).join('');
+  openModal(rule ? 'Sửa lịch chặn theo giờ' : 'Thêm lịch chặn theo giờ', `
+    <form id="wafScheduledBlockForm" onsubmit="saveWafScheduledBlock(event${rule ? `, ${rule.id}` : ''})">
+      <div class="form-grid">
+        <div class="form-group full"><label>VM</label>
+          <select name="vmId" required><option value="">— Chọn VM —</option>${vmOptions}</select>
+        </div>
+        <div class="form-group full"><label>IP (địa chỉ IP Public cụ thể)</label>
+          <input type="text" name="ip" value="${rule ? escAttr(rule.ip) : ''}" required placeholder="203.0.113.5">
+        </div>
+        <div class="form-group full"><label>Domain (nhãn — không giới hạn chặn riêng domain này, xem lưu ý ở đầu trang)</label>
+          <input type="text" name="domain" value="${rule ? escAttr(rule.domain || '') : ''}" placeholder="vd: thuyenvien.fds.vn">
+        </div>
+        <div class="form-group"><label>Cho phép từ</label>
+          <input type="time" name="allowedStart" value="${rule ? escAttr((rule.allowed_start || '').slice(0, 5)) : '08:00'}" required>
+        </div>
+        <div class="form-group"><label>Đến</label>
+          <input type="time" name="allowedEnd" value="${rule ? escAttr((rule.allowed_end || '').slice(0, 5)) : '18:00'}" required>
+        </div>
+        <div class="form-group full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" name="enabled" ${!rule || rule.enabled ? 'checked' : ''} style="width:auto"> Bật lịch chặn này ngay
+        </label></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary">Lưu</button>
+      </div>
+    </form>`);
+}
+
+async function saveWafScheduledBlock(e, id) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  const fd = new FormData(e.target);
+  const body = {
+    vmId: Number(fd.get('vmId')),
+    ip: fd.get('ip').trim(),
+    domain: fd.get('domain').trim(),
+    allowedStart: fd.get('allowedStart'),
+    allowedEnd: fd.get('allowedEnd'),
+    enabled: fd.get('enabled') === 'on',
+  };
+  try {
+    await api(id ? `/waf/scheduled-ip-blocks/${id}` : '/waf/scheduled-ip-blocks', id ? 'PATCH' : 'POST', body);
+    toast(id ? 'Đã cập nhật lịch chặn' : 'Đã thêm lịch chặn', 'success');
+    closeModal();
+    loadWafScheduledBlocks();
+  } catch (err) {
+    toast(err.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+async function toggleWafScheduledBlock(id, checkbox) {
+  checkbox.disabled = true;
+  try {
+    await api(`/waf/scheduled-ip-blocks/${id}`, 'PATCH', { enabled: checkbox.checked });
+    toast(checkbox.checked ? 'Đã bật lịch chặn' : 'Đã tắt lịch chặn', 'success');
+    loadWafScheduledBlocks();
+  } catch (e) { toast(e.message, 'error'); checkbox.checked = !checkbox.checked; checkbox.disabled = false; }
+}
+
+async function deleteWafScheduledBlock(id, ip) {
+  if (!confirm(`Xóa lịch chặn theo giờ cho IP ${ip}? Nếu IP đang bị chặn tại thời điểm này, lệnh chặn sẽ KHÔNG tự động gỡ — vào tab "IP đang bị chặn" nếu muốn gỡ thủ công.`)) return;
+  try {
+    await api(`/waf/scheduled-ip-blocks/${id}`, 'DELETE');
+    toast(`Đã xóa lịch chặn cho ${ip}`, 'success');
+    loadWafScheduledBlocks();
   } catch (e) { toast(e.message, 'error'); }
 }
 

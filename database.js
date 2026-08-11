@@ -402,6 +402,31 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_waf_ip_exception (ip)
   );
 
+  -- Scheduled per-IP time-of-day access windows — "IP X is only allowed through on VM Y during
+  -- [allowed_start, allowed_end), banned via fail2ban outside it" (waf-scheduled-ip-block.js).
+  -- domain is a LABEL only, not real scope: fail2ban bans at the VM/jail level (iptables has no
+  -- concept of virtual hosts), so a VM hosting multiple domains blocks the IP from ALL of them, not
+  -- just the named one — see waf-scheduled-ip-block.js's header for why this can't be domain-scoped
+  -- without a much bigger nginx-config-push mechanism. last_state/last_applied_at track what was
+  -- actually last applied so the scheduler only calls banIp/unbanIp on an actual transition, not
+  -- every tick.
+  CREATE TABLE IF NOT EXISTS waf_scheduled_ip_blocks (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    vm_id INT NOT NULL,
+    domain VARCHAR(255),
+    ip VARCHAR(45) NOT NULL,
+    allowed_start TIME NOT NULL,
+    allowed_end TIME NOT NULL,
+    enabled INT NOT NULL DEFAULT 1,
+    last_state VARCHAR(10),
+    last_applied_at DATETIME,
+    last_error VARCHAR(255),
+    created_by_name VARCHAR(255),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_waf_sched_vm (vm_id)
+  );
+
   -- Mirrors each VM's netadmin-waf jail "currently banned" list — synced every collector poll
   -- (reuses the SSH session already open for log tailing, see nginx-waf-collector.js's
   -- syncBannedIps) so the "IP đang bị chặn" tab is a fast DB read instead of a live SSH round-trip

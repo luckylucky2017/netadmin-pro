@@ -189,6 +189,7 @@ if (!process.env.SESSION_SECRET) {
     require('./nginx-waf-collector').start();
     require('./crowdsec-collector').start();
     require('./crowdsec-hub-updater').start();
+    require('./waf-scheduled-ip-block').start();
     require('./notification-dispatcher').start();
     require('./vuln-scanner').start();
     require('./trivy-scanner').start();

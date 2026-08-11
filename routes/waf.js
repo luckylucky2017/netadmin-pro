@@ -4,6 +4,7 @@ const db = require('../database');
 const { requirePermission, logActivity } = require('../auth');
 const wafManager = require('../waf-manager');
 const fail2banConfig = require('../fail2ban-config');
+const wafScheduledBlock = require('../waf-scheduled-ip-block');
 
 router.get('/events', async (req, res) => {
   const { vmId, eventType, search, limit } = req.query;
@@ -474,6 +475,101 @@ router.delete('/exceptions/:id', requirePermission('waf.block'), async (req, res
     WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
   `).all();
   await Promise.allSettled(vms.map(vm => wafManager.pushIgnoreIp(vm)));
+  res.json({ message: 'OK' });
+});
+
+// ── Scheduled per-IP time-of-day access windows ("Chặn theo giờ" tab) — see
+// waf-scheduled-ip-block.js's header comment for the important VM-wide (not domain-scoped)
+// enforcement caveat: fail2ban bans at the jail/VM level, so a VM hosting multiple domains blocks
+// the IP from ALL of them, not just the one named in `domain` (a label, not an enforced scope).
+function isValidTimeOfDay(value) {
+  return /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(value || '');
+}
+function normalizeTimeOfDay(value) {
+  return value.length === 5 ? `${value}:00` : value;
+}
+
+router.get('/scheduled-ip-blocks', async (req, res) => {
+  const rows = await db.prepare(`
+    SELECT b.*, v.name AS vm_name FROM waf_scheduled_ip_blocks b
+    JOIN vcenter_vms v ON v.id = b.vm_id
+    ORDER BY b.created_at DESC
+  `).all();
+  const now = wafScheduledBlock.currentTimeOfDay();
+  for (const r of rows) r.currentlyAllowed = wafScheduledBlock.isWithinWindow(now, r.allowed_start, r.allowed_end);
+  res.json(rows);
+});
+
+router.post('/scheduled-ip-blocks', requirePermission('waf.block'), async (req, res) => {
+  const vmId = Number(req.body?.vmId);
+  const domain = String(req.body?.domain || '').trim().slice(0, 255) || null;
+  const ip = String(req.body?.ip || '').trim();
+  const allowedStart = String(req.body?.allowedStart || '').trim();
+  const allowedEnd = String(req.body?.allowedEnd || '').trim();
+  const enabled = req.body?.enabled !== false;
+
+  if (!vmId) return res.status(400).json({ error: 'Thiếu VM' });
+  const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(vmId);
+  if (!vm) return res.status(400).json({ error: 'VM không tồn tại' });
+  if (!isValidExceptionIp(ip)) return res.status(400).json({ error: 'IP/CIDR không hợp lệ' });
+  if (!isValidTimeOfDay(allowedStart) || !isValidTimeOfDay(allowedEnd)) {
+    return res.status(400).json({ error: 'Khung giờ không hợp lệ (định dạng HH:MM)' });
+  }
+
+  const result = await db.prepare(`
+    INSERT INTO waf_scheduled_ip_blocks (vm_id, domain, ip, allowed_start, allowed_end, enabled, created_by_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(vmId, domain, ip, normalizeTimeOfDay(allowedStart), normalizeTimeOfDay(allowedEnd), enabled ? 1 : 0, req.user?.name || null);
+  await logActivity(req.user, 'CREATE', 'waf_scheduled_ip_block', result.lastInsertRowid, ip,
+    `Thêm lịch chặn theo giờ: IP ${ip} trên VM "${vm.name}"${domain ? ` (${domain})` : ''} — cho phép ${allowedStart}-${allowedEnd}`);
+  res.json({ message: 'OK', id: result.lastInsertRowid });
+});
+
+router.patch('/scheduled-ip-blocks/:id', requirePermission('waf.block'), async (req, res) => {
+  const row = await db.prepare('SELECT * FROM waf_scheduled_ip_blocks WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
+
+  const fields = {};
+  if (req.body?.domain !== undefined) fields.domain = String(req.body.domain || '').trim().slice(0, 255) || null;
+  if (req.body?.ip !== undefined) {
+    const ip = String(req.body.ip).trim();
+    if (!isValidExceptionIp(ip)) return res.status(400).json({ error: 'IP/CIDR không hợp lệ' });
+    fields.ip = ip;
+  }
+  if (req.body?.allowedStart !== undefined) {
+    if (!isValidTimeOfDay(req.body.allowedStart)) return res.status(400).json({ error: 'Giờ bắt đầu không hợp lệ' });
+    fields.allowed_start = normalizeTimeOfDay(req.body.allowedStart);
+  }
+  if (req.body?.allowedEnd !== undefined) {
+    if (!isValidTimeOfDay(req.body.allowedEnd)) return res.status(400).json({ error: 'Giờ kết thúc không hợp lệ' });
+    fields.allowed_end = normalizeTimeOfDay(req.body.allowedEnd);
+  }
+  if (req.body?.enabled !== undefined) fields.enabled = req.body.enabled ? 1 : 0;
+  if (req.body?.vmId !== undefined) {
+    const vm = await db.prepare('SELECT id FROM vcenter_vms WHERE id = ?').get(Number(req.body.vmId));
+    if (!vm) return res.status(400).json({ error: 'VM không tồn tại' });
+    fields.vm_id = vm.id;
+  }
+
+  const cols = Object.keys(fields);
+  if (!cols.length) return res.status(400).json({ error: 'Không có trường nào để cập nhật' });
+  // A rule edit invalidates whatever was last applied — force the scheduler to re-evaluate (and,
+  // if needed, actually flip fail2ban state) on its next tick rather than trusting the old
+  // last_state against a possibly-changed IP/window/VM.
+  await db.prepare(`UPDATE waf_scheduled_ip_blocks SET ${cols.map(c => `${c} = ?`).join(', ')}, last_state = NULL WHERE id = ?`)
+    .run(...cols.map(c => fields[c]), row.id);
+  await logActivity(req.user, 'UPDATE', 'waf_scheduled_ip_block', row.id, row.ip, `Cập nhật lịch chặn theo giờ #${row.id}: ${cols.join(', ')}`);
+  res.json({ message: 'OK' });
+});
+
+router.delete('/scheduled-ip-blocks/:id', requirePermission('waf.block'), async (req, res) => {
+  const row = await db.prepare('SELECT * FROM waf_scheduled_ip_blocks WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
+  await db.prepare('DELETE FROM waf_scheduled_ip_blocks WHERE id = ?').run(row.id);
+  await logActivity(req.user, 'DELETE', 'waf_scheduled_ip_block', row.id, row.ip, `Xóa lịch chặn theo giờ: IP ${row.ip}`);
+  // If the rule was currently enforcing a block, that ban is deliberately left in place rather than
+  // auto-unbanned — deleting a schedule shouldn't silently restore access; unban explicitly from the
+  // "IP đang bị chặn" tab if that's actually what's wanted.
   res.json({ message: 'OK' });
 });
 
