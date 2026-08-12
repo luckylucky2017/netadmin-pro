@@ -5061,9 +5061,50 @@ async function loadWafScheduledBlocks() {
   }
 }
 
+// Presets set both time inputs at once and refresh the preview sentence — the fastest way to pick
+// a correct window without reasoning about start/end order yourself. "Qua đêm" is included
+// specifically to demonstrate the cross-midnight case (end < start) since that's the one combination
+// that looks "wrong" at a glance but is handled correctly by the scheduler.
+const WAF_SCHEDULE_PRESETS = [
+  { label: 'Giờ hành chính (08:00–18:00)', start: '08:00', end: '18:00' },
+  { label: 'Cả ngày (00:00–23:59)', start: '00:00', end: '23:59' },
+  { label: 'Qua đêm (22:00–06:00)', start: '22:00', end: '06:00' },
+];
+
+function applyWafSchedulePreset(start, end) {
+  const form = document.getElementById('wafScheduledBlockForm');
+  if (!form) return;
+  form.elements.allowedStart.value = start;
+  form.elements.allowedEnd.value = end;
+  updateWafSchedulePreview();
+}
+
+// Plain-language sentence, recomputed on every keystroke/preset click, so the effect of the current
+// selection is stated outright instead of left for the admin to infer from two bare time pickers —
+// directly answers "chọn thế nào cho đúng" (how do I pick this correctly) by showing the outcome,
+// not just the inputs. Explicitly calls out the overnight case since start > end reads as a mistake
+// otherwise.
+function updateWafSchedulePreview() {
+  const form = document.getElementById('wafScheduledBlockForm');
+  const preview = document.getElementById('wafSchedulePreview');
+  if (!form || !preview) return;
+  const ip = form.elements.ip.value.trim() || 'IP này';
+  const start = form.elements.allowedStart.value;
+  const end = form.elements.allowedEnd.value;
+  if (!start || !end) { preview.innerHTML = ''; return; }
+  const overnight = end < start;
+  preview.innerHTML = `
+    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''} — <strong>mỗi ngày</strong>.
+    Ngoài khung giờ này, hệ thống sẽ tự động <strong style="color:var(--red)">CHẶN</strong> IP qua fail2ban.
+    ${overnight ? '<br><span style="color:var(--fg-dim)">Khung giờ qua đêm (giờ kết thúc nhỏ hơn giờ bắt đầu) — hệ thống tự hiểu là "từ tối hôm trước tới sáng hôm sau".</span>' : ''}`;
+}
+
 function openWafScheduledBlockForm(rule) {
   const vmOptions = wafState.vms.filter(v => v.waf_enabled).map(v =>
     `<option value="${v.id}" ${rule && String(rule.vm_id) === String(v.id) ? 'selected' : ''}>${escHtml(v.name)}</option>`
+  ).join('');
+  const presetButtons = WAF_SCHEDULE_PRESETS.map(p =>
+    `<button type="button" class="btn btn-secondary btn-sm" onclick="applyWafSchedulePreset('${p.start}','${p.end}')">${escHtml(p.label)}</button>`
   ).join('');
   openModal(rule ? 'Sửa lịch chặn theo giờ' : 'Thêm lịch chặn theo giờ', `
     <form id="wafScheduledBlockForm" onsubmit="saveWafScheduledBlock(event${rule ? `, ${rule.id}` : ''})">
@@ -5072,17 +5113,21 @@ function openWafScheduledBlockForm(rule) {
           <select name="vmId" required><option value="">— Chọn VM —</option>${vmOptions}</select>
         </div>
         <div class="form-group full"><label>IP (địa chỉ IP Public cụ thể)</label>
-          <input type="text" name="ip" value="${rule ? escAttr(rule.ip) : ''}" required placeholder="203.0.113.5">
+          <input type="text" name="ip" value="${rule ? escAttr(rule.ip) : ''}" required placeholder="203.0.113.5" oninput="updateWafSchedulePreview()">
         </div>
         <div class="form-group full"><label>Domain (nhãn — không giới hạn chặn riêng domain này, xem lưu ý ở đầu trang)</label>
           <input type="text" name="domain" value="${rule ? escAttr(rule.domain || '') : ''}" placeholder="vd: thuyenvien.fds.vn">
         </div>
-        <div class="form-group"><label>Cho phép từ</label>
-          <input type="time" name="allowedStart" value="${rule ? escAttr((rule.allowed_start || '').slice(0, 5)) : '08:00'}" required>
+        <div class="form-group full">
+          <label>Khung giờ CHO PHÉP truy cập (lặp lại mỗi ngày)</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">${presetButtons}</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+            <input type="time" name="allowedStart" value="${rule ? escAttr((rule.allowed_start || '').slice(0, 5)) : '08:00'}" required oninput="updateWafSchedulePreview()">
+            <span style="color:var(--fg-dim)">→</span>
+            <input type="time" name="allowedEnd" value="${rule ? escAttr((rule.allowed_end || '').slice(0, 5)) : '18:00'}" required oninput="updateWafSchedulePreview()">
+          </div>
         </div>
-        <div class="form-group"><label>Đến</label>
-          <input type="time" name="allowedEnd" value="${rule ? escAttr((rule.allowed_end || '').slice(0, 5)) : '18:00'}" required>
-        </div>
+        <div class="form-group full" id="wafSchedulePreview" style="font-size:13px;line-height:1.6;background:var(--surface2);border-radius:var(--radius);padding:10px 12px"></div>
         <div class="form-group full"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" name="enabled" ${!rule || rule.enabled ? 'checked' : ''} style="width:auto"> Bật lịch chặn này ngay
         </label></div>
@@ -5092,6 +5137,7 @@ function openWafScheduledBlockForm(rule) {
         <button type="submit" class="btn btn-primary">Lưu</button>
       </div>
     </form>`);
+  updateWafSchedulePreview();
 }
 
 async function saveWafScheduledBlock(e, id) {
