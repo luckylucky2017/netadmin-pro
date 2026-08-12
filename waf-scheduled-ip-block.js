@@ -35,9 +35,23 @@ function isWithinWindow(now, start, end) {
   return now >= start || now < end;
 }
 
+// ISO weekday: Monday=1 ... Sunday=7 (matches how days_of_week is stored/sent by the frontend).
+function currentIsoWeekday() {
+  const wd = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Ho_Chi_Minh', weekday: 'short' });
+  return { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[wd];
+}
+
+function isDayAllowed(daysOfWeek) {
+  const days = (daysOfWeek || '1,2,3,4,5,6,7').split(',').map((d) => Number(d.trim()));
+  return days.includes(currentIsoWeekday());
+}
+
 async function applyRule(rule) {
   const now = currentTimeOfDay();
-  const allowed = isWithinWindow(now, rule.allowed_start, rule.allowed_end);
+  // A day not in days_of_week is treated as fully outside the window (blocked all day on that day),
+  // same as being outside allowed_start/allowed_end on an allowed day — one uniform "not currently
+  // allowed" condition, not a separate day-level exception.
+  const allowed = isDayAllowed(rule.days_of_week) && isWithinWindow(now, rule.allowed_start, rule.allowed_end);
   const desiredState = allowed ? 'allowed' : 'blocked';
   if (rule.last_state === desiredState) return; // already in the right state, nothing to do
 
@@ -95,4 +109,4 @@ function start(intervalMs = 60000) {
   return setInterval(t, intervalMs);
 }
 
-module.exports = { start, tick, isWithinWindow, currentTimeOfDay };
+module.exports = { start, tick, isWithinWindow, currentTimeOfDay, isDayAllowed, currentIsoWeekday };

@@ -488,6 +488,16 @@ function isValidTimeOfDay(value) {
 function normalizeTimeOfDay(value) {
   return value.length === 5 ? `${value}:00` : value;
 }
+// Accepts an array of ISO weekday numbers (1=Mon..7=Sun) from the frontend's checkboxes, validates
+// and normalizes to the sorted, deduped CSV string the DB column stores. null = not provided
+// (leave unchanged on PATCH); empty array is rejected outright — a rule that applies on zero days
+// would just silently never do anything, almost certainly a UI mistake rather than intent.
+function parseDaysOfWeek(value) {
+  if (!Array.isArray(value)) return { error: 'Chưa chọn ngày nào' };
+  const days = [...new Set(value.map(Number))].filter((d) => Number.isInteger(d) && d >= 1 && d <= 7).sort();
+  if (!days.length) return { error: 'Chưa chọn ngày nào' };
+  return { csv: days.join(',') };
+}
 
 router.get('/scheduled-ip-blocks', async (req, res) => {
   const rows = await db.prepare(`
@@ -496,7 +506,10 @@ router.get('/scheduled-ip-blocks', async (req, res) => {
     ORDER BY b.created_at DESC
   `).all();
   const now = wafScheduledBlock.currentTimeOfDay();
-  for (const r of rows) r.currentlyAllowed = wafScheduledBlock.isWithinWindow(now, r.allowed_start, r.allowed_end);
+  const todayAllowed = wafScheduledBlock.isDayAllowed;
+  for (const r of rows) {
+    r.currentlyAllowed = todayAllowed(r.days_of_week) && wafScheduledBlock.isWithinWindow(now, r.allowed_start, r.allowed_end);
+  }
   res.json(rows);
 });
 
@@ -507,6 +520,7 @@ router.post('/scheduled-ip-blocks', requirePermission('waf.block'), async (req, 
   const allowedStart = String(req.body?.allowedStart || '').trim();
   const allowedEnd = String(req.body?.allowedEnd || '').trim();
   const enabled = req.body?.enabled !== false;
+  const days = parseDaysOfWeek(req.body?.daysOfWeek);
 
   if (!vmId) return res.status(400).json({ error: 'Thiếu VM' });
   const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(vmId);
@@ -515,13 +529,14 @@ router.post('/scheduled-ip-blocks', requirePermission('waf.block'), async (req, 
   if (!isValidTimeOfDay(allowedStart) || !isValidTimeOfDay(allowedEnd)) {
     return res.status(400).json({ error: 'Khung giờ không hợp lệ (định dạng HH:MM)' });
   }
+  if (days.error) return res.status(400).json({ error: days.error });
 
   const result = await db.prepare(`
-    INSERT INTO waf_scheduled_ip_blocks (vm_id, domain, ip, allowed_start, allowed_end, enabled, created_by_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(vmId, domain, ip, normalizeTimeOfDay(allowedStart), normalizeTimeOfDay(allowedEnd), enabled ? 1 : 0, req.user?.name || null);
+    INSERT INTO waf_scheduled_ip_blocks (vm_id, domain, ip, allowed_start, allowed_end, days_of_week, enabled, created_by_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(vmId, domain, ip, normalizeTimeOfDay(allowedStart), normalizeTimeOfDay(allowedEnd), days.csv, enabled ? 1 : 0, req.user?.name || null);
   await logActivity(req.user, 'CREATE', 'waf_scheduled_ip_block', result.lastInsertRowid, ip,
-    `Thêm lịch chặn theo giờ: IP ${ip} trên VM "${vm.name}"${domain ? ` (${domain})` : ''} — cho phép ${allowedStart}-${allowedEnd}`);
+    `Thêm lịch chặn theo giờ: IP ${ip} trên VM "${vm.name}"${domain ? ` (${domain})` : ''} — cho phép ${allowedStart}-${allowedEnd}, ngày ${days.csv}`);
   res.json({ message: 'OK', id: result.lastInsertRowid });
 });
 
@@ -545,6 +560,11 @@ router.patch('/scheduled-ip-blocks/:id', requirePermission('waf.block'), async (
     fields.allowed_end = normalizeTimeOfDay(req.body.allowedEnd);
   }
   if (req.body?.enabled !== undefined) fields.enabled = req.body.enabled ? 1 : 0;
+  if (req.body?.daysOfWeek !== undefined) {
+    const days = parseDaysOfWeek(req.body.daysOfWeek);
+    if (days.error) return res.status(400).json({ error: days.error });
+    fields.days_of_week = days.csv;
+  }
   if (req.body?.vmId !== undefined) {
     const vm = await db.prepare('SELECT id FROM vcenter_vms WHERE id = ?').get(Number(req.body.vmId));
     if (!vm) return res.status(400).json({ error: 'VM không tồn tại' });

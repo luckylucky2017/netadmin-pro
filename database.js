@@ -410,6 +410,9 @@ const SCHEMA_SQL = `
   -- without a much bigger nginx-config-push mechanism. last_state/last_applied_at track what was
   -- actually last applied so the scheduler only calls banIp/unbanIp on an actual transition, not
   -- every tick.
+  -- days_of_week: CSV of ISO weekday numbers (1=Mon..7=Sun) the window applies on — default
+  -- '1,2,3,4,5,6,7' (every day) so pre-existing rows created before this column existed keep their
+  -- original daily behavior unchanged after the ALTER migration below backfills it.
   CREATE TABLE IF NOT EXISTS waf_scheduled_ip_blocks (
     id INT PRIMARY KEY AUTO_INCREMENT,
     vm_id INT NOT NULL,
@@ -417,6 +420,7 @@ const SCHEMA_SQL = `
     ip VARCHAR(45) NOT NULL,
     allowed_start TIME NOT NULL,
     allowed_end TIME NOT NULL,
+    days_of_week VARCHAR(20) NOT NULL DEFAULT '1,2,3,4,5,6,7',
     enabled INT NOT NULL DEFAULT 1,
     last_state VARCHAR(10),
     last_applied_at DATETIME,
@@ -1113,6 +1117,13 @@ async function ensureSchemaAndMigrations() {
   // the last run, not just "has the app been up for >24h" (which would drift after every restart).
   try { await pool.query("ALTER TABLE crowdsec_settings ADD COLUMN hub_auto_update INT NOT NULL DEFAULT 0"); } catch (e) { if (e.errno !== 1060) throw e; }
   try { await pool.query("ALTER TABLE crowdsec_settings ADD COLUMN last_hub_upgrade_at DATETIME"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // waf_scheduled_ip_blocks already shipped without days_of_week — backfill existing rows to
+  // '1,2,3,4,5,6,7' (every day) so this ALTER doesn't silently change any already-configured rule's
+  // behavior (a rule that used to apply daily keeps applying daily).
+  try {
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks ADD COLUMN days_of_week VARCHAR(20) NOT NULL DEFAULT '1,2,3,4,5,6,7'");
+  } catch (e) { if (e.errno !== 1060) throw e; }
 
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT

@@ -147,6 +147,13 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent-dim); }
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(17px); background: var(--accent); }
 .toggle-switch input:disabled + .toggle-slider { cursor: default; opacity: .5; }
+
+/* Drag-select hour grid (WAF "Chặn theo giờ" tab) — 24 cells, click+drag across them to select a
+   contiguous allowed-hours range. flex:1 so the row always spans the modal's full width regardless
+   of column count. */
+.waf-hour-cell { flex: 1; height: 32px; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; transition: background .1s; }
+.waf-hour-cell:hover { background: var(--accent-dim); }
+.waf-hour-cell.selected { background: var(--accent); border-color: var(--accent); }
 .toggle-switch.error .toggle-slider { background: var(--red-dim); }
 .toggle-switch.error .toggle-slider:before { background: var(--red); }
 .toggle-switch.installing .toggle-slider:before { animation: statusPulse 1s ease-in-out infinite; }

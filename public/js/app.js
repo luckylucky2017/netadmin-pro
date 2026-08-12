@@ -5033,13 +5033,14 @@ async function loadWafScheduledBlocks() {
       return;
     }
     wrap.innerHTML = `<table>
-      <thead><tr><th>IP</th><th>VM</th><th>Domain (nhãn)</th><th>Khung giờ cho phép</th><th>Trạng thái hiện tại</th><th>Bật</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>IP</th><th>VM</th><th>Domain (nhãn)</th><th>Khung giờ cho phép</th><th>Ngày áp dụng</th><th>Trạng thái hiện tại</th><th>Bật</th><th>Hành động</th></tr></thead>
       <tbody>${rows.map(r => `
         <tr>
           <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
           <td>${escHtml(r.vm_name || '—')}</td>
           <td>${r.domain ? escHtml(r.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td style="font-family:monospace;font-size:12px">${escHtml((r.allowed_start || '').slice(0, 5))}–${escHtml((r.allowed_end || '').slice(0, 5))}</td>
+          <td style="font-size:12px;color:var(--fg-muted)">${escHtml(formatWafDaysOfWeek(r.days_of_week))}</td>
           <td>${!r.enabled
             ? '<span class="status unknown"><span class="dot"></span>Đã tắt</span>'
             : r.last_error
@@ -5061,29 +5062,110 @@ async function loadWafScheduledBlocks() {
   }
 }
 
-// Presets set both time inputs at once and refresh the preview sentence — the fastest way to pick
-// a correct window without reasoning about start/end order yourself. "Qua đêm" is included
-// specifically to demonstrate the cross-midnight case (end < start) since that's the one combination
-// that looks "wrong" at a glance but is handled correctly by the scheduler.
+// Presets jump the drag-grid selection straight to a common window — the fastest way to pick a
+// correct range without reasoning about start/end order at all. "Qua đêm" is included specifically
+// to demonstrate the cross-midnight case (end < start), the one combination that looks "wrong" at a
+// glance but is handled correctly — dragging itself can't produce this case (a mouse drag is always
+// a forward, non-wrapping range), so it's presets-only.
 const WAF_SCHEDULE_PRESETS = [
-  { label: 'Giờ hành chính (08:00–18:00)', start: '08:00', end: '18:00' },
-  { label: 'Cả ngày (00:00–23:59)', start: '00:00', end: '23:59' },
-  { label: 'Qua đêm (22:00–06:00)', start: '22:00', end: '06:00' },
+  { label: 'Giờ hành chính (08:00–18:00)', start: 8, end: 18 },
+  { label: 'Cả ngày (00:00–23:59)', start: 0, end: 24 },
+  { label: 'Qua đêm (22:00–06:00)', start: 22, end: 6 },
 ];
+const WAF_DAY_LABELS = { 1: 'Thứ 2', 2: 'Thứ 3', 3: 'Thứ 4', 4: 'Thứ 5', 5: 'Thứ 6', 6: 'Thứ 7', 7: 'Chủ nhật' };
+const WAF_DAY_SHORT = { 1: 'T2', 2: 'T3', 3: 'T4', 4: 'T5', 5: 'T6', 6: 'T7', 7: 'CN' };
+
+function formatWafDaysOfWeek(csv) {
+  const days = (csv || '1,2,3,4,5,6,7').split(',').map(Number);
+  if (days.length === 7) return 'Mỗi ngày';
+  if (days.join(',') === '1,2,3,4,5') return 'T2–T6';
+  if (days.join(',') === '6,7') return 'T7, CN';
+  return days.map(d => WAF_DAY_SHORT[d]).join(', ');
+}
+
+// Drag-select state for the 24-cell hour grid — startHour/endHour describe a half-open [start, end)
+// range in HOURS (endHour is exclusive, so 8..18 means "08:00 up to but not including 18:00", i.e.
+// the visible 08:00–18:00 label). endHour can be 24 (whole day, wraps to display as 23:59 — see
+// syncWafScheduleTimeInputs) but never wraps past that from a drag, since a mouse drag is always a
+// plain forward range; only the presets can set an overnight (endHour < startHour as clock-hours)
+// window, represented internally the same way the time inputs already were before this grid existed.
+let wafScheduleDrag = { dragging: false, anchorHour: null, startHour: 8, endHour: 18, overnightEndHour: null };
+
+function wafHourLabel(h) { return `${String(h % 24).padStart(2, '0')}:00`; }
+
+function isWafHourSelected(h) {
+  const { startHour, endHour, overnightEndHour } = wafScheduleDrag;
+  if (overnightEndHour != null) return h >= startHour || h < overnightEndHour; // preset-only case
+  return h >= startHour && h < endHour;
+}
+
+function renderWafScheduleGridHtml() {
+  let cells = '';
+  for (let h = 0; h < 24; h++) {
+    cells += `<div class="waf-hour-cell${isWafHourSelected(h) ? ' selected' : ''}" data-hour="${h}"
+      onmousedown="wafScheduleDragStart(${h})" onmouseenter="wafScheduleDragMove(${h})"
+      ontouchstart="event.preventDefault();wafScheduleDragStart(${h})"
+      title="${wafHourLabel(h)}–${wafHourLabel(h + 1)}"></div>`;
+  }
+  return cells;
+}
+
+function renderWafScheduleGrid() {
+  const grid = document.getElementById('wafScheduleHourGrid');
+  if (grid) grid.innerHTML = renderWafScheduleGridHtml();
+}
+
+// Kéo chuột qua các ô giờ để chọn khung giờ cho phép — mousedown bắt đầu 1 khoảng 1 giờ tại ô đó,
+// rê chuột (mouseenter) qua các ô khác sẽ mở rộng lựa chọn tới ô đang trỏ tới.
+function wafScheduleDragStart(hour) {
+  wafScheduleDrag = { dragging: true, anchorHour: hour, startHour: hour, endHour: hour + 1, overnightEndHour: null };
+  renderWafScheduleGrid();
+  syncWafScheduleTimeInputs();
+}
+function wafScheduleDragMove(hour) {
+  if (!wafScheduleDrag.dragging) return;
+  const a = wafScheduleDrag.anchorHour;
+  wafScheduleDrag.startHour = Math.min(a, hour);
+  wafScheduleDrag.endHour = Math.max(a, hour) + 1;
+  wafScheduleDrag.overnightEndHour = null;
+  renderWafScheduleGrid();
+  syncWafScheduleTimeInputs();
+}
+document.addEventListener('mouseup', () => { wafScheduleDrag.dragging = false; });
+document.addEventListener('touchend', () => { wafScheduleDrag.dragging = false; });
+// touchmove needs to manually resolve which cell is under the finger (unlike mouseenter, touch
+// events don't fire on the element being dragged over) — elementFromPoint reads that from the touch
+// coordinates directly.
+document.addEventListener('touchmove', (e) => {
+  if (!wafScheduleDrag.dragging) return;
+  const touch = e.touches[0];
+  const el = document.elementFromPoint(touch.clientX, touch.clientY);
+  const hour = el?.dataset?.hour;
+  if (hour != null) wafScheduleDragMove(Number(hour));
+});
 
 function applyWafSchedulePreset(start, end) {
+  if (end < start) wafScheduleDrag = { dragging: false, anchorHour: null, startHour: start, endHour: 24, overnightEndHour: end };
+  else wafScheduleDrag = { dragging: false, anchorHour: null, startHour: start, endHour: end, overnightEndHour: null };
+  renderWafScheduleGrid();
+  syncWafScheduleTimeInputs();
+}
+
+// Writes the grid's current selection into the hidden allowedStart/allowedEnd fields actually
+// submitted with the form, and refreshes the plain-language preview — the grid is the primary
+// interaction, but the underlying storage is still just two HH:MM values, unchanged from before.
+function syncWafScheduleTimeInputs() {
   const form = document.getElementById('wafScheduledBlockForm');
   if (!form) return;
-  form.elements.allowedStart.value = start;
-  form.elements.allowedEnd.value = end;
+  const { startHour, endHour, overnightEndHour } = wafScheduleDrag;
+  form.elements.allowedStart.value = wafHourLabel(startHour);
+  form.elements.allowedEnd.value = overnightEndHour != null ? wafHourLabel(overnightEndHour) : (endHour >= 24 ? '23:59' : wafHourLabel(endHour));
   updateWafSchedulePreview();
 }
 
-// Plain-language sentence, recomputed on every keystroke/preset click, so the effect of the current
-// selection is stated outright instead of left for the admin to infer from two bare time pickers —
-// directly answers "chọn thế nào cho đúng" (how do I pick this correctly) by showing the outcome,
-// not just the inputs. Explicitly calls out the overnight case since start > end reads as a mistake
-// otherwise.
+// Plain-language sentence, recomputed on every interaction, so the effect of the current selection
+// is stated outright instead of left for the admin to infer from a grid + checkboxes — directly
+// answers "chọn thế nào cho đúng" by showing the outcome, not just the inputs.
 function updateWafSchedulePreview() {
   const form = document.getElementById('wafScheduledBlockForm');
   const preview = document.getElementById('wafSchedulePreview');
@@ -5093,9 +5175,13 @@ function updateWafSchedulePreview() {
   const end = form.elements.allowedEnd.value;
   if (!start || !end) { preview.innerHTML = ''; return; }
   const overnight = end < start;
+  const checkedDays = [...form.querySelectorAll('input[name="daysOfWeek"]:checked')].map(el => Number(el.value)).sort();
+  const daysText = checkedDays.length === 7 ? 'mỗi ngày'
+    : checkedDays.length ? `vào ${checkedDays.map(d => WAF_DAY_LABELS[d]).join(', ')}`
+    : '<span style="color:var(--red)">chưa chọn ngày nào — hãy tích ít nhất 1 ngày</span>';
   preview.innerHTML = `
-    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''} — <strong>mỗi ngày</strong>.
-    Ngoài khung giờ này, hệ thống sẽ tự động <strong style="color:var(--red)">CHẶN</strong> IP qua fail2ban.
+    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''}, ${daysText}.
+    Ngoài khung giờ/ngày này, hệ thống sẽ tự động <strong style="color:var(--red)">CHẶN</strong> IP qua fail2ban.
     ${overnight ? '<br><span style="color:var(--fg-dim)">Khung giờ qua đêm (giờ kết thúc nhỏ hơn giờ bắt đầu) — hệ thống tự hiểu là "từ tối hôm trước tới sáng hôm sau".</span>' : ''}`;
 }
 
@@ -5104,8 +5190,25 @@ function openWafScheduledBlockForm(rule) {
     `<option value="${v.id}" ${rule && String(rule.vm_id) === String(v.id) ? 'selected' : ''}>${escHtml(v.name)}</option>`
   ).join('');
   const presetButtons = WAF_SCHEDULE_PRESETS.map(p =>
-    `<button type="button" class="btn btn-secondary btn-sm" onclick="applyWafSchedulePreset('${p.start}','${p.end}')">${escHtml(p.label)}</button>`
+    `<button type="button" class="btn btn-secondary btn-sm" onclick="applyWafSchedulePreset(${p.start},${p.end})">${escHtml(p.label)}</button>`
   ).join('');
+
+  // Initialize drag state from the rule being edited (or the 08:00–18:00 default for a new rule).
+  if (rule) {
+    const s = Number((rule.allowed_start || '08:00').slice(0, 2));
+    const e = Number((rule.allowed_end || '18:00').slice(0, 2));
+    if (e <= s && !(s === 0 && e === 0)) wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: 24, overnightEndHour: e };
+    else wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: e === 0 ? 24 : e, overnightEndHour: null };
+  } else {
+    wafScheduleDrag = { dragging: false, anchorHour: null, startHour: 8, endHour: 18, overnightEndHour: null };
+  }
+  const selectedDays = rule ? (rule.days_of_week || '1,2,3,4,5,6,7').split(',').map(Number) : [1, 2, 3, 4, 5, 6, 7];
+  const dayCheckboxes = [1, 2, 3, 4, 5, 6, 7].map(d => `
+    <label style="display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12px;cursor:pointer;min-width:36px">
+      <input type="checkbox" name="daysOfWeek" value="${d}" ${selectedDays.includes(d) ? 'checked' : ''} style="width:auto" onchange="updateWafSchedulePreview()">
+      ${WAF_DAY_SHORT[d]}
+    </label>`).join('');
+
   openModal(rule ? 'Sửa lịch chặn theo giờ' : 'Thêm lịch chặn theo giờ', `
     <form id="wafScheduledBlockForm" onsubmit="saveWafScheduledBlock(event${rule ? `, ${rule.id}` : ''})">
       <div class="form-grid">
@@ -5119,12 +5222,17 @@ function openWafScheduledBlockForm(rule) {
           <input type="text" name="domain" value="${rule ? escAttr(rule.domain || '') : ''}" placeholder="vd: thuyenvien.fds.vn">
         </div>
         <div class="form-group full">
-          <label>Khung giờ CHO PHÉP truy cập (lặp lại mỗi ngày)</label>
+          <label>Ngày áp dụng — tích chọn</label>
+          <div style="display:flex;gap:6px;margin:6px 0">${dayCheckboxes}</div>
+        </div>
+        <div class="form-group full">
+          <label>Khung giờ CHO PHÉP truy cập — kéo chuột qua các ô giờ để chọn</label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">${presetButtons}</div>
-          <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
-            <input type="time" name="allowedStart" value="${rule ? escAttr((rule.allowed_start || '').slice(0, 5)) : '08:00'}" required oninput="updateWafSchedulePreview()">
-            <span style="color:var(--fg-dim)">→</span>
-            <input type="time" name="allowedEnd" value="${rule ? escAttr((rule.allowed_end || '').slice(0, 5)) : '18:00'}" required oninput="updateWafSchedulePreview()">
+          <input type="hidden" name="allowedStart">
+          <input type="hidden" name="allowedEnd">
+          <div id="wafScheduleHourGrid" style="display:flex;gap:2px;margin-top:6px;user-select:none">${renderWafScheduleGridHtml()}</div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:2px">
+            <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
           </div>
         </div>
         <div class="form-group full" id="wafSchedulePreview" style="font-size:13px;line-height:1.6;background:var(--surface2);border-radius:var(--radius);padding:10px 12px"></div>
@@ -5137,12 +5245,14 @@ function openWafScheduledBlockForm(rule) {
         <button type="submit" class="btn btn-primary">Lưu</button>
       </div>
     </form>`);
-  updateWafSchedulePreview();
+  syncWafScheduleTimeInputs();
 }
 
 async function saveWafScheduledBlock(e, id) {
   e.preventDefault();
   const btn = e.target.querySelector('button[type=submit]');
+  const daysOfWeek = [...e.target.querySelectorAll('input[name="daysOfWeek"]:checked')].map(el => Number(el.value));
+  if (!daysOfWeek.length) { toast('Chọn ít nhất 1 ngày áp dụng', 'error'); return; }
   btn.disabled = true;
   const fd = new FormData(e.target);
   const body = {
@@ -5151,6 +5261,7 @@ async function saveWafScheduledBlock(e, id) {
     domain: fd.get('domain').trim(),
     allowedStart: fd.get('allowedStart'),
     allowedEnd: fd.get('allowedEnd'),
+    daysOfWeek,
     enabled: fd.get('enabled') === 'on',
   };
   try {
