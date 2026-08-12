@@ -5163,6 +5163,25 @@ function syncWafScheduleTimeInputs() {
   updateWafSchedulePreview();
 }
 
+// Typing an exact time (e.g. 00:05–00:10, minute precision the hour-grid can't express — each grid
+// cell is a whole hour) re-syncs the grid's highlighting to the nearest hour block purely as a
+// visual reference; the actual saved values always come straight from these two text fields, not
+// from the grid's hour rounding.
+function onWafScheduleTimeInputEdited() {
+  const form = document.getElementById('wafScheduledBlockForm');
+  if (!form) return;
+  const start = form.elements.allowedStart.value;
+  const end = form.elements.allowedEnd.value;
+  if (start && end) {
+    const s = Number(start.slice(0, 2));
+    const e = Number(end.slice(0, 2)) + (end.slice(3) > '00' ? 1 : 0); // round up if minutes > 0
+    if (end <= start) wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: 24, overnightEndHour: Number(end.slice(0, 2)) };
+    else wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: Math.min(e, 24), overnightEndHour: null };
+    renderWafScheduleGrid();
+  }
+  updateWafSchedulePreview();
+}
+
 // Plain-language sentence, recomputed on every interaction, so the effect of the current selection
 // is stated outright instead of left for the admin to infer from a grid + checkboxes — directly
 // answers "chọn thế nào cho đúng" by showing the outcome, not just the inputs.
@@ -5226,13 +5245,17 @@ function openWafScheduledBlockForm(rule) {
           <div style="display:flex;gap:6px;margin:6px 0">${dayCheckboxes}</div>
         </div>
         <div class="form-group full">
-          <label>Khung giờ CHO PHÉP truy cập — kéo chuột qua các ô giờ để chọn</label>
+          <label>Khung giờ CHO PHÉP truy cập — kéo chuột chọn nhanh theo giờ, hoặc gõ chính xác theo phút bên dưới</label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">${presetButtons}</div>
-          <input type="hidden" name="allowedStart">
-          <input type="hidden" name="allowedEnd">
           <div id="wafScheduleHourGrid" style="display:flex;gap:2px;margin-top:6px;user-select:none">${renderWafScheduleGridHtml()}</div>
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:2px">
             <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+            <input type="time" name="allowedStart" required oninput="onWafScheduleTimeInputEdited()">
+            <span style="color:var(--fg-dim)">→</span>
+            <input type="time" name="allowedEnd" required oninput="onWafScheduleTimeInputEdited()">
+            <span style="font-size:11px;color:var(--fg-dim)">(gõ trực tiếp nếu cần chính xác tới phút, vd 00:05–00:10)</span>
           </div>
         </div>
         <div class="form-group full" id="wafSchedulePreview" style="font-size:13px;line-height:1.6;background:var(--surface2);border-radius:var(--radius);padding:10px 12px"></div>
