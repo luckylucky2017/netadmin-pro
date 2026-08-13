@@ -410,11 +410,12 @@ router.get('/exceptions', async (req, res) => {
 router.post('/exceptions', requirePermission('waf.block'), async (req, res) => {
   const ip = String(req.body?.ip || '').trim();
   const note = String(req.body?.note || '').trim().slice(0, 255) || null;
+  const enabled = req.body?.enabled !== false;
   if (!isValidExceptionIp(ip)) {
     return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
   }
   try {
-    await db.prepare('INSERT INTO waf_ip_exceptions (ip, note, created_by) VALUES (?, ?, ?)').run(ip, note, req.user.name || req.user.email);
+    await db.prepare('INSERT INTO waf_ip_exceptions (ip, note, enabled, created_by) VALUES (?, ?, ?, ?)').run(ip, note, enabled ? 1 : 0, req.user.name || req.user.email);
   } catch (e) {
     if (e.errno === 1062) return res.status(400).json({ error: 'IP/CIDR này đã có trong danh sách ngoại lệ' });
     throw e;
@@ -439,26 +440,44 @@ router.post('/exceptions', requirePermission('waf.block'), async (req, res) => {
 router.patch('/exceptions/:id', requirePermission('waf.block'), async (req, res) => {
   const row = await db.prepare('SELECT * FROM waf_ip_exceptions WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Không tìm thấy' });
-  const ip = String(req.body?.ip || '').trim();
-  const note = String(req.body?.note || '').trim().slice(0, 255) || null;
-  if (!isValidExceptionIp(ip)) {
-    return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
+
+  // Partial update: only touch fields actually provided, so a pure enable/disable toggle (from the
+  // tab's switch, or waf-scheduled-ip-block.js's automation) doesn't also require re-sending ip/note.
+  const fields = {};
+  let ip = row.ip;
+  if (req.body?.ip !== undefined) {
+    ip = String(req.body.ip).trim();
+    if (!isValidExceptionIp(ip)) {
+      return res.status(400).json({ error: 'IP/CIDR không hợp lệ — dùng dạng "203.0.113.5" hoặc "203.0.113.0/24" (IPv4) hoặc địa chỉ IPv6 đầy đủ' });
+    }
+    fields.ip = ip;
   }
+  if (req.body?.note !== undefined) fields.note = String(req.body.note || '').trim().slice(0, 255) || null;
+  if (req.body?.enabled !== undefined) fields.enabled = req.body.enabled ? 1 : 0;
+
+  const cols = Object.keys(fields);
+  if (!cols.length) return res.status(400).json({ error: 'Không có trường nào để cập nhật' });
   try {
-    await db.prepare('UPDATE waf_ip_exceptions SET ip = ?, note = ? WHERE id = ?').run(ip, note, row.id);
+    await db.prepare(`UPDATE waf_ip_exceptions SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`)
+      .run(...cols.map(c => fields[c]), row.id);
   } catch (e) {
     if (e.errno === 1062) return res.status(400).json({ error: 'IP/CIDR này đã có trong danh sách ngoại lệ' });
     throw e;
   }
-  await logActivity(req.user, 'UPDATE', 'waf_ip_exception', row.id, ip, `Sửa ngoại lệ IP WAF: ${row.ip} → ${ip}${note ? ' — ' + note : ''}`);
+  const detail = fields.enabled !== undefined
+    ? `${fields.enabled ? 'Bật' : 'Tắt'} ngoại lệ IP WAF: ${row.ip}`
+    : `Sửa ngoại lệ IP WAF: ${row.ip} → ${ip}${fields.note !== undefined ? ' — ' + (fields.note || '(xóa ghi chú)') : ''}`;
+  await logActivity(req.user, 'UPDATE', 'waf_ip_exception', row.id, ip, detail);
+
   const vms = await db.prepare(`
     SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms
     WHERE waf_jail_status = 'running' AND ssh_credential_id IS NOT NULL
   `).all();
-  // If the IP text itself changed, the new value needs the exact same "unban now" treatment POST
-  // gives a brand-new exception — a false positive being re-typed to fix a typo shouldn't have to
-  // wait for the next ban attempt to clear. A note-only edit skips this (nothing to unban).
-  if (ip !== row.ip) await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
+  // Unban now if: the IP text itself changed (a false positive being re-typed shouldn't wait for the
+  // next ban attempt to clear), OR the exception was just turned back on (re-enabling should restore
+  // access immediately, same as a brand-new exception would). A note-only edit or a disable skips this.
+  if (fields.ip !== undefined && ip !== row.ip) await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
+  else if (fields.enabled === 1) await Promise.allSettled(vms.map(vm => wafManager.unbanIp(vm, ip)));
   await Promise.allSettled(vms.map(vm => wafManager.pushIgnoreIp(vm)));
   res.json({ message: 'OK' });
 });

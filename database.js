@@ -393,10 +393,16 @@ const SCHEMA_SQL = `
   -- before every ban attempt, auto or manual, so a trusted source (office IP, uptime-check service,
   -- load tester) never gets blocked by mistake regardless of which VM it hits. Global rather than
   -- per-VM: the typical case for an exception (a known-safe source) isn't tied to one server.
+  -- enabled: lets an exception be toggled off without deleting it (preserves note/history) — used
+  -- by waf-scheduled-ip-block.js to disable an IP's exception outside its allowed window (so it can
+  -- actually be banned) and re-enable it inside the window, and by the "Ngoại lệ IP" tab's own
+  -- enable/disable switch. Enforcement (waf-manager.js's getExceptions()) only ever considers
+  -- enabled=1 rows — a disabled exception is exactly as if it didn't exist.
   CREATE TABLE IF NOT EXISTS waf_ip_exceptions (
     id INT PRIMARY KEY AUTO_INCREMENT,
     ip VARCHAR(64) NOT NULL,
     note VARCHAR(255),
+    enabled INT NOT NULL DEFAULT 1,
     created_by VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_waf_ip_exception (ip)
@@ -1124,6 +1130,11 @@ async function ensureSchemaAndMigrations() {
   try {
     await pool.query("ALTER TABLE waf_scheduled_ip_blocks ADD COLUMN days_of_week VARCHAR(20) NOT NULL DEFAULT '1,2,3,4,5,6,7'");
   } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // waf_ip_exceptions already shipped without `enabled` — every pre-existing row defaults to 1
+  // (still active), matching current live behavior exactly (nothing was "disabled" before this
+  // column existed).
+  try { await pool.query("ALTER TABLE waf_ip_exceptions ADD COLUMN enabled INT NOT NULL DEFAULT 1"); } catch (e) { if (e.errno !== 1060) throw e; }
 
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT

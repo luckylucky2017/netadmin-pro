@@ -4929,13 +4929,14 @@ async function loadWafExceptions() {
       return;
     }
     wrap.innerHTML = `<table>
-      <thead><tr><th>IP / CIDR</th><th>Ghi chú</th><th>Người thêm</th><th>Ngày thêm</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>IP / CIDR</th><th>Ghi chú</th><th>Người thêm</th><th>Ngày thêm</th><th>Bật</th><th>Hành động</th></tr></thead>
       <tbody>${rows.map(r => `
         <tr>
           <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
           <td>${r.note ? escHtml(r.note) : '<span style="color:var(--fg-dim)">—</span>'}</td>
           <td>${r.created_by ? escHtml(r.created_by) : '—'}</td>
           <td><span style="font-size:12px;color:var(--fg-muted)">${formatTime(r.created_at)}</span></td>
+          <td><label class="toggle-switch" data-permission="waf.block" title="${r.enabled ? 'Đang có hiệu lực — IP này không bao giờ bị WAF chặn' : 'Đã tắt — IP này có thể bị WAF chặn bình thường'}"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleWafException(${r.id}, this)"><span class="toggle-slider"></span></label></td>
           <td><div class="actions">
             <button class="btn-icon edit" data-permission="waf.block" title="Sửa ngoại lệ" onclick='openEditWafExceptionForm(${JSON.stringify({ id: r.id, ip: r.ip, note: r.note || '' }).replace(/'/g, "&#39;")})'><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
             <button class="btn-icon delete" data-permission="waf.block" title="Xóa ngoại lệ" onclick="deleteWafException(${r.id}, '${escAttr(r.ip)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg></button>
@@ -5001,6 +5002,18 @@ async function deleteWafException(id, ip) {
     toast(`Đã xóa ngoại lệ ${ip}`, 'success');
     loadWafExceptions();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+// Toggle rather than delete — keeps the note/history intact. Also flipped automatically by
+// waf-scheduled-ip-block.js outside/inside a rule's allowed window; a manual toggle here works the
+// same way a schedule's automatic one does (same PATCH endpoint, same immediate unban-on-enable).
+async function toggleWafException(id, checkbox) {
+  checkbox.disabled = true;
+  try {
+    await api(`/waf/exceptions/${id}`, 'PATCH', { enabled: checkbox.checked });
+    toast(checkbox.checked ? 'Đã bật ngoại lệ' : 'Đã tắt ngoại lệ', 'success');
+    loadWafExceptions();
+  } catch (e) { toast(e.message, 'error'); checkbox.checked = !checkbox.checked; checkbox.disabled = false; }
 }
 
 // ── "Chặn theo giờ" — scheduled per-IP time-of-day access windows. IMPORTANT: enforcement is via

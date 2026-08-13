@@ -230,8 +230,11 @@ async function stopJail(vm, user = null) {
 // it gets interpolated straight into a remote shell command below.
 const { SAFE_IP_RE, matchesException, isExceptedIp, buildIgnoreIpLine } = require('./ip-exceptions');
 
+// Only enabled=1 rows are actual, active exceptions — a disabled row (see database.js's comment on
+// the column) is exactly as if it didn't exist, both for banIp's isExceptedIp check and for what
+// pushIgnoreIp bakes into the jail's ignoreip line.
 async function getExceptions() {
-  return db.prepare('SELECT id, ip, note FROM waf_ip_exceptions').all();
+  return db.prepare('SELECT id, ip, note FROM waf_ip_exceptions WHERE enabled = 1').all();
 }
 
 // Re-writes the WAF jail's config with the CURRENT waf_ip_exceptions baked into `ignoreip` AND the

@@ -46,6 +46,28 @@ function isDayAllowed(daysOfWeek) {
   return days.includes(currentIsoWeekday());
 }
 
+// Keeps rule.ip's OWN exact-match waf_ip_exceptions row in sync with the schedule: enabled while
+// allowed (guarantees the IP truly can't be blocked by ANY detector during its window, not just
+// "currently not banned" — the old behavior before this existed), disabled outside it (an enabled
+// exception unconditionally overrides every ban attempt, scheduled or not, so leaving it on would
+// make "blocked" impossible to actually enforce — exactly the conflict that prompted this). Only
+// ever touches a row whose ip TEXT matches rule.ip exactly — never a broader CIDR exception that
+// might also happen to cover it; that's a separate, manually-managed concern, and if it blocks a ban
+// attempt anyway, that surfaces via last_error like any other failure. Nothing to "turn off" if no
+// exception row exists yet, so creation only happens on the allowed side.
+async function syncExceptionForRule(rule, allowed) {
+  const existing = await db.prepare('SELECT id, enabled FROM waf_ip_exceptions WHERE ip = ?').get(rule.ip);
+  const desiredEnabled = allowed ? 1 : 0;
+  if (existing) {
+    if (existing.enabled === desiredEnabled) return;
+    await db.prepare('UPDATE waf_ip_exceptions SET enabled = ? WHERE id = ?').run(desiredEnabled, existing.id);
+  } else if (allowed) {
+    await db.prepare(`
+      INSERT INTO waf_ip_exceptions (ip, note, enabled, created_by) VALUES (?, ?, 1, 'System (lịch chặn theo giờ)')
+    `).run(rule.ip, `Tự động theo lịch chặn giờ${rule.domain ? ` — ${rule.domain}` : ''}`);
+  }
+}
+
 async function applyRule(rule) {
   const now = currentTimeOfDay();
   // A day not in days_of_week is treated as fully outside the window (blocked all day on that day),
@@ -61,6 +83,12 @@ async function applyRule(rule) {
       .run('VM chưa gán tài khoản kết nối SSH', rule.id);
     return;
   }
+
+  // Must happen BEFORE the ban attempt below: banIp itself refuses to ban any IP currently in an
+  // enabled exception (by design, checked via getExceptions()) — disabling it here is what actually
+  // makes "blocked" take effect, not just the banIp call on its own.
+  await syncExceptionForRule(rule, allowed);
+  await wafManager.pushIgnoreIp(vm).catch(() => {}); // best-effort jail-level ignoreip sync, see waf-manager.js's own comment on its limited effect for this specific jail
 
   let result;
   if (desiredState === 'blocked') {
