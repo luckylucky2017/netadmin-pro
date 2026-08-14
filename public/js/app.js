@@ -5275,9 +5275,9 @@ function openWafScheduledBlockForm(rule) {
             <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
           </div>
           <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
-            <input type="text" name="blockStart" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
+            <input type="text" name="blockStart" required pattern="([01]\\d|2[0-3]):[0-5]\\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
             <span style="color:var(--fg-dim)">→</span>
-            <input type="text" name="blockEnd" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
+            <input type="text" name="blockEnd" required pattern="([01]\\d|2[0-3]):[0-5]\\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
             <span style="font-size:11px;color:var(--fg-dim)">Định dạng 24 giờ (00:00–23:59) — gõ trực tiếp nếu cần chính xác tới phút, vd 00:05–00:10. Lưu ý: <strong>00:00 = nửa đêm</strong>, <strong>12:00 = giữa trưa</strong>.</span>
           </div>
         </div>
