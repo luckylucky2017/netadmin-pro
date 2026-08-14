@@ -409,7 +409,7 @@ const SCHEMA_SQL = `
   );
 
   -- Scheduled per-IP time-of-day BLOCK windows — "IP X is banned via fail2ban on VM Y during
-  -- [block_start, block_end) on the selected days; allowed the rest of the time" (waf-scheduled-
+  -- [block_start, block_end) on the selected days, allowed the rest of the time" (waf-scheduled-
   -- ip-block.js). Was originally the inverse (the chosen window meant "allowed", everything outside
   -- it meant "blocked") — flipped, and the columns renamed from allowed_start/allowed_end to
   -- block_start/block_end to match, after real user feedback that the inverted meaning was
