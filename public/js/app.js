@@ -5198,6 +5198,18 @@ function onWafScheduleTimeInputEdited() {
 // Plain-language sentence, recomputed on every interaction, so the effect of the current selection
 // is stated outright instead of left for the admin to infer from a grid + checkboxes — directly
 // answers "chọn thế nào cho đúng" by showing the outcome, not just the inputs.
+// 00:00 (nửa đêm/12 giờ đêm) vs 12:00 (12 giờ trưa) is a real, easy mistake in 24h time — spelling
+// out the 12h-clock equivalent right in the preview is cheaper than any input-widget fix and catches
+// it at the one moment that matters: right before saving. Confirmed live this exact confusion let a
+// real attacker IP through nearly all day (rule creator meant "until midnight", typed 12:00, which
+// is noon).
+function wafTimeWithAmPm(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  if (h === 0) return `${hhmm} (12 giờ đêm${m === 0 ? ' — nửa đêm' : ''})`;
+  if (h === 12) return `${hhmm} (12 giờ trưa)`;
+  return h < 12 ? `${hhmm} (${h} giờ sáng)` : `${hhmm} (${h - 12} giờ chiều)`;
+}
+
 function updateWafSchedulePreview() {
   const form = document.getElementById('wafScheduledBlockForm');
   const preview = document.getElementById('wafSchedulePreview');
@@ -5212,9 +5224,9 @@ function updateWafSchedulePreview() {
     : checkedDays.length ? `vào ${checkedDays.map(d => WAF_DAY_LABELS[d]).join(', ')}`
     : '<span style="color:var(--red)">chưa chọn ngày nào — hãy tích ít nhất 1 ngày</span>';
   preview.innerHTML = `
-    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''}, ${daysText}.
+    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${wafTimeWithAmPm(start)}</strong> đến <strong>${wafTimeWithAmPm(end)}</strong>${overnight ? ' của ngày hôm sau' : ''}, ${daysText}.
     Ngoài khung giờ/ngày này, hệ thống sẽ tự động <strong style="color:var(--red)">CHẶN</strong> IP qua fail2ban.
-    ${overnight ? '<br><span style="color:var(--fg-dim)">Khung giờ qua đêm (giờ kết thúc nhỏ hơn giờ bắt đầu) — hệ thống tự hiểu là "từ tối hôm trước tới sáng hôm sau".</span>' : ''}`;
+    ${overnight ? '<br><span style="color:var(--fg-dim)">Khung giờ qua đêm (giờ kết thúc nhỏ hơn giờ bắt đầu) — hệ thống tự hiểu là "từ tối hôm trước tới sáng hôm sau". Nếu ý bạn là "tới nửa đêm", giờ kết thúc phải là <strong>00:00</strong>, KHÔNG PHẢI 12:00 (12:00 là giờ trưa).</span>' : ''}`;
 }
 
 function openWafScheduledBlockForm(rule) {
@@ -5268,7 +5280,7 @@ function openWafScheduledBlockForm(rule) {
             <input type="time" name="allowedStart" required oninput="onWafScheduleTimeInputEdited()">
             <span style="color:var(--fg-dim)">→</span>
             <input type="time" name="allowedEnd" required oninput="onWafScheduleTimeInputEdited()">
-            <span style="font-size:11px;color:var(--fg-dim)">(gõ trực tiếp nếu cần chính xác tới phút, vd 00:05–00:10)</span>
+            <span style="font-size:11px;color:var(--fg-dim)">(gõ trực tiếp nếu cần chính xác tới phút, vd 00:05–00:10 · lưu ý 00:00 = 12 giờ đêm, 12:00 = 12 giờ trưa)</span>
           </div>
         </div>
         <div class="form-group full" id="wafSchedulePreview" style="font-size:13px;line-height:1.6;background:var(--surface2);border-radius:var(--radius);padding:10px 12px"></div>
