@@ -408,24 +408,29 @@ const SCHEMA_SQL = `
     UNIQUE KEY uq_waf_ip_exception (ip)
   );
 
-  -- Scheduled per-IP time-of-day access windows — "IP X is only allowed through on VM Y during
-  -- [allowed_start, allowed_end), banned via fail2ban outside it" (waf-scheduled-ip-block.js).
+  -- Scheduled per-IP time-of-day BLOCK windows — "IP X is banned via fail2ban on VM Y during
+  -- [block_start, block_end) on the selected days; allowed the rest of the time" (waf-scheduled-
+  -- ip-block.js). Was originally the inverse (the chosen window meant "allowed", everything outside
+  -- it meant "blocked") — flipped, and the columns renamed from allowed_start/allowed_end to
+  -- block_start/block_end to match, after real user feedback that the inverted meaning was
+  -- confusing (compounding a separate 00:00-vs-12:00 incident this table already caused once).
   -- domain is a LABEL only, not real scope: fail2ban bans at the VM/jail level (iptables has no
   -- concept of virtual hosts), so a VM hosting multiple domains blocks the IP from ALL of them, not
   -- just the named one — see waf-scheduled-ip-block.js's header for why this can't be domain-scoped
   -- without a much bigger nginx-config-push mechanism. last_state/last_applied_at track what was
   -- actually last applied so the scheduler only calls banIp/unbanIp on an actual transition, not
   -- every tick.
-  -- days_of_week: CSV of ISO weekday numbers (1=Mon..7=Sun) the window applies on — default
-  -- '1,2,3,4,5,6,7' (every day) so pre-existing rows created before this column existed keep their
-  -- original daily behavior unchanged after the ALTER migration below backfills it.
+  -- days_of_week: CSV of ISO weekday numbers (1=Mon..7=Sun) the block window applies on — a day NOT
+  -- listed is fully allowed all day (the schedule simply doesn't act on it). Default '1,2,3,4,5,6,7'
+  -- (every day) so pre-existing rows created before this column existed keep their original daily
+  -- behavior unchanged after the ALTER migration below backfills it.
   CREATE TABLE IF NOT EXISTS waf_scheduled_ip_blocks (
     id INT PRIMARY KEY AUTO_INCREMENT,
     vm_id INT NOT NULL,
     domain VARCHAR(255),
     ip VARCHAR(45) NOT NULL,
-    allowed_start TIME NOT NULL,
-    allowed_end TIME NOT NULL,
+    block_start TIME NOT NULL,
+    block_end TIME NOT NULL,
     days_of_week VARCHAR(20) NOT NULL DEFAULT '1,2,3,4,5,6,7',
     enabled INT NOT NULL DEFAULT 1,
     last_state VARCHAR(10),
@@ -1135,6 +1140,22 @@ async function ensureSchemaAndMigrations() {
   // (still active), matching current live behavior exactly (nothing was "disabled" before this
   // column existed).
   try { await pool.query("ALTER TABLE waf_ip_exceptions ADD COLUMN enabled INT NOT NULL DEFAULT 1"); } catch (e) { if (e.errno !== 1060) throw e; }
+
+  // waf_scheduled_ip_blocks shipped with the window meaning "allowed" (blocked outside it) — flipped
+  // per user feedback to mean "blocked" instead (allowed outside it), and the columns renamed to
+  // match. "Allowed during [A,B)" and "blocked during [B,A)" describe the exact same real-world
+  // behavior (each is the other's complement on a 24h clock), so existing rules are migrated by
+  // SWAPPING start/end into the new columns — this preserves what each rule actually does, not just
+  // its column names. Trigger step is the ADD COLUMN (1060 = already migrated, skip the rest).
+  try {
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks ADD COLUMN block_start TIME");
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks ADD COLUMN block_end TIME");
+    await pool.query("UPDATE waf_scheduled_ip_blocks SET block_start = allowed_end, block_end = allowed_start");
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks MODIFY COLUMN block_start TIME NOT NULL");
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks MODIFY COLUMN block_end TIME NOT NULL");
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks DROP COLUMN allowed_start");
+    await pool.query("ALTER TABLE waf_scheduled_ip_blocks DROP COLUMN allowed_end");
+  } catch (e) { if (e.errno !== 1060) throw e; }
 
   // Seed the single global fail2ban_config row (id=1) with the same defaults that used to be
   // hardcoded module-level constants in ssh-security-collector.js/nginx-waf-collector.js — INSERT

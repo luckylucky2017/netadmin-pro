@@ -1,7 +1,8 @@
-// Scheduled per-IP time-of-day access windows for the "IP đang bị chặn" / WAF page's "Chặn theo giờ"
-// tab — "IP X is only allowed through during [allowed_start, allowed_end); banned via fail2ban
-// outside that window" (routes/waf.js's /scheduled-ip-blocks CRUD, database.js's
-// waf_scheduled_ip_blocks table).
+// Scheduled per-IP time-of-day BLOCK windows for the "IP đang bị chặn" / WAF page's "Chặn theo giờ"
+// tab — "IP X is banned via fail2ban during [block_start, block_end) on the selected days; allowed
+// the rest of the time" (routes/waf.js's /scheduled-ip-blocks CRUD, database.js's
+// waf_scheduled_ip_blocks table). Was originally the inverse (chosen window = allowed, everything
+// outside = blocked) — flipped per explicit user feedback that the inverted meaning was confusing.
 //
 // IMPORTANT SCOPE LIMIT: this enforces at the VM/jail level via the SAME fail2ban jail
 // (waf-manager.js's netadmin-waf) every other WAF ban already uses — banIp/unbanIp operate on
@@ -28,8 +29,11 @@ function currentTimeOfDay() {
   return new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
 }
 
-// Handles windows that cross midnight (e.g. 22:00:00 -> 06:00:00): if start <= end, allowed is the
-// normal "between" case; otherwise allowed is "at or after start, OR before end".
+// Handles windows that cross midnight (e.g. 22:00:00 -> 06:00:00): if start <= end, "inside" is the
+// normal "between" case; otherwise "inside" is "at or after start, OR before end". Generic — used
+// for both the block-hours window and (via the complement) nothing else; naming is deliberately
+// window-shape-neutral since the SAME function now describes a "blocked" window instead of an
+// "allowed" one, just by what the caller does with the result.
 function isWithinWindow(now, start, end) {
   if (start <= end) return now >= start && now < end;
   return now >= start || now < end;
@@ -41,20 +45,23 @@ function currentIsoWeekday() {
   return { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[wd];
 }
 
-function isDayAllowed(daysOfWeek) {
+// Is today one of the days this rule's block window is active on? A day NOT listed means the rule
+// doesn't act at all that day — fully allowed, not a separate exception case.
+function isDayActive(daysOfWeek) {
   const days = (daysOfWeek || '1,2,3,4,5,6,7').split(',').map((d) => Number(d.trim()));
   return days.includes(currentIsoWeekday());
 }
 
 // Keeps rule.ip's OWN exact-match waf_ip_exceptions row in sync with the schedule: enabled while
-// allowed (guarantees the IP truly can't be blocked by ANY detector during its window, not just
-// "currently not banned" — the old behavior before this existed), disabled outside it (an enabled
-// exception unconditionally overrides every ban attempt, scheduled or not, so leaving it on would
-// make "blocked" impossible to actually enforce — exactly the conflict that prompted this). Only
-// ever touches a row whose ip TEXT matches rule.ip exactly — never a broader CIDR exception that
-// might also happen to cover it; that's a separate, manually-managed concern, and if it blocks a ban
-// attempt anyway, that surfaces via last_error like any other failure. Nothing to "turn off" if no
-// exception row exists yet, so creation only happens on the allowed side.
+// allowed (outside the block window or on a non-active day) — guarantees the IP truly can't be
+// blocked by ANY detector during that time, not just "currently not banned" — disabled while inside
+// the block window (an enabled exception unconditionally overrides every ban attempt, scheduled or
+// not, so leaving it on would make "blocked" impossible to actually enforce — exactly the conflict
+// that prompted this coupling). Only ever touches a row whose ip TEXT matches rule.ip exactly —
+// never a broader CIDR exception that might also happen to cover it; that's a separate, manually-
+// managed concern, and if it blocks a ban attempt anyway, that surfaces via last_error like any
+// other failure. Nothing to "turn off" if no exception row exists yet, so creation only happens on
+// the allowed side.
 async function syncExceptionForRule(rule, allowed) {
   const existing = await db.prepare('SELECT id, enabled FROM waf_ip_exceptions WHERE ip = ?').get(rule.ip);
   const desiredEnabled = allowed ? 1 : 0;
@@ -70,11 +77,11 @@ async function syncExceptionForRule(rule, allowed) {
 
 async function applyRule(rule) {
   const now = currentTimeOfDay();
-  // A day not in days_of_week is treated as fully outside the window (blocked all day on that day),
-  // same as being outside allowed_start/allowed_end on an allowed day — one uniform "not currently
-  // allowed" condition, not a separate day-level exception.
-  const allowed = isDayAllowed(rule.days_of_week) && isWithinWindow(now, rule.allowed_start, rule.allowed_end);
-  const desiredState = allowed ? 'allowed' : 'blocked';
+  // Inside the block window on an active day -> blocked; everything else (non-active day, or
+  // outside the window on an active day) -> allowed. This is the flipped meaning: the configured
+  // window now directly says when the IP is BLOCKED, not when it's allowed.
+  const isBlockedNow = isDayActive(rule.days_of_week) && isWithinWindow(now, rule.block_start, rule.block_end);
+  const desiredState = isBlockedNow ? 'blocked' : 'allowed';
   if (rule.last_state === desiredState) return; // already in the right state, nothing to do
 
   const vm = await db.prepare('SELECT id, name, ip_address, ssh_credential_id, ssh_port FROM vcenter_vms WHERE id = ?').get(rule.vm_id);
@@ -87,7 +94,7 @@ async function applyRule(rule) {
   // Must happen BEFORE the ban attempt below: banIp itself refuses to ban any IP currently in an
   // enabled exception (by design, checked via getExceptions()) — disabling it here is what actually
   // makes "blocked" take effect, not just the banIp call on its own.
-  await syncExceptionForRule(rule, allowed);
+  await syncExceptionForRule(rule, !isBlockedNow);
   await wafManager.pushIgnoreIp(vm).catch(() => {}); // best-effort jail-level ignoreip sync, see waf-manager.js's own comment on its limited effect for this specific jail
 
   let result;
@@ -117,7 +124,7 @@ async function applyRule(rule) {
   await db.prepare(`
     INSERT INTO activity_logs (action, entity_type, entity_id, entity_name, details, user_name)
     VALUES ('UPDATE', 'vcenter_vm', ?, ?, ?, 'System (lịch chặn theo giờ)')
-  `).run(vm.id, vm.name, `${desiredState === 'blocked' ? 'Chặn' : 'Gỡ chặn'} IP ${rule.ip} theo lịch giờ (${rule.domain || 'không ghi nhãn domain'}: ${rule.allowed_start}-${rule.allowed_end})`);
+  `).run(vm.id, vm.name, `${desiredState === 'blocked' ? 'Chặn' : 'Gỡ chặn'} IP ${rule.ip} theo lịch giờ (${rule.domain || 'không ghi nhãn domain'}: khung giờ chặn ${rule.block_start}-${rule.block_end})`);
 }
 
 async function tick() {
@@ -137,4 +144,4 @@ function start(intervalMs = 60000) {
   return setInterval(t, intervalMs);
 }
 
-module.exports = { start, tick, isWithinWindow, currentTimeOfDay, isDayAllowed, currentIsoWeekday };
+module.exports = { start, tick, isWithinWindow, currentTimeOfDay, isDayActive, currentIsoWeekday };

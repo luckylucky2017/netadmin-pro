@@ -525,9 +525,10 @@ router.get('/scheduled-ip-blocks', async (req, res) => {
     ORDER BY b.created_at DESC
   `).all();
   const now = wafScheduledBlock.currentTimeOfDay();
-  const todayAllowed = wafScheduledBlock.isDayAllowed;
+  const dayActive = wafScheduledBlock.isDayActive;
   for (const r of rows) {
-    r.currentlyAllowed = todayAllowed(r.days_of_week) && wafScheduledBlock.isWithinWindow(now, r.allowed_start, r.allowed_end);
+    const isBlockedNow = dayActive(r.days_of_week) && wafScheduledBlock.isWithinWindow(now, r.block_start, r.block_end);
+    r.currentlyAllowed = !isBlockedNow;
   }
   res.json(rows);
 });
@@ -536,8 +537,8 @@ router.post('/scheduled-ip-blocks', requirePermission('waf.block'), async (req, 
   const vmId = Number(req.body?.vmId);
   const domain = String(req.body?.domain || '').trim().slice(0, 255) || null;
   const ip = String(req.body?.ip || '').trim();
-  const allowedStart = String(req.body?.allowedStart || '').trim();
-  const allowedEnd = String(req.body?.allowedEnd || '').trim();
+  const blockStart = String(req.body?.blockStart || '').trim();
+  const blockEnd = String(req.body?.blockEnd || '').trim();
   const enabled = req.body?.enabled !== false;
   const days = parseDaysOfWeek(req.body?.daysOfWeek);
 
@@ -545,17 +546,17 @@ router.post('/scheduled-ip-blocks', requirePermission('waf.block'), async (req, 
   const vm = await db.prepare('SELECT id, name FROM vcenter_vms WHERE id = ?').get(vmId);
   if (!vm) return res.status(400).json({ error: 'VM không tồn tại' });
   if (!isValidExceptionIp(ip)) return res.status(400).json({ error: 'IP/CIDR không hợp lệ' });
-  if (!isValidTimeOfDay(allowedStart) || !isValidTimeOfDay(allowedEnd)) {
+  if (!isValidTimeOfDay(blockStart) || !isValidTimeOfDay(blockEnd)) {
     return res.status(400).json({ error: 'Khung giờ không hợp lệ (định dạng HH:MM)' });
   }
   if (days.error) return res.status(400).json({ error: days.error });
 
   const result = await db.prepare(`
-    INSERT INTO waf_scheduled_ip_blocks (vm_id, domain, ip, allowed_start, allowed_end, days_of_week, enabled, created_by_name)
+    INSERT INTO waf_scheduled_ip_blocks (vm_id, domain, ip, block_start, block_end, days_of_week, enabled, created_by_name)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(vmId, domain, ip, normalizeTimeOfDay(allowedStart), normalizeTimeOfDay(allowedEnd), days.csv, enabled ? 1 : 0, req.user?.name || null);
+  `).run(vmId, domain, ip, normalizeTimeOfDay(blockStart), normalizeTimeOfDay(blockEnd), days.csv, enabled ? 1 : 0, req.user?.name || null);
   await logActivity(req.user, 'CREATE', 'waf_scheduled_ip_block', result.lastInsertRowid, ip,
-    `Thêm lịch chặn theo giờ: IP ${ip} trên VM "${vm.name}"${domain ? ` (${domain})` : ''} — cho phép ${allowedStart}-${allowedEnd}, ngày ${days.csv}`);
+    `Thêm lịch chặn theo giờ: IP ${ip} trên VM "${vm.name}"${domain ? ` (${domain})` : ''} — chặn ${blockStart}-${blockEnd}, ngày ${days.csv}`);
   res.json({ message: 'OK', id: result.lastInsertRowid });
 });
 
@@ -570,13 +571,13 @@ router.patch('/scheduled-ip-blocks/:id', requirePermission('waf.block'), async (
     if (!isValidExceptionIp(ip)) return res.status(400).json({ error: 'IP/CIDR không hợp lệ' });
     fields.ip = ip;
   }
-  if (req.body?.allowedStart !== undefined) {
-    if (!isValidTimeOfDay(req.body.allowedStart)) return res.status(400).json({ error: 'Giờ bắt đầu không hợp lệ' });
-    fields.allowed_start = normalizeTimeOfDay(req.body.allowedStart);
+  if (req.body?.blockStart !== undefined) {
+    if (!isValidTimeOfDay(req.body.blockStart)) return res.status(400).json({ error: 'Giờ bắt đầu không hợp lệ' });
+    fields.block_start = normalizeTimeOfDay(req.body.blockStart);
   }
-  if (req.body?.allowedEnd !== undefined) {
-    if (!isValidTimeOfDay(req.body.allowedEnd)) return res.status(400).json({ error: 'Giờ kết thúc không hợp lệ' });
-    fields.allowed_end = normalizeTimeOfDay(req.body.allowedEnd);
+  if (req.body?.blockEnd !== undefined) {
+    if (!isValidTimeOfDay(req.body.blockEnd)) return res.status(400).json({ error: 'Giờ kết thúc không hợp lệ' });
+    fields.block_end = normalizeTimeOfDay(req.body.blockEnd);
   }
   if (req.body?.enabled !== undefined) fields.enabled = req.body.enabled ? 1 : 0;
   if (req.body?.daysOfWeek !== undefined) {

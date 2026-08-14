@@ -5016,7 +5016,9 @@ async function toggleWafException(id, checkbox) {
   } catch (e) { toast(e.message, 'error'); checkbox.checked = !checkbox.checked; checkbox.disabled = false; }
 }
 
-// ── "Chặn theo giờ" — scheduled per-IP time-of-day access windows. IMPORTANT: enforcement is via
+// ── "Chặn theo giờ" — scheduled per-IP time-of-day BLOCK windows: the configured window is when
+// the IP is BLOCKED (allowed the rest of the time) — flipped from the original "window = allowed"
+// meaning per user feedback that the inverted reading was confusing. IMPORTANT: enforcement is via
 // fail2ban at the VM/jail level, NOT per-domain (iptables has no concept of virtual hosts) — the
 // "domain" field is only a label for what the IP is meant to access; if the VM hosts other domains,
 // this blocks the IP from ALL of them too. Made explicit in the tab's own intro text so it's never
@@ -5025,7 +5027,7 @@ async function renderWafScheduledBlocks() {
   document.getElementById('wafTabBody').innerHTML = `
     <div class="table-wrap">
       <div style="padding:14px 16px 0;font-size:13px;color:var(--fg-dim)">
-        <p style="margin-bottom:0">Chỉ IP chỉ định mới được truy cập trong khung giờ cho phép — ngoài khung giờ đó, IP sẽ bị chặn qua fail2ban. <strong>Lưu ý:</strong> chặn áp dụng ở cấp VM/jail (giống mọi chặn WAF khác), KHÔNG giới hạn riêng theo domain — nếu VM đang chạy nhiều domain, IP sẽ bị chặn khỏi TẤT CẢ domain trên VM đó, không chỉ domain ghi nhãn ở đây. Hệ thống tự kiểm tra mỗi phút và chặn/gỡ chặn khi tới đúng mốc giờ.</p>
+        <p style="margin-bottom:0">IP chỉ định sẽ bị <strong>CHẶN</strong> trong đúng khung giờ đã chọn — ngoài khung giờ đó, IP được truy cập bình thường. <strong>Lưu ý:</strong> chặn áp dụng ở cấp VM/jail (giống mọi chặn WAF khác), KHÔNG giới hạn riêng theo domain — nếu VM đang chạy nhiều domain, IP sẽ bị chặn khỏi TẤT CẢ domain trên VM đó, không chỉ domain ghi nhãn ở đây. Hệ thống tự kiểm tra mỗi phút và chặn/gỡ chặn khi tới đúng mốc giờ.</p>
       </div>
       <div class="table-toolbar" data-permission="waf.block">
         <button class="btn btn-primary btn-sm" onclick="openWafScheduledBlockForm()">+ Thêm lịch chặn theo giờ</button>
@@ -5046,13 +5048,13 @@ async function loadWafScheduledBlocks() {
       return;
     }
     wrap.innerHTML = `<table>
-      <thead><tr><th>IP</th><th>VM</th><th>Domain (nhãn)</th><th>Khung giờ cho phép</th><th>Ngày áp dụng</th><th>Trạng thái hiện tại</th><th>Bật</th><th>Hành động</th></tr></thead>
+      <thead><tr><th>IP</th><th>VM</th><th>Domain (nhãn)</th><th>Khung giờ bị chặn</th><th>Ngày áp dụng</th><th>Trạng thái hiện tại</th><th>Bật</th><th>Hành động</th></tr></thead>
       <tbody>${rows.map(r => `
         <tr>
           <td style="font-family:monospace;font-weight:600">${escHtml(r.ip)}</td>
           <td>${escHtml(r.vm_name || '—')}</td>
           <td>${r.domain ? escHtml(r.domain) : '<span style="color:var(--fg-dim)">—</span>'}</td>
-          <td style="font-family:monospace;font-size:12px">${escHtml((r.allowed_start || '').slice(0, 5))}–${escHtml((r.allowed_end || '').slice(0, 5))}</td>
+          <td style="font-family:monospace;font-size:12px">${escHtml((r.block_start || '').slice(0, 5))}–${escHtml((r.block_end || '').slice(0, 5))}</td>
           <td style="font-size:12px;color:var(--fg-muted)">${escHtml(formatWafDaysOfWeek(r.days_of_week))}</td>
           <td>${!r.enabled
             ? '<span class="status unknown"><span class="dot"></span>Đã tắt</span>'
@@ -5128,7 +5130,7 @@ function renderWafScheduleGrid() {
   if (grid) grid.innerHTML = renderWafScheduleGridHtml();
 }
 
-// Kéo chuột qua các ô giờ để chọn khung giờ cho phép — mousedown bắt đầu 1 khoảng 1 giờ tại ô đó,
+// Kéo chuột qua các ô giờ để chọn khung giờ bị chặn — mousedown bắt đầu 1 khoảng 1 giờ tại ô đó,
 // rê chuột (mouseenter) qua các ô khác sẽ mở rộng lựa chọn tới ô đang trỏ tới.
 function wafScheduleDragStart(hour) {
   wafScheduleDrag = { dragging: true, anchorHour: hour, startHour: hour, endHour: hour + 1, overnightEndHour: null };
@@ -5164,15 +5166,15 @@ function applyWafSchedulePreset(start, end) {
   syncWafScheduleTimeInputs();
 }
 
-// Writes the grid's current selection into the hidden allowedStart/allowedEnd fields actually
-// submitted with the form, and refreshes the plain-language preview — the grid is the primary
-// interaction, but the underlying storage is still just two HH:MM values, unchanged from before.
+// Writes the grid's current selection into the blockStart/blockEnd text fields actually submitted
+// with the form, and refreshes the plain-language preview — the grid is the primary interaction,
+// but the underlying storage is still just two HH:MM values.
 function syncWafScheduleTimeInputs() {
   const form = document.getElementById('wafScheduledBlockForm');
   if (!form) return;
   const { startHour, endHour, overnightEndHour } = wafScheduleDrag;
-  form.elements.allowedStart.value = wafHourLabel(startHour);
-  form.elements.allowedEnd.value = overnightEndHour != null ? wafHourLabel(overnightEndHour) : (endHour >= 24 ? '23:59' : wafHourLabel(endHour));
+  form.elements.blockStart.value = wafHourLabel(startHour);
+  form.elements.blockEnd.value = overnightEndHour != null ? wafHourLabel(overnightEndHour) : (endHour >= 24 ? '23:59' : wafHourLabel(endHour));
   updateWafSchedulePreview();
 }
 
@@ -5183,8 +5185,8 @@ function syncWafScheduleTimeInputs() {
 function onWafScheduleTimeInputEdited() {
   const form = document.getElementById('wafScheduledBlockForm');
   if (!form) return;
-  const start = form.elements.allowedStart.value;
-  const end = form.elements.allowedEnd.value;
+  const start = form.elements.blockStart.value;
+  const end = form.elements.blockEnd.value;
   if (start && end) {
     const s = Number(start.slice(0, 2));
     const e = Number(end.slice(0, 2)) + (end.slice(3) > '00' ? 1 : 0); // round up if minutes > 0
@@ -5198,19 +5200,21 @@ function onWafScheduleTimeInputEdited() {
 // Plain-language sentence, recomputed on every interaction, so the effect of the current selection
 // is stated outright instead of left for the admin to infer from a grid + checkboxes — directly
 // answers "chọn thế nào cho đúng" by showing the outcome, not just the inputs.
+// The configured window means BLOCKED (allowed the rest of the time) — flipped from the original
+// "window = allowed" reading per user feedback that the inverted meaning was confusing.
 // Purely 24h throughout (00:00–23:59, matching the grid's own axis labels and the time inputs,
 // which are plain text fields, not the browser's locale-dependent AM/PM <input type="time"> widget)
 // — no 12-hour phrasing anywhere, so there's only one clock system to reason about. Still calls out
 // 00:00-vs-12:00 by name in the overnight case, since that specific numeric mix-up (not a 12h/24h
 // mix-up) is what actually caused a real incident: a rule meant to end "at midnight" was typed as
-// 12:00, which is noon in 24h time, letting an attacker IP through nearly all day for weeks.
+// 12:00, which is noon in 24h time.
 function updateWafSchedulePreview() {
   const form = document.getElementById('wafScheduledBlockForm');
   const preview = document.getElementById('wafSchedulePreview');
   if (!form || !preview) return;
   const ip = form.elements.ip.value.trim() || 'IP này';
-  const start = form.elements.allowedStart.value;
-  const end = form.elements.allowedEnd.value;
+  const start = form.elements.blockStart.value;
+  const end = form.elements.blockEnd.value;
   if (!start || !end) { preview.innerHTML = ''; return; }
   const overnight = end < start;
   const checkedDays = [...form.querySelectorAll('input[name="daysOfWeek"]:checked')].map(el => Number(el.value)).sort();
@@ -5218,8 +5222,8 @@ function updateWafSchedulePreview() {
     : checkedDays.length ? `vào ${checkedDays.map(d => WAF_DAY_LABELS[d]).join(', ')}`
     : '<span style="color:var(--red)">chưa chọn ngày nào — hãy tích ít nhất 1 ngày</span>';
   preview.innerHTML = `
-    <strong>${escHtml(ip)}</strong> sẽ được phép truy cập từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''} (giờ 24h), ${daysText}.
-    Ngoài khung giờ/ngày này, hệ thống sẽ tự động <strong style="color:var(--red)">CHẶN</strong> IP qua fail2ban.
+    <strong>${escHtml(ip)}</strong> sẽ bị <strong style="color:var(--red)">CHẶN</strong> qua fail2ban từ <strong>${start}</strong> đến <strong>${end}</strong>${overnight ? ' của ngày hôm sau' : ''} (giờ 24h), ${daysText}.
+    Ngoài khung giờ/ngày này, IP được truy cập bình thường.
     ${overnight ? '<br><span style="color:var(--fg-dim)">Khung giờ qua đêm (giờ kết thúc nhỏ hơn giờ bắt đầu) — hệ thống tự hiểu là "từ tối hôm trước tới sáng hôm sau". Nếu ý bạn là "tới nửa đêm", giờ kết thúc phải là <strong>00:00</strong>, KHÔNG PHẢI 12:00 (12:00 là giữa trưa).</span>' : ''}`;
 }
 
@@ -5233,8 +5237,8 @@ function openWafScheduledBlockForm(rule) {
 
   // Initialize drag state from the rule being edited (or the 08:00–18:00 default for a new rule).
   if (rule) {
-    const s = Number((rule.allowed_start || '08:00').slice(0, 2));
-    const e = Number((rule.allowed_end || '18:00').slice(0, 2));
+    const s = Number((rule.block_start || '08:00').slice(0, 2));
+    const e = Number((rule.block_end || '18:00').slice(0, 2));
     if (e <= s && !(s === 0 && e === 0)) wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: 24, overnightEndHour: e };
     else wafScheduleDrag = { dragging: false, anchorHour: null, startHour: s, endHour: e === 0 ? 24 : e, overnightEndHour: null };
   } else {
@@ -5260,20 +5264,20 @@ function openWafScheduledBlockForm(rule) {
           <input type="text" name="domain" value="${rule ? escAttr(rule.domain || '') : ''}" placeholder="vd: thuyenvien.fds.vn">
         </div>
         <div class="form-group full">
-          <label>Ngày áp dụng — tích chọn</label>
+          <label>Ngày áp dụng chặn — tích chọn</label>
           <div style="display:flex;gap:6px;margin:6px 0">${dayCheckboxes}</div>
         </div>
         <div class="form-group full">
-          <label>Khung giờ CHO PHÉP truy cập — kéo chuột chọn nhanh theo giờ, hoặc gõ chính xác theo phút bên dưới</label>
+          <label>Khung giờ BỊ CHẶN truy cập — kéo chuột chọn nhanh theo giờ, hoặc gõ chính xác theo phút bên dưới</label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0">${presetButtons}</div>
           <div id="wafScheduleHourGrid" style="display:flex;gap:2px;margin-top:6px;user-select:none">${renderWafScheduleGridHtml()}</div>
           <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:2px">
             <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
           </div>
           <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
-            <input type="text" name="allowedStart" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
+            <input type="text" name="blockStart" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
             <span style="color:var(--fg-dim)">→</span>
-            <input type="text" name="allowedEnd" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
+            <input type="text" name="blockEnd" required pattern="([01]\d|2[0-3]):[0-5]\d" placeholder="00:00" maxlength="5" style="font-family:monospace;width:70px;text-align:center" oninput="onWafScheduleTimeInputEdited()">
             <span style="font-size:11px;color:var(--fg-dim)">Định dạng 24 giờ (00:00–23:59) — gõ trực tiếp nếu cần chính xác tới phút, vd 00:05–00:10. Lưu ý: <strong>00:00 = nửa đêm</strong>, <strong>12:00 = giữa trưa</strong>.</span>
           </div>
         </div>
@@ -5301,8 +5305,8 @@ async function saveWafScheduledBlock(e, id) {
     vmId: Number(fd.get('vmId')),
     ip: fd.get('ip').trim(),
     domain: fd.get('domain').trim(),
-    allowedStart: fd.get('allowedStart'),
-    allowedEnd: fd.get('allowedEnd'),
+    blockStart: fd.get('blockStart'),
+    blockEnd: fd.get('blockEnd'),
     daysOfWeek,
     enabled: fd.get('enabled') === 'on',
   };
