@@ -5291,7 +5291,19 @@ function openWafScheduledBlockForm(rule) {
         <button type="submit" class="btn btn-primary">Lưu</button>
       </div>
     </form>`);
-  syncWafScheduleTimeInputs();
+  // The hour grid is only ever an approximation (each cell is a whole hour) — when editing an
+  // existing rule, the text fields must show the EXACT saved value (e.g. 23:58/00:05), not get
+  // overwritten by the grid's rounded-to-the-hour state. syncWafScheduleTimeInputs() derives from
+  // the grid instead, so it's only used for a brand-new rule (no minute-precision value exists yet
+  // to preserve).
+  if (rule) {
+    const form = document.getElementById('wafScheduledBlockForm');
+    form.elements.blockStart.value = (rule.block_start || '08:00:00').slice(0, 5);
+    form.elements.blockEnd.value = (rule.block_end || '18:00:00').slice(0, 5);
+    updateWafSchedulePreview();
+  } else {
+    syncWafScheduleTimeInputs();
+  }
 }
 
 async function saveWafScheduledBlock(e, id) {
