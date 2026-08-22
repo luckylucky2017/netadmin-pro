@@ -1495,10 +1495,10 @@ function renderAlertRows() {
   }
   const paged = paginateRows(alertRows, alertPagination);
   body.innerHTML = `
-    <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap" data-permission="alerts.write">
-      <label style="display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--fg-muted);cursor:pointer;user-select:none">
-        <input type="checkbox" id="alertSelectAll" onchange="toggleSelectAllAlerts(this.checked)" style="accent-color:var(--accent);cursor:pointer">
-        <span>Chọn tất cả trong trang này (<strong style="color:var(--fg)">${paged.length}</strong>)</span>
+    <div class="alert-list-toolbar" data-permission="alerts.write">
+      <label class="select-all-label">
+        <input type="checkbox" id="alertSelectAll" onchange="toggleSelectAllAlerts(this.checked)">
+        <span>Chọn tất cả trong trang này (<strong>${paged.length}</strong>)</span>
       </label>
       <button type="button" class="btn btn-danger btn-sm" onclick="resolveAllOpenAlerts()" title="Đóng toàn bộ các cảnh báo đang mở hoặc đã ghi nhận trong hệ thống">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
