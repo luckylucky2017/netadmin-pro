@@ -50,6 +50,21 @@
 
 ## Quyết định logic quan trọng (mới nhất trên cùng)
 
+### 2026-08-22 — Bộ nhớ `.ai/` tách 2 lớp: context công khai vs ops nhạy cảm
+Ban đầu định gitignore nguyên cả `.ai/` (không AI nào trên máy khác đọc được
+khi `git pull`). Sau khi phát hiện repo `luckylucky2017/netadmin-pro` là
+**PUBLIC** trên GitHub (`gh repo view` → `isPrivate: false`), đổi hướng: chỉ
+`.ai/LOCAL_OPS.md` (IP prod, user SSH, đường dẫn deploy, cách xác thực) bị
+gitignore; `PROJECT_CONTEXT.md`/`ACTIVE_TASK.md`/`DECISIONS.md`/
+`LOCAL_OPS.md.example` commit bình thường. **Lý do**: mục tiêu là "sang máy
+khác `git pull` là đọc được ngữ cảnh ngay", nhưng không được đánh đổi bằng lộ
+IP/SSH nội bộ lên public. AI trên máy mới thấy `LOCAL_OPS.md` không tồn tại →
+phải hỏi người dùng điền lại (theo checklist trong `.example`), không được tự
+suy đoán hay dùng giá trị cũ từ bộ nhớ hội thoại. **Quy tắc rút ra**: bất cứ
+khi nào thêm thông tin vào `PROJECT_CONTEXT.md`/`ACTIVE_TASK.md`/
+`DECISIONS.md`, kiểm tra trước xem có IP/hostname/username/đường dẫn server/
+credential nào không — nếu có, đưa vào `LOCAL_OPS.md` thay vì file sẽ commit.
+
 ### 2026-08-22 — Toolbar "Đóng tất cả cảnh báo" dùng class riêng, không inline style
 `renderAlertRows()` trong `public/js/app.js` từng build hàng
 "select-all + resolve-all" bằng 1 `<div style="...">` viết tay. Đổi sang class

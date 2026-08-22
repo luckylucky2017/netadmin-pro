@@ -14,7 +14,12 @@
         (chi tiết server ở [`LOCAL_OPS.md`](LOCAL_OPS.md), không commit).
 - [x] Audit bảo mật: xác nhận `.env`, `*.db*`, dữ liệu thật không lọt vào git
       (xem chi tiết ở [DECISIONS.md](DECISIONS.md)).
-- [x] Thiết lập bộ nhớ dùng chung `.ai/` cho Claude Code + Google Antigravity.
+- [x] Thiết lập bộ nhớ dùng chung `.ai/` cho Claude Code + Google Antigravity
+      — `PROJECT_CONTEXT.md`/`ACTIVE_TASK.md`/`DECISIONS.md` (commit được)
+      + `LOCAL_OPS.md` (gitignore, chứa IP/SSH/đường dẫn deploy thật) tách
+      riêng khỏi `LOCAL_OPS.md.example` (template, commit được) — vì repo
+      này **PUBLIC** trên GitHub, không được để lộ IP/SSH nội bộ.
+      - Commit: `bda6eea` — đã push GitHub.
 
 ## Việc chưa làm / có thể làm tiếp
 
@@ -34,6 +39,9 @@
   cài Playwright qua `npx playwright install chromium` (mất ~1-2 phút tải
   ~180MB). Cách verify UI đã dùng: script Playwright thủ công, login bằng
   tài khoản admin, `navigate('<page>')` qua `window` global, screenshot.
+- KHÔNG cần kiểm tra lại visibility của repo GitHub — đã xác nhận
+  `luckylucky2017/netadmin-pro` là **PUBLIC** (2026-08-22, `gh repo view`).
+  Đây là lý do `.ai/LOCAL_OPS.md` tách riêng khỏi 3 file context chính.
 
 ## Ghi chú vận hành khi cần deploy/test tiếp
 
