@@ -70,6 +70,15 @@ router.post('/bulk-resolve', requirePermission('alerts.write'), async (req, res)
   res.json({ message: 'OK', count: alerts.length });
 });
 
+router.post('/resolve-all-open', requirePermission('alerts.write'), async (req, res) => {
+  const alerts = await db.prepare("SELECT id, title FROM alerts WHERE status != 'resolved'").all();
+  if (alerts.length) {
+    await db.prepare("UPDATE alerts SET status='resolved', resolved_at=CURRENT_TIMESTAMP, resolved_notified=1 WHERE status != 'resolved'").run();
+    await logActivity(req.user, 'UPDATE', 'alert', null, 'Tất cả cảnh báo', `Đóng toàn bộ ${alerts.length} cảnh báo đang mở`);
+  }
+  res.json({ message: 'OK', count: alerts.length });
+});
+
 router.post('/:id/ack', requirePermission('alerts.write'), async (req, res) => {
   const alert = await db.prepare('SELECT * FROM alerts WHERE id=?').get(req.params.id);
   if (!alert) return res.status(404).json({ error: 'Not found' });

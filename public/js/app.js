@@ -1495,10 +1495,14 @@ function renderAlertRows() {
   }
   const paged = paginateRows(alertRows, alertPagination);
   body.innerHTML = `
-    <div style="margin-bottom:10px" data-permission="alerts.write">
+    <div style="margin-bottom:10px;display:flex;align-items:center;gap:16px;flex-wrap:wrap" data-permission="alerts.write">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg-muted);cursor:pointer;width:fit-content">
         <input type="checkbox" id="alertSelectAll" onchange="toggleSelectAllAlerts(this.checked)"> Chọn tất cả trong trang này (${paged.length})
       </label>
+      <button class="btn btn-secondary btn-sm" onclick="resolveAllOpenAlerts()" style="color:var(--red);border-color:var(--border)" title="Đóng toàn bộ cảnh báo đang mở hoặc đã ghi nhận">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Đóng tất cả cảnh báo đang mở
+      </button>
     </div>
     <div class="alert-list">${paged.map(alertCard).join('')}</div>
     ${paginationBar(alertPagination, alertRows.length, 'alertPagination', 'renderAlertRows')}`;
@@ -1643,6 +1647,22 @@ async function bulkResolveSelected() {
     selectedAlertIds.clear();
     refreshAlertsData();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+async function resolveAllOpenAlerts() {
+  if (!confirm('Bạn có chắc chắn muốn đóng (xử lý xong) toàn bộ các cảnh báo đang mở không?')) return;
+  try {
+    const r = await api('/alerts/resolve-all-open', 'POST');
+    if (r.count > 0) {
+      toast(`Đã xử lý xong toàn bộ ${r.count} cảnh báo`, 'success');
+    } else {
+      toast('Không có cảnh báo nào đang mở để đóng', 'info');
+    }
+    selectedAlertIds.clear();
+    refreshAlertsData();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 async function updateAlertBadge() {
