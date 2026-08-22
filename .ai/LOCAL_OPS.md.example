@@ -1,0 +1,30 @@
+# LOCAL_OPS.md — MẪU (không chứa thông tin thật)
+
+> File này chỉ là template, AN TOÀN để commit lên git public.
+> Copy thành `.ai/LOCAL_OPS.md` (đã gitignore) rồi điền giá trị thật vào —
+> file thật KHÔNG bao giờ được commit.
+>
+> AI: nếu `.ai/LOCAL_OPS.md` chưa tồn tại và task cần thao tác prod/SSH,
+> hỏi người dùng từng mục dưới đây rồi tạo file thật, không tự đoán giá trị.
+
+## Prod server
+
+- IP / hostname: `<hỏi người dùng>`
+- User SSH: `<hỏi người dùng>`
+- Cách xác thực: `<key path / password / ssh-agent — hỏi người dùng>`
+- Sudo: `<passwordless? cần password?>`
+- Đường dẫn code trên server: `<vd: /opt/netadmin-pro>`
+- User chạy code (owner thư mục): `<vd: netadmin>`
+- Cách restart service: `<vd: sudo systemctl restart netadmin-pro>`
+- Cách kiểm tra service sống: `<vd: systemctl status ...>`
+
+## Local dev
+
+- Port chạy netadmin-pro cục bộ: `<vd: 3000, hoặc port khác nếu bị chiếm>`
+- MySQL local: `<host/port/database — thường localhost:3306/netadmin_pro>`
+- Ghi chú xung đột port/process khác trên máy này: `<nếu có>`
+
+## Khác
+
+- Bất kỳ thông tin nhạy cảm nào khác phát sinh trong quá trình làm việc mà
+  không nên vào git (URL nội bộ, tên máy chủ khác trong hạ tầng, v.v.).
